@@ -83,8 +83,7 @@ func (app *Application) RegisterRoutes(r chi.Router) {
 
 	app.registerAdminRoutes(r)
 	app.registerIAMRoutes(r)
-
-	// S3 routes land in S43-T8 via app.registerS3Routes(r).
+	app.registerS3Routes(r)
 	// S3 routes land in S43-T8 via app.registerS3Routes(r).
 	// Everything else 501s with an UNIMPLEMENTED log line so the next
 	// caller sees what's missing — no Moto-style silent fallback.

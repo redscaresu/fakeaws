@@ -153,10 +153,10 @@ func (app *Application) gatherIAMState() map[string]any {
 	return app.gatherIAMStateReal()
 }
 
-// gatherS3State returns the S3 block. In S43-T4 this is empty —
-// S43-T7/T8 fill it in.
+// gatherS3State returns the S3 block, populated by S43-T8's real
+// implementation in handlers/s3.go.
 func (app *Application) gatherS3State() map[string]any {
-	return map[string]any{}
+	return app.gatherS3StateReal()
 }
 
 // writeJSONStatus is a small helper for the admin handlers; the
