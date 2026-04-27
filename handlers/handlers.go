@@ -13,12 +13,15 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/redscaresu/fakeaws/repository"
 )
 
-// Application is the top-level wiring struct. Holds the chi router and
-// will hold the repository handle (added in S43-T3).
+// Application is the top-level wiring struct. Holds the chi router
+// and the repository handle.
 type Application struct {
 	router *chi.Mux
+	repo   *repository.Repository
 	echo   bool
 	dbPath string
 }
@@ -28,12 +31,16 @@ type Application struct {
 // toggles per-request method+path logging — useful for discovering
 // unimplemented endpoints during provider integration testing.
 //
-// In S43-T1 this returns a router with only the admin/health stubs
-// attached. S43-T3 adds the repository; S43-T4 adds /mock/*; S43-T5/T6
-// add IAM; S43-T7/T8 add S3.
+// In S43-T4 this attaches the admin (/mock/*) routes; S43-T5/T6 add
+// IAM; S43-T7/T8 add S3; later phases add the rest.
 func NewApplication(dbPath string, echo bool) (*Application, error) {
+	repo, err := repository.New(dbPath)
+	if err != nil {
+		return nil, err
+	}
 	app := &Application{
 		router: chi.NewRouter(),
+		repo:   repo,
 		echo:   echo,
 		dbPath: dbPath,
 	}
@@ -49,9 +56,21 @@ func NewApplication(dbPath string, echo bool) (*Application, error) {
 // Router returns the chi router for serving HTTP traffic.
 func (app *Application) Router() http.Handler { return app.router }
 
+// Repository exposes the underlying repository handle. Mostly used by
+// tests and handler-side helpers; everyday code should reach for the
+// typed methods on Application.
+func (app *Application) Repository() *repository.Repository { return app.repo }
+
 // Close releases any resources the Application holds. Safe to call
-// multiple times. In S43-T1 there's nothing to close yet.
-func (app *Application) Close() error { return nil }
+// multiple times.
+func (app *Application) Close() error {
+	if app.repo == nil {
+		return nil
+	}
+	err := app.repo.Close()
+	app.repo = nil
+	return err
+}
 
 // RegisterRoutes attaches every handler to the router. New services
 // add a single call here (e.g., app.registerIAMRoutes(r)) — that's the
@@ -62,7 +81,8 @@ func (app *Application) RegisterRoutes(r chi.Router) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// Admin routes (/mock/*) land in S43-T4 via app.registerAdminRoutes(r).
+	app.registerAdminRoutes(r)
+
 	// IAM routes land in S43-T6 via app.registerIAMRoutes(r).
 	// S3 routes land in S43-T8 via app.registerS3Routes(r).
 	// Everything else 501s with an UNIMPLEMENTED log line so the next
