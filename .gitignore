@@ -1,0 +1,26 @@
+# Build artifacts (root-only — `fakeaws` is also a directory under cmd/,
+# so we anchor the pattern to repo root with a leading slash.)
+/fakeaws
+/cov.out
+/coverage.html
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Local dev
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Secrets — also caught by gitleaks pre-commit hook
+.env
+.env.*
+*.pem
+*.key
+credentials.json

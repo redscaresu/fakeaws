@@ -1,0 +1,34 @@
+# fakeaws gitleaks configuration.
+#
+# Day-1 four-file invariant per concepts.md § "Secret scanning from day one".
+# Inherits gitleaks defaults via [extend], plus a stricter custom AWS-key
+# rule that flags any AKIA*-prefixed 20-char access key — including the
+# canonical AKIAIOSFODNN7EXAMPLE placeholder which gitleaks 8.x allowlists
+# by default. We override that allowlist because a fake AWS server is
+# precisely the repo where copy-pasting a real key by accident is most
+# likely; better one false-positive in a doc than one real-positive in
+# git history.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "fakeaws-aws-access-key-strict"
+description = "fakeaws strict: any AKIA-prefixed 20-char AWS access key, including canonical EXAMPLE placeholders"
+regex = '''(?i)(A3T[A-Z0-9]|AKIA|AGPA|AIDA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'''
+keywords = ["AKIA", "ASIA", "A3T", "AGPA", "AIDA", "ANPA", "ANVA"]
+tags = ["aws", "access-key", "fakeaws-strict"]
+
+[allowlist]
+description = "Documentation and example fixtures may reference canonical placeholder strings"
+paths = [
+  # Terraform example fixtures — placeholder credentials only.
+  '''examples/.*\.tf$''',
+  # Markdown documentation may reference AWS-published canonical
+  # placeholder strings (AKIAIOSFODNN7EXAMPLE etc.) when documenting
+  # the secret-scanning gate, anti-patterns, and synthetic-positive
+  # tests. Real secrets in markdown would be a developer mistake; the
+  # CI/local hook still flags any AKIA* match in .go / .yaml / .toml /
+  # source paths where keys would actually live in production code.
+  '''.*\.md$''',
+]

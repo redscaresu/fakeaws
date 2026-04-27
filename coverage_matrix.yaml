@@ -1,0 +1,35 @@
+# fakeaws coverage_matrix.yaml — sole source of truth for S48-T7's
+# TestFullCoverageAudit. Each entry asserts five invariants:
+#  (a) integration test in handlers/handlers_test.go matches integration_test_func_name
+#  (b) examples/working/<working_dir_name>/ exists OR working_exempt: true with reason
+#  (c) examples/misconfigured/<misconfigured_dir_name>/ exists OR misconfigured_exempt
+#  (d) examples/updates/<updates_dir_name>/ exists OR updates_exempt
+#  (e) for non-null scenario_resource_type, ≥1 aws-*.yaml has the key under resources:
+#      AND the matrix entry's aws_resource_type is named in aws_resource_anchors
+#
+# Per S43-T10 acceptance: this file ships EMPTY at S43-T1 (just this header).
+# Entries land in the SAME PR that ships the bundle (handler + tests + examples
+# + scenario with anchors). See slices-43-48-plan.md S48-T7 for the full schema.
+#
+# Schema:
+# - aws_service: e.g. "iam", "s3", "ec2", "rds", "dynamodb", "eks", "sqs",
+#                     "route53", "secretsmanager"
+# - aws_resource_type: per-API resource id, e.g. "aws_iam_role", "aws_db_instance"
+# - scenario_resource_type: cloud-neutral scenario.schema.json key
+#   (compute|networking|database|kubernetes|iam|registry|redis|storage|pubsub|
+#    dns|cloud_run|secret_manager|dynamodb|messaging) or null for non-generator
+#   resources (e.g., AMI fixtures)
+# - working_dir_name / misconfigured_dir_name / updates_dir_name: per-tree
+#   directory names under examples/{working,misconfigured,updates}/
+#   (default: aws_resource_type without aws_ prefix; can diverge per tree)
+# - working_exempt / misconfigured_exempt / updates_exempt: bool, with
+#   *_exempt_reason: required iff exempt
+# - integration_test_func_name: regex matching ≥1 TestXxx in handlers_test.go
+#   (default: ^Test.*<aws_resource_type-camel-cased>.*)
+#
+# AWS provider version pin: hashicorp/aws ~> 5.70 (concepts.md § Resolved
+# decisions item 14). Bumps require a single PR updating this comment, every
+# example's required_providers block, every prompt template, and the e2e
+# harness's provider config.
+
+entries: []

@@ -1,0 +1,96 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: go vet ./...
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: go build ./...
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: go test ./... -race
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks with custom strict config
+        run: |
+          # Use the same config as the local pre-commit hook so CI and
+          # local runs catch the same things. Custom AWS rule overrides
+          # the gitleaks 8.x default allowlist of canonical placeholder
+          # access keys (concepts.md § "Secret scanning from day one").
+          curl -sSfL -o /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks detect --redact --no-banner --source=. --config .gitleaks.toml
+
+  # regression-seed-audit runs the audit functions shipped by S43-T10
+  # (TestRegressionSeedAuditManifestMatchesHandlers + TestRegressionSeedAuditNoVacuousPasses).
+  # In S43-T1 these are stubs; T10 fills in the real assertions.
+  regression-seed-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: go test ./handlers/ -run "TestRegressionSeedAudit"
+
+  # coverage-audit runs TestFullCoverageAudit shipped by S43-T10.
+  # In S43-T1 it's a stub; T10 fills in the real assertion that walks
+  # coverage_matrix.yaml.
+  coverage-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - run: go test ./internal/audit/ -run TestFullCoverageAudit
+
+  # Aggregate handlers/... line coverage. Emits the metric on every push.
+  # The strict >= 80% threshold is a PHASE-EXIT gate enforced by S48-T7's
+  # TestFullCoverageAudit at end-of-phase, not on every commit (per
+  # concepts.md § "Coverage targets and CI": "at the end of each phase").
+  # Per-push runs are informational — they print the % so trends are
+  # visible in CI logs but never fail the build mid-phase.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Emit aggregate handlers/... coverage (informational)
+        run: |
+          go test -coverprofile=cov.out -covermode=atomic ./handlers/... || true
+          if [ -f cov.out ]; then
+            total=$(go tool cover -func=cov.out | awk '/^total:/{gsub("%",""); print $3}')
+            echo "Aggregate handlers/... coverage: ${total}%"
+          else
+            echo "No coverage profile — handlers package has no testable code yet (S43-T1 stub state)."
+          fi
