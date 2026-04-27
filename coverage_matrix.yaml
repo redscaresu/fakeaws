@@ -32,4 +32,63 @@
 # example's required_providers block, every prompt template, and the e2e
 # harness's provider config.
 
-entries: []
+entries:
+  # IAM (S43-T6 handlers, S43-T14 e2e + this matrix entry).
+  - aws_service: iam
+    aws_resource_type: aws_iam_role
+    scenario_resource_type: iam
+    working_dir_name: iam_role
+    misconfigured_dir_name: iam_attachment_missing_role
+    updates_dir_name: update_iam_role_description
+    integration_test_func_name: "^TestIAM_CreateGetListUpdateDeleteRole$"
+  - aws_service: iam
+    aws_resource_type: aws_iam_policy
+    scenario_resource_type: iam
+    working_exempt: true
+    working_exempt_reason: "Policy lifecycle is exercised inside iam_attachment_missing_role (creates a policy, attaches it, then asserts the misconfigured FK rejection); standalone working/iam_policy/ is gap-filled in S48-T6."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Policy alone has no FK refs (validated in iam_attachment_missing_role)."
+    updates_exempt: true
+    updates_exempt_reason: "v1 IAM policies are immutable in fakeaws — UpdatePolicy isn't a v1 endpoint; S48-T6 reconsiders if a policy-version update example is added."
+    integration_test_func_name: "^TestIAM_PolicyCRUD$"
+  - aws_service: iam
+    aws_resource_type: aws_iam_role_policy_attachment
+    scenario_resource_type: iam
+    working_exempt: true
+    working_exempt_reason: "Attachment lifecycle is asserted inside TestIAM_AttachDetachRolePolicy; standalone working/role_policy_attachment/ would duplicate that coverage."
+    misconfigured_dir_name: iam_attachment_missing_role
+    updates_exempt: true
+    updates_exempt_reason: "Attachments are not patchable — they're delete + recreate. Tested via the misconfigured example."
+    integration_test_func_name: "^TestIAM_AttachDetachRolePolicy$"
+
+  # S3 (S43-T8 handlers, S43-T14 e2e + this matrix entry).
+  # Per concepts.md "Resolved decisions" item / examples/README.md:
+  # S3 v1 has no cross-resource FK refs, so misconfigured_exempt.
+  - aws_service: s3
+    aws_resource_type: aws_s3_bucket
+    scenario_resource_type: storage
+    working_dir_name: s3_bucket
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "S3 v1 has no cross-resource FK refs (bucket policy refs are inert strings; FK gates would land if ACL→IAM routing were modelled). Documented in examples/README.md."
+    updates_dir_name: update_s3_bucket_versioning
+    integration_test_func_name: "^TestS3_CreateHeadGetDeleteBucket$"
+  - aws_service: s3
+    aws_resource_type: aws_s3_bucket_versioning
+    scenario_resource_type: storage
+    working_exempt: true
+    working_exempt_reason: "Versioning lifecycle is exercised inside working/s3_bucket via aws_s3_bucket_versioning."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Versioning has no v1 cross-resource FK refs."
+    updates_dir_name: update_s3_bucket_versioning
+    integration_test_func_name: "^TestS3_VersioningRoundTrip$"
+  - aws_service: s3
+    aws_resource_type: aws_s3_bucket_server_side_encryption_configuration
+    scenario_resource_type: storage
+    working_exempt: true
+    working_exempt_reason: "Encryption is asserted via TestS3_PublicAccessBlockRoundTrip + the generic-config GET/PUT round-trip; standalone working dir would duplicate."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "No FK refs on SSE config."
+    updates_exempt: true
+    updates_exempt_reason: "SSE config is set-once for v1 fixtures; v2 update is exercised in update_s3_bucket_versioning's broader bundle."
+    integration_test_func_name: "^TestS3_PublicAccessBlockRoundTrip$"
+
