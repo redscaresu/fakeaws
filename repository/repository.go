@@ -112,43 +112,55 @@ func openDB(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-// migrate creates the universal bookkeeping tables. Service-specific
-// CREATE TABLE statements land here as each service ticket arrives —
-// IAM tables in S43-T5, S3 in S43-T7, EC2 in S44, etc.
+// universalMigrations are the always-on tables (operations, audit,
+// schema_version). Service-specific tables append to
+// registeredMigrations via init() in their own files (iam.go, s3.go,
+// etc.).
+var universalMigrations = []string{
+	// Per concepts.md "Required surface" item 7: countOrphans must
+	// ignore these tables on destroy (they're audit trails of API
+	// calls, not user resources).
+	`CREATE TABLE IF NOT EXISTS operations (
+		id          TEXT NOT NULL PRIMARY KEY,
+		account_id  TEXT NOT NULL,
+		region      TEXT,
+		service     TEXT NOT NULL,
+		operation   TEXT NOT NULL,
+		status      TEXT NOT NULL,
+		started_at  TEXT NOT NULL,
+		completed_at TEXT,
+		data        TEXT NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS audit (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts          TEXT NOT NULL,
+		account_id  TEXT NOT NULL,
+		region      TEXT,
+		method      TEXT NOT NULL,
+		path        TEXT NOT NULL,
+		status_code INTEGER NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS schema_version (
+		version INTEGER NOT NULL PRIMARY KEY,
+		applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+	)`,
+	`INSERT OR IGNORE INTO schema_version(version) VALUES (1)`,
+}
+
+// registeredMigrations holds service-specific CREATE TABLE statements
+// appended via init() in per-service files (iam.go, s3.go, etc.).
+// Initialized empty; tickets append in their own init().
+var registeredMigrations []string
+
+// migrate runs the universal migrations followed by every registered
+// service migration. Idempotent — every statement uses CREATE TABLE
+// IF NOT EXISTS / INSERT OR IGNORE.
 //
-// schema_version is checked at every call so a Restore after a
-// version bump migrates the snapshot transparently.
+// Schema_version is checked at every call so a Restore after a
+// version bump re-runs migrations on the snapshot transparently.
 func (r *Repository) migrate() error {
-	stmts := []string{
-		// Universal bookkeeping. Per concepts.md "Required surface"
-		// item 7: countOrphans must ignore these tables on destroy
-		// (they're audit trails of API calls, not user resources).
-		`CREATE TABLE IF NOT EXISTS operations (
-			id          TEXT NOT NULL PRIMARY KEY,
-			account_id  TEXT NOT NULL,
-			region      TEXT,
-			service     TEXT NOT NULL,
-			operation   TEXT NOT NULL,
-			status      TEXT NOT NULL,
-			started_at  TEXT NOT NULL,
-			completed_at TEXT,
-			data        TEXT NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS audit (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			ts          TEXT NOT NULL,
-			account_id  TEXT NOT NULL,
-			region      TEXT,
-			method      TEXT NOT NULL,
-			path        TEXT NOT NULL,
-			status_code INTEGER NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS schema_version (
-			version INTEGER NOT NULL PRIMARY KEY,
-			applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-		)`,
-		`INSERT OR IGNORE INTO schema_version(version) VALUES (1)`,
-	}
+	stmts := append([]string(nil), universalMigrations...)
+	stmts = append(stmts, registeredMigrations...)
 	for _, s := range stmts {
 		if _, err := r.db.Exec(s); err != nil {
 			return fmt.Errorf("migrate: %s: %w", oneLine(s), err)
@@ -214,6 +226,45 @@ var resetTables = []string{
 	// Universal bookkeeping always reset last.
 	"operations",
 	"audit",
+}
+
+// prependResetTables inserts service-specific tables in front of the
+// universal bookkeeping. Call from init() in per-service files;
+// children come before parents so even a future Reset that runs FK-ON
+// works without reordering.
+func prependResetTables(tables []string) {
+	resetTables = append(append([]string(nil), tables...), resetTables...)
+}
+
+// mapInsertError translates a SQLite INSERT error into the right
+// domain sentinel. PRIMARY KEY conflicts → ErrConflict; FK violations
+// → ErrNotFound (the referenced parent doesn't exist).
+func mapInsertError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "UNIQUE constraint failed"),
+		strings.Contains(msg, "PRIMARY KEY"):
+		return fmt.Errorf("%w: %s", models.ErrConflict, msg)
+	case strings.Contains(msg, "FOREIGN KEY"):
+		return fmt.Errorf("%w: %s", models.ErrNotFound, msg)
+	}
+	return err
+}
+
+// mapDeleteError translates a SQLite DELETE error. FK violations on
+// delete (RESTRICT clauses) map to ErrInUse, matching real AWS's
+// "resource in use by another resource" reason.
+func mapDeleteError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "FOREIGN KEY") {
+		return fmt.Errorf("%w: %s", models.ErrInUse, err.Error())
+	}
+	return err
 }
 
 // Reset wipes every table in resetTables, removes the snapshot
