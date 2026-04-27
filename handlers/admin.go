@@ -146,10 +146,11 @@ func (app *Application) collectState(service string) map[string]any {
 	}
 }
 
-// gatherIAMState returns the IAM block of /mock/state. In S43-T4 this
-// is empty — S43-T5/T6 fill it in once the IAM tables land.
+// gatherIAMState returns the IAM block of /mock/state. Filled in by
+// S43-T6 (handlers/iam.go::gatherIAMStateReal). Topology_derive_aws
+// (S43-T9) keys off the documented shape.
 func (app *Application) gatherIAMState() map[string]any {
-	return map[string]any{}
+	return app.gatherIAMStateReal()
 }
 
 // gatherS3State returns the S3 block. In S43-T4 this is empty —

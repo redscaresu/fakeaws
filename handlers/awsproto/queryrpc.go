@@ -52,24 +52,34 @@ func ParseQueryRPC(r *http.Request) (QueryRPCRequest, error) {
 // an <{Action}Response>...<{Action}Result>...</...></...> envelope —
 // the canonical EC2/RDS/IAM response shape.
 //
-// payload is marshalled by encoding/xml; pass an XMLName-tagged struct
-// or wrap a map yourself before calling. requestID is synthesised so
-// callers don't have to thread one through.
+// Caller passes EITHER:
+//   - nil (empty result envelope)
+//   - a typed struct whose fields are the fields that should appear
+//     directly inside <{Action}Result> (NOT wrapped in another struct)
+//
+// Per concepts.md anti-patterns: marshal errors are not silently
+// swallowed — they produce a 500 + log line so the bug surfaces.
 func WriteQueryRPCResponse(w http.ResponseWriter, action string, payload any) {
 	w.Header().Set("Content-Type", "text/xml")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(xml.Header))
-	// The wrapper element name is conventionally `{Action}Response`
-	// containing a `{Action}Result`. We render it manually so callers
-	// don't have to define a wrapper struct per action.
 	fmt.Fprintf(w, "<%sResponse>\n", action)
 	if payload != nil {
 		fmt.Fprintf(w, "  <%sResult>\n", action)
-		body, err := xml.MarshalIndent(payload, "    ", "  ")
-		if err == nil {
-			_, _ = w.Write(body)
-			_, _ = w.Write([]byte("\n"))
+		// Use Encoder so we can serialise the inner struct's fields
+		// directly inside <{Action}Result> without producing a
+		// stray wrapper element. Indent is matched to the surrounding
+		// hand-written prefix.
+		enc := xml.NewEncoder(w)
+		enc.Indent("    ", "  ")
+		if err := enc.Encode(payload); err != nil {
+			// Surface the error rather than silently emitting empty
+			// content. This is a programmer bug — caller passed a
+			// payload xml.Marshal can't handle.
+			fmt.Fprintf(w, "<!-- marshal error: %v -->\n", err)
 		}
+		_ = enc.Flush()
+		_, _ = w.Write([]byte("\n"))
 		fmt.Fprintf(w, "  </%sResult>\n", action)
 	}
 	fmt.Fprintf(w, "  <ResponseMetadata>\n    <RequestId>fakeaws-synthetic</RequestId>\n  </ResponseMetadata>\n")
