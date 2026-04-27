@@ -1,0 +1,85 @@
+package awsproto
+
+import (
+	"encoding/xml"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+)
+
+// QueryRPCRequest is the parsed form of a Query-RPC request. Used by
+// EC2, RDS, and IAM. Action selects the operation; Version pins the
+// API year-month-day; Params is everything else.
+type QueryRPCRequest struct {
+	Action  string
+	Version string
+	Params  url.Values
+}
+
+// ParseQueryRPC reads a Query-RPC request body. The format is
+// application/x-www-form-urlencoded with Action=<op>&Version=<api>
+// plus per-action parameters. Returns an error if Action is missing
+// or the body fails to parse.
+//
+// Caller is expected to have validated the Content-Type before
+// calling — this helper is just the body parser.
+func ParseQueryRPC(r *http.Request) (QueryRPCRequest, error) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return QueryRPCRequest{}, fmt.Errorf("read body: %w", err)
+	}
+	values, err := url.ParseQuery(string(body))
+	if err != nil {
+		return QueryRPCRequest{}, fmt.Errorf("parse form: %w", err)
+	}
+	action := values.Get("Action")
+	if action == "" {
+		return QueryRPCRequest{}, fmt.Errorf("missing Action parameter")
+	}
+	version := values.Get("Version")
+	values.Del("Action")
+	values.Del("Version")
+	return QueryRPCRequest{
+		Action:  action,
+		Version: version,
+		Params:  values,
+	}, nil
+}
+
+// WriteQueryRPCResponse marshals the given payload as XML wrapped in
+// an <{Action}Response>...<{Action}Result>...</...></...> envelope —
+// the canonical EC2/RDS/IAM response shape.
+//
+// payload is marshalled by encoding/xml; pass an XMLName-tagged struct
+// or wrap a map yourself before calling. requestID is synthesised so
+// callers don't have to thread one through.
+func WriteQueryRPCResponse(w http.ResponseWriter, action string, payload any) {
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(xml.Header))
+	// The wrapper element name is conventionally `{Action}Response`
+	// containing a `{Action}Result`. We render it manually so callers
+	// don't have to define a wrapper struct per action.
+	fmt.Fprintf(w, "<%sResponse>\n", action)
+	if payload != nil {
+		fmt.Fprintf(w, "  <%sResult>\n", action)
+		body, err := xml.MarshalIndent(payload, "    ", "  ")
+		if err == nil {
+			_, _ = w.Write(body)
+			_, _ = w.Write([]byte("\n"))
+		}
+		fmt.Fprintf(w, "  </%sResult>\n", action)
+	}
+	fmt.Fprintf(w, "  <ResponseMetadata>\n    <RequestId>fakeaws-synthetic</RequestId>\n  </ResponseMetadata>\n")
+	fmt.Fprintf(w, "</%sResponse>\n", action)
+}
+
+// IsQueryRPCContentType returns true when the request looks like a
+// Query-RPC submission. Used by handlers that share a chi route across
+// query-rpc and other shapes.
+func IsQueryRPCContentType(r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	return strings.HasPrefix(ct, "application/x-www-form-urlencoded")
+}
