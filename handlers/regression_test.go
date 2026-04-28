@@ -619,6 +619,75 @@ func TestRegressionTransactionalBatchedChanges(t *testing.T) {
 	}
 }
 
+// TestRegressionStateGatherCollectionsComplete pins Codex pass 7
+// BLOCKING #2: every modeled child collection must surface in
+// /mock/state. Items under DynamoDB tables and messages under SQS
+// queues were previously absent, so update-phase verification could
+// not see mutations to those rows. Now they're listed alongside their
+// parents.
+func TestRegressionStateGatherCollectionsComplete(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+
+	// Seed a DynamoDB table + item.
+	post := func(svc, target, body string) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/"+svc+"/region/"+region,
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-amz-json-1.0")
+		req.Header.Set("X-Amz-Target", target)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("POST %s %s: %v", svc, target, err)
+		}
+		defer resp.Body.Close()
+		readResponseBody(t, resp)
+	}
+	postJSON11 := func(svc, target, body string) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/"+svc+"/region/"+region,
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+		req.Header.Set("X-Amz-Target", target)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("POST %s %s: %v", svc, target, err)
+		}
+		defer resp.Body.Close()
+		readResponseBody(t, resp)
+	}
+
+	postJSON11("dynamodb", "DynamoDB_20120810.CreateTable",
+		`{"TableName":"Users","AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],"KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],"BillingMode":"PAY_PER_REQUEST"}`)
+	postJSON11("dynamodb", "DynamoDB_20120810.PutItem",
+		`{"TableName":"Users","Item":{"id":{"S":"alice"}}}`)
+
+	post("sqs", "AmazonSQS.CreateQueue", `{"QueueName":"jobs"}`)
+	post("sqs", "AmazonSQS.SendMessage",
+		`{"QueueUrl":"http://localhost/sqs/`+region+`/000000000000/jobs","MessageBody":"hello"}`)
+
+	resp, err := http.Get(srv.URL + "/mock/state")
+	if err != nil {
+		t.Fatalf("GET /mock/state: %v", err)
+	}
+	defer resp.Body.Close()
+	stateBytes := readResponseBody(t, resp)
+	state := string(stateBytes)
+
+	if !strings.Contains(state, `"items"`) {
+		t.Errorf("dynamodb.items collection missing from /mock/state: %s", state)
+	}
+	if !strings.Contains(state, `"alice"`) {
+		t.Errorf("dynamodb item not surfaced in /mock/state: %s", state)
+	}
+	if !strings.Contains(state, `"messages"`) {
+		t.Errorf("sqs.messages collection missing from /mock/state: %s", state)
+	}
+	if !strings.Contains(state, `"hello"`) {
+		t.Errorf("sqs message body not surfaced in /mock/state: %s", state)
+	}
+}
+
 // ----- test helpers (regression-suite local) -----
 
 const regressionVersion = "2010-05-08"

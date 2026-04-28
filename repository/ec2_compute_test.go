@@ -43,7 +43,7 @@ func TestInstanceCRUDPlusFK(t *testing.T) {
 		t.Fatalf("CreateInstance: %v", err)
 	}
 
-	got, err := r.GetInstance(testAccount, "i-1")
+	got, err := r.GetInstance(testAccount, testRegion, "i-1")
 	if err != nil {
 		t.Fatalf("GetInstance: %v", err)
 	}
@@ -65,16 +65,16 @@ func TestInstanceSubnetDeleteRESTRICT(t *testing.T) {
 
 	// Subnet delete must be REJECTED while instances exist (PLAN.md
 	// S44 contract — RESTRICT, not CASCADE).
-	err := r.DeleteSubnet(testAccount, subnetID)
+	err := r.DeleteSubnet(testAccount, testRegion, subnetID)
 	if err == nil {
 		t.Error("DeleteSubnet with attached instance: expected error, got nil")
 	}
 
 	// After instance termination + deletion, subnet delete proceeds.
-	if err := r.DeleteInstance(testAccount, "i-1"); err != nil {
+	if err := r.DeleteInstance(testAccount, testRegion, "i-1"); err != nil {
 		t.Fatalf("DeleteInstance: %v", err)
 	}
-	if err := r.DeleteSubnet(testAccount, subnetID); err != nil {
+	if err := r.DeleteSubnet(testAccount, testRegion, subnetID); err != nil {
 		t.Errorf("DeleteSubnet after instance gone: %v", err)
 	}
 }
@@ -88,12 +88,12 @@ func TestInstanceTerminalStateRefusesTransition(t *testing.T) {
 	}
 	r.CreateInstance(testAccount, inst)
 
-	if err := r.SetInstanceState(testAccount, "i-1", "terminated"); err != nil {
+	if err := r.SetInstanceState(testAccount, testRegion, "i-1", "terminated"); err != nil {
 		t.Fatalf("transition to terminated: %v", err)
 	}
 	// From terminated → anything is refused (concepts.md "Standing
 	// patterns" item 9 — terminal-state refusal).
-	if err := r.SetInstanceState(testAccount, "i-1", "running"); !errors.Is(err, models.ErrConflict) {
+	if err := r.SetInstanceState(testAccount, testRegion, "i-1", "running"); !errors.Is(err, models.ErrConflict) {
 		t.Errorf("transition out of terminated: want ErrConflict, got %v", err)
 	}
 }

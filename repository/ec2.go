@@ -234,9 +234,19 @@ func (r *Repository) CreateVPC(account string, v *EC2VPC) error {
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetVPC(account, id string) (*EC2VPC, error) {
+// GetVPC looks up a VPC by id, optionally scoped to a region. Pass
+// region == "" to span every region (used by /mock/state gather and
+// audit-time helpers); pass a concrete region to enforce that the
+// VPC lives in that region (Codex pass 7 BLOCKING #1 — cross-region
+// FK refs must reject with ErrNotFound).
+func (r *Repository) GetVPC(account, region, id string) (*EC2VPC, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM ec2_vpcs WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	var err error
+	if region == "" {
+		err = r.db.QueryRow(`SELECT data FROM ec2_vpcs WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	} else {
+		err = r.db.QueryRow(`SELECT data FROM ec2_vpcs WHERE account_id = ? AND region = ? AND id = ?`, account, region, id).Scan(&data)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -277,7 +287,9 @@ func (r *Repository) ListVPCs(account, region string) ([]*EC2VPC, error) {
 	return out, rows.Err()
 }
 
-func (r *Repository) DeleteVPC(account, id string) error {
+// DeleteVPC removes a VPC, optionally scoped to a region. Empty
+// region acts as account-wide (matches the Get* contract).
+func (r *Repository) DeleteVPC(account, region, id string) error {
 	// Detach any attached internet gateways manually — composite FK
 	// SET NULL would NULL account_id too. Real EC2's contract is
 	// detach-on-vpc-delete (the IGW survives, just unattached).
@@ -287,7 +299,13 @@ func (r *Repository) DeleteVPC(account, id string) error {
 	); err != nil {
 		return fmt.Errorf("detach igws before vpc delete: %w", err)
 	}
-	res, err := r.db.Exec(`DELETE FROM ec2_vpcs WHERE account_id = ? AND id = ?`, account, id)
+	var res sql.Result
+	var err error
+	if region == "" {
+		res, err = r.db.Exec(`DELETE FROM ec2_vpcs WHERE account_id = ? AND id = ?`, account, id)
+	} else {
+		res, err = r.db.Exec(`DELETE FROM ec2_vpcs WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
+	}
 	if err != nil {
 		return mapDeleteError(err)
 	}
@@ -301,7 +319,10 @@ func (r *Repository) DeleteVPC(account, id string) error {
 // ----- Subnet -----
 
 func (r *Repository) CreateSubnet(account string, s *EC2Subnet) error {
-	if _, err := r.GetVPC(account, s.VPCID); err != nil {
+	// Codex pass 7 BLOCKING #1 — parent must be in the SAME region as
+	// the child, not just same account. Cross-region refs reject with
+	// ErrNotFound from GetVPC.
+	if _, err := r.GetVPC(account, s.Region, s.VPCID); err != nil {
 		return err
 	}
 	body, _ := json.Marshal(s)
@@ -312,9 +333,16 @@ func (r *Repository) CreateSubnet(account string, s *EC2Subnet) error {
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetSubnet(account, id string) (*EC2Subnet, error) {
+// GetSubnet looks up a subnet by id, optionally scoped to a region.
+// Empty region behaves like account-wide (Codex pass 7 BLOCKING #1).
+func (r *Repository) GetSubnet(account, region, id string) (*EC2Subnet, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM ec2_subnets WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	var err error
+	if region == "" {
+		err = r.db.QueryRow(`SELECT data FROM ec2_subnets WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	} else {
+		err = r.db.QueryRow(`SELECT data FROM ec2_subnets WHERE account_id = ? AND region = ? AND id = ?`, account, region, id).Scan(&data)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -355,8 +383,14 @@ func (r *Repository) ListSubnets(account, vpcID string) ([]*EC2Subnet, error) {
 	return out, rows.Err()
 }
 
-func (r *Repository) DeleteSubnet(account, id string) error {
-	res, err := r.db.Exec(`DELETE FROM ec2_subnets WHERE account_id = ? AND id = ?`, account, id)
+func (r *Repository) DeleteSubnet(account, region, id string) error {
+	var res sql.Result
+	var err error
+	if region == "" {
+		res, err = r.db.Exec(`DELETE FROM ec2_subnets WHERE account_id = ? AND id = ?`, account, id)
+	} else {
+		res, err = r.db.Exec(`DELETE FROM ec2_subnets WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
+	}
 	if err != nil {
 		return mapDeleteError(err)
 	}
@@ -382,8 +416,14 @@ func (r *Repository) CreateInternetGateway(account string, igw *EC2InternetGatew
 	return mapInsertError(err)
 }
 
-func (r *Repository) AttachInternetGateway(account, igwID, vpcID string) error {
-	if _, err := r.GetVPC(account, vpcID); err != nil {
+// AttachInternetGateway attaches an IGW to a VPC. Both must live in
+// the same region as the request (Codex pass 7 BLOCKING #1).
+func (r *Repository) AttachInternetGateway(account, region, igwID, vpcID string) error {
+	if _, err := r.GetVPC(account, region, vpcID); err != nil {
+		return err
+	}
+	// IGW itself must also be in the requested region.
+	if _, err := r.GetInternetGateway(account, region, igwID); err != nil {
 		return err
 	}
 	res, err := r.db.Exec(
@@ -400,7 +440,10 @@ func (r *Repository) AttachInternetGateway(account, igwID, vpcID string) error {
 	return nil
 }
 
-func (r *Repository) DetachInternetGateway(account, igwID string) error {
+func (r *Repository) DetachInternetGateway(account, region, igwID string) error {
+	if _, err := r.GetInternetGateway(account, region, igwID); err != nil {
+		return err
+	}
 	res, err := r.db.Exec(
 		`UPDATE ec2_internet_gateways SET vpc_id = NULL WHERE account_id = ? AND id = ?`,
 		account, igwID,
@@ -415,13 +458,23 @@ func (r *Repository) DetachInternetGateway(account, igwID string) error {
 	return nil
 }
 
-func (r *Repository) GetInternetGateway(account, id string) (*EC2InternetGateway, error) {
+// GetInternetGateway looks up an IGW by id, optionally scoped to a
+// region. Empty region behaves like account-wide.
+func (r *Repository) GetInternetGateway(account, region, id string) (*EC2InternetGateway, error) {
 	var data string
 	var vpcID sql.NullString
-	err := r.db.QueryRow(
-		`SELECT data, vpc_id FROM ec2_internet_gateways WHERE account_id = ? AND id = ?`,
-		account, id,
-	).Scan(&data, &vpcID)
+	var err error
+	if region == "" {
+		err = r.db.QueryRow(
+			`SELECT data, vpc_id FROM ec2_internet_gateways WHERE account_id = ? AND id = ?`,
+			account, id,
+		).Scan(&data, &vpcID)
+	} else {
+		err = r.db.QueryRow(
+			`SELECT data, vpc_id FROM ec2_internet_gateways WHERE account_id = ? AND region = ? AND id = ?`,
+			account, region, id,
+		).Scan(&data, &vpcID)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -460,7 +513,9 @@ func (r *Repository) ListInternetGateways(account string) ([]*EC2InternetGateway
 	rows.Close()
 	out := make([]*EC2InternetGateway, 0, len(ids))
 	for _, id := range ids {
-		igw, err := r.GetInternetGateway(account, id)
+		// Account-wide list — pass empty region so the lookup spans
+		// every region.
+		igw, err := r.GetInternetGateway(account, "", id)
 		if err != nil {
 			return nil, err
 		}
@@ -469,8 +524,14 @@ func (r *Repository) ListInternetGateways(account string) ([]*EC2InternetGateway
 	return out, nil
 }
 
-func (r *Repository) DeleteInternetGateway(account, id string) error {
-	res, err := r.db.Exec(`DELETE FROM ec2_internet_gateways WHERE account_id = ? AND id = ?`, account, id)
+func (r *Repository) DeleteInternetGateway(account, region, id string) error {
+	var res sql.Result
+	var err error
+	if region == "" {
+		res, err = r.db.Exec(`DELETE FROM ec2_internet_gateways WHERE account_id = ? AND id = ?`, account, id)
+	} else {
+		res, err = r.db.Exec(`DELETE FROM ec2_internet_gateways WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
+	}
 	if err != nil {
 		return mapDeleteError(err)
 	}
@@ -484,7 +545,8 @@ func (r *Repository) DeleteInternetGateway(account, id string) error {
 // ----- RouteTable + RouteTableAssociation + Route -----
 
 func (r *Repository) CreateRouteTable(account string, rt *EC2RouteTable) error {
-	if _, err := r.GetVPC(account, rt.VPCID); err != nil {
+	// Codex pass 7 BLOCKING #1 — parent VPC must be in the same region.
+	if _, err := r.GetVPC(account, rt.Region, rt.VPCID); err != nil {
 		return err
 	}
 	body, _ := json.Marshal(rt)
@@ -495,9 +557,16 @@ func (r *Repository) CreateRouteTable(account string, rt *EC2RouteTable) error {
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetRouteTable(account, id string) (*EC2RouteTable, error) {
+// GetRouteTable looks up a route table by id, optionally scoped to a
+// region.
+func (r *Repository) GetRouteTable(account, region, id string) (*EC2RouteTable, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM ec2_route_tables WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	var err error
+	if region == "" {
+		err = r.db.QueryRow(`SELECT data FROM ec2_route_tables WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	} else {
+		err = r.db.QueryRow(`SELECT data FROM ec2_route_tables WHERE account_id = ? AND region = ? AND id = ?`, account, region, id).Scan(&data)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -511,8 +580,14 @@ func (r *Repository) GetRouteTable(account, id string) (*EC2RouteTable, error) {
 	return &rt, nil
 }
 
-func (r *Repository) DeleteRouteTable(account, id string) error {
-	res, err := r.db.Exec(`DELETE FROM ec2_route_tables WHERE account_id = ? AND id = ?`, account, id)
+func (r *Repository) DeleteRouteTable(account, region, id string) error {
+	var res sql.Result
+	var err error
+	if region == "" {
+		res, err = r.db.Exec(`DELETE FROM ec2_route_tables WHERE account_id = ? AND id = ?`, account, id)
+	} else {
+		res, err = r.db.Exec(`DELETE FROM ec2_route_tables WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
+	}
 	if err != nil {
 		return mapDeleteError(err)
 	}
@@ -523,11 +598,13 @@ func (r *Repository) DeleteRouteTable(account, id string) error {
 	return nil
 }
 
-func (r *Repository) AssociateRouteTable(account string, assoc *EC2RouteTableAssociation) error {
-	if _, err := r.GetRouteTable(account, assoc.RouteTableID); err != nil {
+// AssociateRouteTable links a route table to a subnet. Both must
+// exist in the request's region (Codex pass 7 BLOCKING #1).
+func (r *Repository) AssociateRouteTable(account, region string, assoc *EC2RouteTableAssociation) error {
+	if _, err := r.GetRouteTable(account, region, assoc.RouteTableID); err != nil {
 		return err
 	}
-	if _, err := r.GetSubnet(account, assoc.SubnetID); err != nil {
+	if _, err := r.GetSubnet(account, region, assoc.SubnetID); err != nil {
 		return err
 	}
 	_, err := r.db.Exec(
@@ -552,8 +629,11 @@ func (r *Repository) DisassociateRouteTable(account, associationID string) error
 	return nil
 }
 
-func (r *Repository) CreateRoute(account string, rt *EC2Route) error {
-	if _, err := r.GetRouteTable(account, rt.RouteTableID); err != nil {
+// CreateRoute inserts a route into the parent route table; the
+// route table must live in the request's region (Codex pass 7
+// BLOCKING #1).
+func (r *Repository) CreateRoute(account, region string, rt *EC2Route) error {
+	if _, err := r.GetRouteTable(account, region, rt.RouteTableID); err != nil {
 		return err
 	}
 	_, err := r.db.Exec(
@@ -565,7 +645,15 @@ func (r *Repository) CreateRoute(account string, rt *EC2Route) error {
 	return mapInsertError(err)
 }
 
-func (r *Repository) DeleteRoute(account, routeTableID, destination string) error {
+// DeleteRoute removes a single route from a route table. The route
+// table is required to live in the request's region when region is
+// non-empty (Codex pass 7 BLOCKING #1).
+func (r *Repository) DeleteRoute(account, region, routeTableID, destination string) error {
+	if region != "" {
+		if _, err := r.GetRouteTable(account, region, routeTableID); err != nil {
+			return err
+		}
+	}
 	res, err := r.db.Exec(
 		`DELETE FROM ec2_routes WHERE account_id = ? AND route_table_id = ? AND destination_cidr_block = ?`,
 		account, routeTableID, destination,
@@ -583,7 +671,8 @@ func (r *Repository) DeleteRoute(account, routeTableID, destination string) erro
 // ----- SecurityGroup -----
 
 func (r *Repository) CreateSecurityGroup(account string, sg *EC2SecurityGroup) error {
-	if _, err := r.GetVPC(account, sg.VPCID); err != nil {
+	// Codex pass 7 BLOCKING #1 — parent VPC must be in the same region.
+	if _, err := r.GetVPC(account, sg.Region, sg.VPCID); err != nil {
 		return err
 	}
 	body, _ := json.Marshal(sg)
@@ -594,9 +683,16 @@ func (r *Repository) CreateSecurityGroup(account string, sg *EC2SecurityGroup) e
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetSecurityGroup(account, id string) (*EC2SecurityGroup, error) {
+// GetSecurityGroup looks up an SG by id, optionally scoped to a
+// region. Empty region behaves like account-wide.
+func (r *Repository) GetSecurityGroup(account, region, id string) (*EC2SecurityGroup, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM ec2_security_groups WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	var err error
+	if region == "" {
+		err = r.db.QueryRow(`SELECT data FROM ec2_security_groups WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	} else {
+		err = r.db.QueryRow(`SELECT data FROM ec2_security_groups WHERE account_id = ? AND region = ? AND id = ?`, account, region, id).Scan(&data)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -642,11 +738,21 @@ func (r *Repository) ListSecurityGroups(account, region string) ([]*EC2SecurityG
 	return out, rows.Err()
 }
 
-func (r *Repository) GetSecurityGroupRules(account, id string) (ingress, egress []byte, err error) {
-	row := r.db.QueryRow(
-		`SELECT ingress, egress FROM ec2_security_groups WHERE account_id = ? AND id = ?`,
-		account, id,
-	)
+// GetSecurityGroupRules reads the ingress/egress JSON for an SG,
+// optionally scoped to a region (Codex pass 7 BLOCKING #1).
+func (r *Repository) GetSecurityGroupRules(account, region, id string) (ingress, egress []byte, err error) {
+	var row *sql.Row
+	if region == "" {
+		row = r.db.QueryRow(
+			`SELECT ingress, egress FROM ec2_security_groups WHERE account_id = ? AND id = ?`,
+			account, id,
+		)
+	} else {
+		row = r.db.QueryRow(
+			`SELECT ingress, egress FROM ec2_security_groups WHERE account_id = ? AND region = ? AND id = ?`,
+			account, region, id,
+		)
+	}
 	var ingS, egS string
 	if err := row.Scan(&ingS, &egS); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -657,8 +763,8 @@ func (r *Repository) GetSecurityGroupRules(account, id string) (ingress, egress 
 	return []byte(ingS), []byte(egS), nil
 }
 
-func (r *Repository) UpdateSecurityGroupRules(account, id, direction string, rulesJSON []byte) error {
-	if _, err := r.GetSecurityGroup(account, id); err != nil {
+func (r *Repository) UpdateSecurityGroupRules(account, region, id, direction string, rulesJSON []byte) error {
+	if _, err := r.GetSecurityGroup(account, region, id); err != nil {
 		return err
 	}
 	col := "ingress"
@@ -672,8 +778,14 @@ func (r *Repository) UpdateSecurityGroupRules(account, id, direction string, rul
 	return err
 }
 
-func (r *Repository) DeleteSecurityGroup(account, id string) error {
-	res, err := r.db.Exec(`DELETE FROM ec2_security_groups WHERE account_id = ? AND id = ?`, account, id)
+func (r *Repository) DeleteSecurityGroup(account, region, id string) error {
+	var res sql.Result
+	var err error
+	if region == "" {
+		res, err = r.db.Exec(`DELETE FROM ec2_security_groups WHERE account_id = ? AND id = ?`, account, id)
+	} else {
+		res, err = r.db.Exec(`DELETE FROM ec2_security_groups WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
+	}
 	if err != nil {
 		return mapDeleteError(err)
 	}
@@ -695,9 +807,16 @@ func (r *Repository) CreateEIP(account string, eip *EC2EIP) error {
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetEIP(account, allocationID string) (*EC2EIP, error) {
+// GetEIP looks up an EIP by allocation id, optionally scoped to a
+// region (Codex pass 7 BLOCKING #1).
+func (r *Repository) GetEIP(account, region, allocationID string) (*EC2EIP, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM ec2_eips WHERE account_id = ? AND allocation_id = ?`, account, allocationID).Scan(&data)
+	var err error
+	if region == "" {
+		err = r.db.QueryRow(`SELECT data FROM ec2_eips WHERE account_id = ? AND allocation_id = ?`, account, allocationID).Scan(&data)
+	} else {
+		err = r.db.QueryRow(`SELECT data FROM ec2_eips WHERE account_id = ? AND region = ? AND allocation_id = ?`, account, region, allocationID).Scan(&data)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -711,8 +830,14 @@ func (r *Repository) GetEIP(account, allocationID string) (*EC2EIP, error) {
 	return &eip, nil
 }
 
-func (r *Repository) DeleteEIP(account, allocationID string) error {
-	res, err := r.db.Exec(`DELETE FROM ec2_eips WHERE account_id = ? AND allocation_id = ?`, account, allocationID)
+func (r *Repository) DeleteEIP(account, region, allocationID string) error {
+	var res sql.Result
+	var err error
+	if region == "" {
+		res, err = r.db.Exec(`DELETE FROM ec2_eips WHERE account_id = ? AND allocation_id = ?`, account, allocationID)
+	} else {
+		res, err = r.db.Exec(`DELETE FROM ec2_eips WHERE account_id = ? AND region = ? AND allocation_id = ?`, account, region, allocationID)
+	}
 	if err != nil {
 		return err
 	}

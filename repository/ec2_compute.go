@@ -117,8 +117,9 @@ type EC2AMI struct {
 func (r *Repository) CreateInstance(account string, inst *EC2Instance) error {
 	// Validate parent subnet (FK enforces, but the explicit lookup
 	// produces a clean ErrNotFound rather than a SQLite constraint
-	// violation that maps awkwardly).
-	if _, err := r.GetSubnet(account, inst.SubnetID); err != nil {
+	// violation that maps awkwardly). Codex pass 7 BLOCKING #1 — parent
+	// must be in the same region.
+	if _, err := r.GetSubnet(account, inst.Region, inst.SubnetID); err != nil {
 		return err
 	}
 	if inst.IAMInstanceProfileName != "" {
@@ -127,7 +128,7 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance) error {
 		}
 	}
 	for _, sgID := range inst.VPCSecurityGroupIDs {
-		if _, err := r.GetSecurityGroup(account, sgID); err != nil {
+		if _, err := r.GetSecurityGroup(account, inst.Region, sgID); err != nil {
 			return err
 		}
 	}
@@ -148,9 +149,16 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance) error {
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetInstance(account, id string) (*EC2Instance, error) {
+// GetInstance looks up an instance by id, optionally scoped to a
+// region (Codex pass 7 BLOCKING #1).
+func (r *Repository) GetInstance(account, region, id string) (*EC2Instance, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM ec2_instances WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	var err error
+	if region == "" {
+		err = r.db.QueryRow(`SELECT data FROM ec2_instances WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	} else {
+		err = r.db.QueryRow(`SELECT data FROM ec2_instances WHERE account_id = ? AND region = ? AND id = ?`, account, region, id).Scan(&data)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -196,8 +204,8 @@ func (r *Repository) ListInstances(account, region string) ([]*EC2Instance, erro
 // pending → running → shutting-down → terminated. ModifyInstanceAttribute
 // is a no-op (concepts.md "Standing patterns" item 9 — terminal-state
 // refusal is enforced here).
-func (r *Repository) SetInstanceState(account, id, state string) error {
-	current, err := r.GetInstance(account, id)
+func (r *Repository) SetInstanceState(account, region, id, state string) error {
+	current, err := r.GetInstance(account, region, id)
 	if err != nil {
 		return err
 	}
@@ -213,8 +221,14 @@ func (r *Repository) SetInstanceState(account, id, state string) error {
 	return err
 }
 
-func (r *Repository) DeleteInstance(account, id string) error {
-	res, err := r.db.Exec(`DELETE FROM ec2_instances WHERE account_id = ? AND id = ?`, account, id)
+func (r *Repository) DeleteInstance(account, region, id string) error {
+	var res sql.Result
+	var err error
+	if region == "" {
+		res, err = r.db.Exec(`DELETE FROM ec2_instances WHERE account_id = ? AND id = ?`, account, id)
+	} else {
+		res, err = r.db.Exec(`DELETE FROM ec2_instances WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
+	}
 	if err != nil {
 		return mapDeleteError(err)
 	}

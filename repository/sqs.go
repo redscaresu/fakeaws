@@ -203,6 +203,40 @@ func (r *Repository) DeleteSQSQueue(account, region, name string) error {
 	return nil
 }
 
+// ListSQSMessages enumerates every persisted message for the account,
+// optionally scoped to a region. Used by /mock/state's sqs gatherer
+// (Codex pass 7 BLOCKING #2 fix — the messages collection was
+// previously absent from /mock/state, leaving message mutations
+// invisible to update-phase verification).
+func (r *Repository) ListSQSMessages(account, region string) ([]*SQSMessage, error) {
+	var rows *sql.Rows
+	var err error
+	if region == "" {
+		rows, err = r.db.Query(
+			`SELECT region, queue_name, message_id, body, receipt_handle, visible_after, receive_count, created_at FROM sqs_messages WHERE account_id = ? ORDER BY region, queue_name, message_id`,
+			account,
+		)
+	} else {
+		rows, err = r.db.Query(
+			`SELECT region, queue_name, message_id, body, receipt_handle, visible_after, receive_count, created_at FROM sqs_messages WHERE account_id = ? AND region = ? ORDER BY queue_name, message_id`,
+			account, region,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*SQSMessage
+	for rows.Next() {
+		var m SQSMessage
+		if err := rows.Scan(&m.Region, &m.QueueName, &m.MessageID, &m.Body, &m.ReceiptHandle, &m.VisibleAfter, &m.ReceiveCount, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &m)
+	}
+	return out, rows.Err()
+}
+
 // CountSQSTombstonedMessages returns the number of messages currently
 // rebadged under the tombstone queue. Used by regression tests + the
 // /mock/state gatherer.

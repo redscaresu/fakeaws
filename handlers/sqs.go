@@ -268,6 +268,7 @@ func (app *Application) gatherSQSStateReal() map[string]any {
 	const account = awsproto.FakeAccountID
 	out := map[string]any{
 		"queues":              []any{},
+		"messages":            []any{},
 		"tombstoned_messages": 0,
 	}
 	queues, _ := app.repo.ListSQSQueues(account, "")
@@ -279,15 +280,29 @@ func (app *Application) gatherSQSStateReal() map[string]any {
 		})
 	}
 	out["queues"] = qOut
-	// Tombstoned-message count surfaces here for regression-test 12
-	// to assert against (Codex pass 1 BLOCKING #2). We probe the
-	// canonical region set; in practice scenarios use us-east-1.
+
+	// Codex pass 7 BLOCKING #2: messages collection now surfaces in
+	// /mock/state so update-phase verification can see send/receive
+	// mutations. Tombstoned messages are filtered out of this list
+	// (they get a separate counter below) but still backed in SQLite.
+	msgs, _ := app.repo.ListSQSMessages(account, "")
+	mOut := make([]map[string]any, 0, len(msgs))
 	totalTombstoned := 0
-	for _, region := range []string{"us-east-1", "us-east-2", "us-west-1", "us-west-2",
-		"eu-west-1", "eu-west-2", "eu-central-1", "ap-southeast-1"} {
-		n, _ := app.repo.CountSQSTombstonedMessages(account, region)
-		totalTombstoned += n
+	for _, m := range msgs {
+		if m.QueueName == repository.SQSDeletedQueueTombstone {
+			totalTombstoned++
+			continue
+		}
+		mOut = append(mOut, map[string]any{
+			"queue_name":     m.QueueName,
+			"message_id":     m.MessageID,
+			"body":           m.Body,
+			"receive_count":  m.ReceiveCount,
+			"visible_after":  m.VisibleAfter,
+			"region":         m.Region,
+		})
 	}
+	out["messages"] = mOut
 	out["tombstoned_messages"] = totalTombstoned
 	return out
 }

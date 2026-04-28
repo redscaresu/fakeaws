@@ -141,7 +141,9 @@ func (r *Repository) CreateEKSCluster(account string, c *EKSCluster) error {
 	}
 	var clusterVPC string
 	for _, sid := range c.SubnetIDs {
-		s, err := r.GetSubnet(account, sid)
+		// Codex pass 7 BLOCKING #1 — subnet must be in the cluster's
+		// region, not just same account.
+		s, err := r.GetSubnet(account, c.Region, sid)
 		if err != nil {
 			return err
 		}
@@ -152,9 +154,10 @@ func (r *Repository) CreateEKSCluster(account string, c *EKSCluster) error {
 				sid, s.VPCID, clusterVPC, models.ErrConflict)
 		}
 	}
-	// Each SG (if specified) must exist AND belong to the cluster VPC.
+	// Each SG (if specified) must exist in the cluster's region AND
+	// belong to the cluster VPC.
 	for _, sgid := range c.SecurityGroupIDs {
-		sg, err := r.GetSecurityGroup(account, sgid)
+		sg, err := r.GetSecurityGroup(account, c.Region, sgid)
 		if err != nil {
 			return err
 		}

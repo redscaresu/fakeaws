@@ -388,20 +388,37 @@ func (app *Application) ddbScanOrQuery(w http.ResponseWriter, account, region st
 }
 
 // gatherDynamoDBStateReal emits the dynamodb block of /mock/state.
+//
+// Codex pass 7 BLOCKING #2: items collection added — the table block
+// alone left mutations on persisted items invisible to /mock/state,
+// breaking the "every modeled collection populated" contract.
 func (app *Application) gatherDynamoDBStateReal() map[string]any {
 	const account = awsproto.FakeAccountID
 	out := map[string]any{
 		"tables": []any{},
+		"items":  []any{},
 	}
 	tabs, _ := app.repo.ListDynamoDBTables(account, "")
 	tOut := make([]map[string]any, 0, len(tabs))
+	iOut := make([]map[string]any, 0)
 	for _, t := range tabs {
 		tOut = append(tOut, map[string]any{
 			"name": t.Name, "hash_key": t.HashKey, "range_key": t.RangeKey,
 			"billing_mode": t.BillingMode, "status": t.Status,
 			"region": t.Region, "arn": t.ARN,
 		})
+		items, _ := app.repo.ScanDynamoDBTable(account, t.Region, t.Name)
+		for _, it := range items {
+			iOut = append(iOut, map[string]any{
+				"table_name":  t.Name,
+				"region":      t.Region,
+				"hash_value":  it.HashValue,
+				"range_value": it.RangeValue,
+				"item":        json.RawMessage(it.Item),
+			})
+		}
 	}
 	out["tables"] = tOut
+	out["items"] = iOut
 	return out
 }

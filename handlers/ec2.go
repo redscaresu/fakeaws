@@ -47,7 +47,7 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "DescribeVpcs":
 		app.ec2DescribeVpcs(w, account, region, req)
 	case "DeleteVpc":
-		app.ec2DeleteVpc(w, account, req)
+		app.ec2DeleteVpc(w, account, region, req)
 
 	// ----- Subnet -----
 	case "CreateSubnet":
@@ -55,7 +55,7 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "DescribeSubnets":
 		app.ec2DescribeSubnets(w, account, region, req)
 	case "DeleteSubnet":
-		app.ec2DeleteSubnet(w, account, req)
+		app.ec2DeleteSubnet(w, account, region, req)
 
 	// ----- InternetGateway -----
 	case "CreateInternetGateway":
@@ -63,25 +63,25 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "DescribeInternetGateways":
 		app.ec2DescribeInternetGateways(w, account, req)
 	case "AttachInternetGateway":
-		app.ec2AttachInternetGateway(w, account, req)
+		app.ec2AttachInternetGateway(w, account, region, req)
 	case "DetachInternetGateway":
-		app.ec2DetachInternetGateway(w, account, req)
+		app.ec2DetachInternetGateway(w, account, region, req)
 	case "DeleteInternetGateway":
-		app.ec2DeleteInternetGateway(w, account, req)
+		app.ec2DeleteInternetGateway(w, account, region, req)
 
 	// ----- RouteTable + Route -----
 	case "CreateRouteTable":
 		app.ec2CreateRouteTable(w, account, region, req)
 	case "DeleteRouteTable":
-		app.ec2DeleteRouteTable(w, account, req)
+		app.ec2DeleteRouteTable(w, account, region, req)
 	case "AssociateRouteTable":
-		app.ec2AssociateRouteTable(w, account, req)
+		app.ec2AssociateRouteTable(w, account, region, req)
 	case "DisassociateRouteTable":
 		app.ec2DisassociateRouteTable(w, account, req)
 	case "CreateRoute":
-		app.ec2CreateRoute(w, account, req)
+		app.ec2CreateRoute(w, account, region, req)
 	case "DeleteRoute":
-		app.ec2DeleteRoute(w, account, req)
+		app.ec2DeleteRoute(w, account, region, req)
 
 	// ----- EIP -----
 	case "AllocateAddress":
@@ -89,17 +89,17 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "DescribeAddresses":
 		app.ec2DescribeAddresses(w, account, region, req)
 	case "ReleaseAddress":
-		app.ec2ReleaseAddress(w, account, req)
+		app.ec2ReleaseAddress(w, account, region, req)
 
 	// ----- Instance -----
 	case "RunInstances":
 		app.ec2RunInstances(w, account, region, req)
 	case "DescribeInstances":
-		app.ec2DescribeInstances(w, account, req)
+		app.ec2DescribeInstances(w, account, region, req)
 	case "ModifyInstanceAttribute":
-		app.ec2ModifyInstanceAttribute(w, account, req)
+		app.ec2ModifyInstanceAttribute(w, account, region, req)
 	case "TerminateInstances":
-		app.ec2TerminateInstances(w, account, req)
+		app.ec2TerminateInstances(w, account, region, req)
 
 	// ----- KeyPair -----
 	case "ImportKeyPair":
@@ -117,17 +117,17 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "CreateSecurityGroup":
 		app.ec2CreateSecurityGroup(w, account, region, req)
 	case "DescribeSecurityGroups":
-		app.ec2DescribeSecurityGroups(w, account, req)
+		app.ec2DescribeSecurityGroups(w, account, region, req)
 	case "DeleteSecurityGroup":
-		app.ec2DeleteSecurityGroup(w, account, req)
+		app.ec2DeleteSecurityGroup(w, account, region, req)
 	case "AuthorizeSecurityGroupIngress":
-		app.ec2AuthorizeSecurityGroupRules(w, account, "ingress", req)
+		app.ec2AuthorizeSecurityGroupRules(w, account, region, "ingress", req)
 	case "RevokeSecurityGroupIngress":
-		app.ec2RevokeSecurityGroupRules(w, account, "ingress", req)
+		app.ec2RevokeSecurityGroupRules(w, account, region, "ingress", req)
 	case "AuthorizeSecurityGroupEgress":
-		app.ec2AuthorizeSecurityGroupRules(w, account, "egress", req)
+		app.ec2AuthorizeSecurityGroupRules(w, account, region, "egress", req)
 	case "RevokeSecurityGroupEgress":
-		app.ec2RevokeSecurityGroupRules(w, account, "egress", req)
+		app.ec2RevokeSecurityGroupRules(w, account, region, "egress", req)
 
 	// Any other Action hits the default arm and surfaces as 404 with
 	// a log line — per concepts.md "Anti-patterns explicitly forbidden",
@@ -185,8 +185,8 @@ func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region s
 	awsproto.WriteQueryRPCResponse(w, "DescribeVpcs", &out)
 }
 
-func (app *Application) ec2DeleteVpc(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteVPC(account, req.Params.Get("VpcId")); err != nil {
+func (app *Application) ec2DeleteVpc(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteVPC(account, region, req.Params.Get("VpcId")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -258,8 +258,8 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 	awsproto.WriteQueryRPCResponse(w, "DescribeSubnets", &out)
 }
 
-func (app *Application) ec2DeleteSubnet(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteSubnet(account, req.Params.Get("SubnetId")); err != nil {
+func (app *Application) ec2DeleteSubnet(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteSubnet(account, region, req.Params.Get("SubnetId")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -358,7 +358,7 @@ func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, accou
 	awsproto.WriteQueryRPCResponse(w, "DescribeInternetGateways", &out)
 }
 
-func (app *Application) ec2AttachInternetGateway(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) ec2AttachInternetGateway(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	igwID := req.Params.Get("InternetGatewayId")
 	vpcID := req.Params.Get("VpcId")
 	if igwID == "" || vpcID == "" {
@@ -366,23 +366,23 @@ func (app *Application) ec2AttachInternetGateway(w http.ResponseWriter, account 
 			fmt.Errorf("InternetGatewayId and VpcId required: %w", models.ErrConflict))
 		return
 	}
-	if err := app.repo.AttachInternetGateway(account, igwID, vpcID); err != nil {
+	if err := app.repo.AttachInternetGateway(account, region, igwID, vpcID); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "AttachInternetGateway", nil)
 }
 
-func (app *Application) ec2DetachInternetGateway(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DetachInternetGateway(account, req.Params.Get("InternetGatewayId")); err != nil {
+func (app *Application) ec2DetachInternetGateway(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DetachInternetGateway(account, region, req.Params.Get("InternetGatewayId")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DetachInternetGateway", nil)
 }
 
-func (app *Application) ec2DeleteInternetGateway(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteInternetGateway(account, req.Params.Get("InternetGatewayId")); err != nil {
+func (app *Application) ec2DeleteInternetGateway(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteInternetGateway(account, region, req.Params.Get("InternetGatewayId")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -429,15 +429,15 @@ func (app *Application) ec2CreateRouteTable(w http.ResponseWriter, account, regi
 		&ec2CreateRouteTableResult{RouteTable: ec2RouteTableXML{RouteTableId: rt.ID, VpcId: rt.VPCID}})
 }
 
-func (app *Application) ec2DeleteRouteTable(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteRouteTable(account, req.Params.Get("RouteTableId")); err != nil {
+func (app *Application) ec2DeleteRouteTable(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteRouteTable(account, region, req.Params.Get("RouteTableId")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteRouteTable", nil)
 }
 
-func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	rtID := req.Params.Get("RouteTableId")
 	subnetID := req.Params.Get("SubnetId")
 	if rtID == "" || subnetID == "" {
@@ -448,7 +448,7 @@ func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account st
 	assoc := &repository.EC2RouteTableAssociation{
 		ID: "rtbassoc-" + ec2RandID(), RouteTableID: rtID, SubnetID: subnetID,
 	}
-	if err := app.repo.AssociateRouteTable(account, assoc); err != nil {
+	if err := app.repo.AssociateRouteTable(account, region, assoc); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -464,7 +464,7 @@ func (app *Application) ec2DisassociateRouteTable(w http.ResponseWriter, account
 	awsproto.WriteQueryRPCResponse(w, "DisassociateRouteTable", nil)
 }
 
-func (app *Application) ec2CreateRoute(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) ec2CreateRoute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	rt := &repository.EC2Route{
 		RouteTableID:         req.Params.Get("RouteTableId"),
 		DestinationCidrBlock: req.Params.Get("DestinationCidrBlock"),
@@ -478,15 +478,15 @@ func (app *Application) ec2CreateRoute(w http.ResponseWriter, account string, re
 			fmt.Errorf("RouteTableId and DestinationCidrBlock required: %w", models.ErrConflict))
 		return
 	}
-	if err := app.repo.CreateRoute(account, rt); err != nil {
+	if err := app.repo.CreateRoute(account, region, rt); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "CreateRoute", &ec2CreateRouteResult{Return: true})
 }
 
-func (app *Application) ec2DeleteRoute(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteRoute(account,
+func (app *Application) ec2DeleteRoute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteRoute(account, region,
 		req.Params.Get("RouteTableId"), req.Params.Get("DestinationCidrBlock")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
@@ -567,7 +567,7 @@ func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, reg
 		return
 	}
 	for id := range wanted {
-		eip, err := app.repo.GetEIP(account, id)
+		eip, err := app.repo.GetEIP(account, region, id)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
@@ -579,8 +579,8 @@ func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, reg
 	awsproto.WriteQueryRPCResponse(w, "DescribeAddresses", &out)
 }
 
-func (app *Application) ec2ReleaseAddress(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteEIP(account, req.Params.Get("AllocationId")); err != nil {
+func (app *Application) ec2ReleaseAddress(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteEIP(account, region, req.Params.Get("AllocationId")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -734,7 +734,7 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 		&ec2CreateSecurityGroupResult{GroupId: sg.ID})
 }
 
-func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	// GroupId.<n> filter — most common from terraform-provider-aws.
 	wanted := []string{}
 	for k, vs := range req.Params {
@@ -749,12 +749,12 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 	}
 	out := ec2DescribeSecurityGroupsResult{SecurityGroupSet: make([]ec2SecurityGroupXML, 0, len(wanted))}
 	for _, id := range wanted {
-		sg, err := app.repo.GetSecurityGroup(account, id)
+		sg, err := app.repo.GetSecurityGroup(account, region, id)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
 		}
-		ing, eg, err := app.repo.GetSecurityGroupRules(account, id)
+		ing, eg, err := app.repo.GetSecurityGroupRules(account, region, id)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
@@ -768,7 +768,7 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 	awsproto.WriteQueryRPCResponse(w, "DescribeSecurityGroups", &out)
 }
 
-func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	id := req.Params.Get("GroupId")
 	if id == "" {
 		// AWS also accepts GroupName for non-VPC SGs; v1 supports GroupId only.
@@ -776,7 +776,7 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account st
 			fmt.Errorf("GroupId required: %w", models.ErrConflict))
 		return
 	}
-	if err := app.repo.DeleteSecurityGroup(account, id); err != nil {
+	if err := app.repo.DeleteSecurityGroup(account, region, id); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -787,7 +787,7 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account st
 // SG's existing direction column. Authorize is additive at the AWS
 // contract; we union with the existing rules and dedupe by
 // (proto, from, to, range-set).
-func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, account, direction string, req awsproto.QueryRPCRequest) {
+func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
 	sgID := req.Params.Get("GroupId")
 	if sgID == "" {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
@@ -800,14 +800,14 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 			fmt.Errorf("at least one IpPermissions.<n>.* required: %w", models.ErrConflict))
 		return
 	}
-	existing, err := loadSGRules(app, account, sgID, direction)
+	existing, err := loadSGRules(app, account, region, sgID, direction)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
 	merged := mergeIpPermissions(existing, add)
 	body, _ := json.Marshal(merged)
-	if err := app.repo.UpdateSecurityGroupRules(account, sgID, direction, body); err != nil {
+	if err := app.repo.UpdateSecurityGroupRules(account, region, sgID, direction, body); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -818,7 +818,7 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 	awsproto.WriteQueryRPCResponse(w, action, nil)
 }
 
-func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, account, direction string, req awsproto.QueryRPCRequest) {
+func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
 	sgID := req.Params.Get("GroupId")
 	if sgID == "" {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
@@ -826,14 +826,14 @@ func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, accou
 		return
 	}
 	rm := parseIpPermissions(req)
-	existing, err := loadSGRules(app, account, sgID, direction)
+	existing, err := loadSGRules(app, account, region, sgID, direction)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
 	remaining := subtractIpPermissions(existing, rm)
 	body, _ := json.Marshal(remaining)
-	if err := app.repo.UpdateSecurityGroupRules(account, sgID, direction, body); err != nil {
+	if err := app.repo.UpdateSecurityGroupRules(account, region, sgID, direction, body); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -844,8 +844,8 @@ func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, accou
 	awsproto.WriteQueryRPCResponse(w, action, nil)
 }
 
-func loadSGRules(app *Application, account, id, direction string) ([]ec2IpPermission, error) {
-	ing, eg, err := app.repo.GetSecurityGroupRules(account, id)
+func loadSGRules(app *Application, account, region, id, direction string) ([]ec2IpPermission, error) {
+	ing, eg, err := app.repo.GetSecurityGroupRules(account, region, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1038,14 +1038,14 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	// Subnet/VPC pairing — if SecurityGroupId.<n> is given, the SGs'
 	// VPC must match the subnet's VPC (S44-T8 regression pattern; the
 	// load-bearing fakegcp pass-27 finding ported to AWS).
-	subnet, err := app.repo.GetSubnet(account, subnetID)
+	subnet, err := app.repo.GetSubnet(account, region, subnetID)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
 	sgIDs := parseSecurityGroupIDs(req)
 	for _, sgID := range sgIDs {
-		sg, err := app.repo.GetSecurityGroup(account, sgID)
+		sg, err := app.repo.GetSecurityGroup(account, region, sgID)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
@@ -1079,12 +1079,12 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	})
 }
 
-func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	wanted := parseInstanceIDs(req)
 	var instances []*repository.EC2Instance
 	if len(wanted) > 0 {
 		for _, id := range wanted {
-			inst, err := app.repo.GetInstance(account, id)
+			inst, err := app.repo.GetInstance(account, region, id)
 			if err != nil {
 				awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 				return
@@ -1092,6 +1092,9 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account stri
 			instances = append(instances, inst)
 		}
 	} else {
+		// Unfiltered describe: keep account-wide behavior to match the
+		// existing wire contract — terraform-provider-aws's import path
+		// doesn't expect region scoping at this endpoint.
 		var err error
 		instances, err = app.repo.ListInstances(account, "")
 		if err != nil {
@@ -1117,14 +1120,14 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account stri
 // `disable_api_termination` and SG membership; the latter is the
 // only thing we round-trip. State changes go through the dedicated
 // state-machine handlers (Start / Stop / Terminate).
-func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	id := req.Params.Get("InstanceId")
 	if id == "" {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
 			fmt.Errorf("InstanceId required: %w", models.ErrConflict))
 		return
 	}
-	if _, err := app.repo.GetInstance(account, id); err != nil {
+	if _, err := app.repo.GetInstance(account, region, id); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -1133,7 +1136,7 @@ func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, accoun
 	awsproto.WriteQueryRPCResponse(w, "ModifyInstanceAttribute", nil)
 }
 
-func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	ids := parseInstanceIDs(req)
 	if len(ids) == 0 {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
@@ -1142,7 +1145,7 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account str
 	}
 	out := ec2TerminateInstancesResult{}
 	for _, id := range ids {
-		inst, err := app.repo.GetInstance(account, id)
+		inst, err := app.repo.GetInstance(account, region, id)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
@@ -1160,7 +1163,7 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account str
 			})
 			continue
 		}
-		if err := app.repo.SetInstanceState(account, id, "terminated"); err != nil {
+		if err := app.repo.SetInstanceState(account, region, id, "terminated"); err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
 		}

@@ -190,7 +190,9 @@ func (r *Repository) CreateDBSubnetGroup(account string, sg *RDSSubnetGroup) err
 		return fmt.Errorf("subnet_ids empty: %w", models.ErrConflict)
 	}
 	for _, sid := range sg.SubnetIDs {
-		s, err := r.GetSubnet(account, sid)
+		// Codex pass 7 BLOCKING #1 — subnet must live in the subnet
+		// group's region.
+		s, err := r.GetSubnet(account, sg.Region, sid)
 		if err != nil {
 			return err
 		}
