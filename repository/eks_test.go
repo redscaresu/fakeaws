@@ -88,6 +88,58 @@ func TestEKSNodeGroup_SubnetMustBeInClusterVPC(t *testing.T) {
 	}
 }
 
+// TestEKSCluster_SubnetsMustShareVPC pins the load-bearing single-VPC
+// contract: cluster's subnet_ids must all be in the same VPC, and
+// every security_group_id (if specified) must belong to that VPC.
+// Codex pass 1 BLOCKING #1.
+func TestEKSCluster_SubnetsMustShareVPC(t *testing.T) {
+	r := setupRepo(t)
+	clusterRole, _, subnets := setupEKSPrereqs(t, r)
+
+	// Add a second VPC with its own subnet.
+	r.CreateVPC(testAccount, &EC2VPC{ID: "vpc-other", CidrBlock: "10.1.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"})
+	r.CreateSubnet(testAccount, &EC2Subnet{ID: "subnet-other", VPCID: "vpc-other", CidrBlock: "10.1.1.0/24", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"})
+
+	// Mixing subnets from vpc-1 and vpc-other rejects.
+	bad := &EKSCluster{
+		Name: "x", RoleARN: clusterRole,
+		SubnetIDs: []string{subnets[0], "subnet-other"},
+		Region: testRegion, ARN: "arn:c", CreatedAt: "t",
+	}
+	if err := r.CreateEKSCluster(testAccount, bad); !errors.Is(err, models.ErrConflict) {
+		t.Errorf("mixed-VPC subnets: want ErrConflict, got %v", err)
+	}
+
+	// SG from a different VPC also rejects.
+	r.CreateSecurityGroup(testAccount, &EC2SecurityGroup{
+		ID: "sg-other", VPCID: "vpc-other", GroupName: "x", Description: "x",
+		Region: testRegion, ARN: "arn", CreatedAt: "t",
+	})
+	bad2 := &EKSCluster{
+		Name: "y", RoleARN: clusterRole,
+		SubnetIDs: subnets, // both in vpc-1
+		SecurityGroupIDs: []string{"sg-other"},
+		Region: testRegion, ARN: "arn:c", CreatedAt: "t",
+	}
+	if err := r.CreateEKSCluster(testAccount, bad2); !errors.Is(err, models.ErrConflict) {
+		t.Errorf("SG from different VPC: want ErrConflict, got %v", err)
+	}
+
+	// SG from cluster VPC succeeds.
+	r.CreateSecurityGroup(testAccount, &EC2SecurityGroup{
+		ID: "sg-vpc1", VPCID: "vpc-1", GroupName: "y", Description: "y",
+		Region: testRegion, ARN: "arn", CreatedAt: "t",
+	})
+	good := &EKSCluster{
+		Name: "z", RoleARN: clusterRole,
+		SubnetIDs: subnets, SecurityGroupIDs: []string{"sg-vpc1"},
+		Region: testRegion, ARN: "arn:c", CreatedAt: "t",
+	}
+	if err := r.CreateEKSCluster(testAccount, good); err != nil {
+		t.Errorf("SG in cluster VPC: %v", err)
+	}
+}
+
 func TestEKSCluster_DeleteCASCADESChildren(t *testing.T) {
 	r := setupRepo(t)
 	clusterRole, nodeRole, subnets := setupEKSPrereqs(t, r)

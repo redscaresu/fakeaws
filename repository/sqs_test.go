@@ -89,17 +89,40 @@ func TestSQSMessageLifecycle(t *testing.T) {
 	}
 }
 
-func TestSQSQueueDeleteCASCADESMessages(t *testing.T) {
+// TestSQSQueueDeleteRebadgesMessages pins the tombstone-on-parent-
+// delete contract. Messages must NOT vanish on queue delete — they
+// rebadge to the SQSDeletedQueueTombstone sentinel queue so audit
+// trail is preserved. Codex pass 1 BLOCKING #2.
+func TestSQSQueueDeleteRebadgesMessages(t *testing.T) {
 	r := setupRepo(t)
 	r.CreateSQSQueue(testAccount, &SQSQueue{Name: "q", QueueURL: "u", ARN: "a", Region: testRegion, CreatedAt: "t"})
 	r.SendSQSMessage(testAccount, testRegion, &SQSMessage{QueueName: "q", MessageID: "m", Body: "x", CreatedAt: "t"})
 
+	// Pre-delete: 0 tombstoned messages.
+	n0, _ := r.CountSQSTombstonedMessages(testAccount, testRegion)
+	if n0 != 0 {
+		t.Fatalf("pre-delete tombstone count: %d want 0", n0)
+	}
+
 	if err := r.DeleteSQSQueue(testAccount, testRegion, "q"); err != nil {
 		t.Fatalf("DeleteSQSQueue: %v", err)
 	}
-	// Sanity: subsequent Send returns 404 (queue gone, FK CASCADE
-	// already removed messages).
+
+	// Post-delete: message survives under the tombstone sentinel.
+	n1, _ := r.CountSQSTombstonedMessages(testAccount, testRegion)
+	if n1 != 1 {
+		t.Errorf("post-delete tombstone count: %d want 1", n1)
+	}
+
+	// Send to the deleted queue still 404s (queue's gone).
 	if err := r.SendSQSMessage(testAccount, testRegion, &SQSMessage{QueueName: "q", MessageID: "m2", Body: "y", CreatedAt: "t"}); !errors.Is(err, models.ErrNotFound) {
 		t.Errorf("Send to deleted queue: want ErrNotFound, got %v", err)
+	}
+
+	// Send to the tombstone queue is also rejected (read-only sentinel).
+	if err := r.SendSQSMessage(testAccount, testRegion, &SQSMessage{
+		QueueName: SQSDeletedQueueTombstone, MessageID: "m3", Body: "z", CreatedAt: "t",
+	}); !errors.Is(err, models.ErrNotFound) {
+		t.Errorf("Send to tombstone: want ErrNotFound, got %v", err)
 	}
 }

@@ -130,16 +130,35 @@ func (r *Repository) CreateEKSCluster(account string, c *EKSCluster) error {
 	if _, err := r.GetRole(account, roleName); err != nil {
 		return err
 	}
-	// Each subnet must exist in this account.
+	// Each subnet must exist AND share the same VPC as the rest of
+	// the cluster (Codex pass 1 BLOCKING #1 — single-VPC contract).
+	// The cluster VPC is derived from the first subnet; subsequent
+	// subnets must match. Cross-VPC subnets reject with ErrConflict.
+	if len(c.SubnetIDs) == 0 {
+		return fmt.Errorf("subnet_ids empty: %w", models.ErrConflict)
+	}
+	var clusterVPC string
 	for _, sid := range c.SubnetIDs {
-		if _, err := r.GetSubnet(account, sid); err != nil {
+		s, err := r.GetSubnet(account, sid)
+		if err != nil {
 			return err
 		}
+		if clusterVPC == "" {
+			clusterVPC = s.VPCID
+		} else if s.VPCID != clusterVPC {
+			return fmt.Errorf("subnet %q is in vpc %q but cluster expects %q: %w",
+				sid, s.VPCID, clusterVPC, models.ErrConflict)
+		}
 	}
-	// Each SG (if specified) must exist.
+	// Each SG (if specified) must exist AND belong to the cluster VPC.
 	for _, sgid := range c.SecurityGroupIDs {
-		if _, err := r.GetSecurityGroup(account, sgid); err != nil {
+		sg, err := r.GetSecurityGroup(account, sgid)
+		if err != nil {
 			return err
+		}
+		if sg.VPCID != clusterVPC {
+			return fmt.Errorf("security group %q is in vpc %q but cluster expects %q: %w",
+				sgid, sg.VPCID, clusterVPC, models.ErrConflict)
 		}
 	}
 	if c.Status == "" {

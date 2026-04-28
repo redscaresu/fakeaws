@@ -18,9 +18,21 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/redscaresu/fakeaws/models"
 )
+
+// SQSDeletedQueueTombstone is the synthetic queue name in-flight
+// messages get rebadged to when their parent queue is deleted. Per
+// concepts.md "Standing patterns" item 12 (tombstone-semantics-on-
+// parent-delete) — without this, downstream consumers race against
+// deletion. Mirror of fakegcp pass-25 Pub/Sub pattern.
+//
+// The tombstone queue is NOT a real SQS queue (no row in sqs_queues);
+// it's a sentinel value that lets fakeaws preserve message audit
+// trail without surfacing a phantom queue in /mock/state.
+const SQSDeletedQueueTombstone = "_deleted-queue_"
 
 var sqsMigrations = []string{
 	`CREATE TABLE IF NOT EXISTS sqs_queues (
@@ -35,6 +47,11 @@ var sqsMigrations = []string{
 		created_at TEXT NOT NULL,
 		PRIMARY KEY (account_id, region, name)
 	)`,
+	// NB: NO foreign key from sqs_messages → sqs_queues. The
+	// tombstone-on-parent-delete contract requires DeleteSQSQueue to
+	// rebadge in-flight messages to the synthetic deleted-queue
+	// tombstone BEFORE the parent row goes away. A SQLite FK with
+	// CASCADE would hard-delete the messages and break the contract.
 	`CREATE TABLE IF NOT EXISTS sqs_messages (
 		account_id     TEXT NOT NULL,
 		region         TEXT NOT NULL,
@@ -45,8 +62,7 @@ var sqsMigrations = []string{
 		visible_after  INTEGER NOT NULL DEFAULT 0,
 		receive_count  INTEGER NOT NULL DEFAULT 0,
 		created_at     TEXT NOT NULL,
-		PRIMARY KEY (account_id, region, queue_name, message_id),
-		FOREIGN KEY (account_id, region, queue_name) REFERENCES sqs_queues(account_id, region, name) ON DELETE CASCADE
+		PRIMARY KEY (account_id, region, queue_name, message_id)
 	)`,
 }
 
@@ -120,11 +136,20 @@ func (r *Repository) GetSQSQueue(account, region, name string) (*SQSQueue, error
 	return &q, nil
 }
 
+// ListSQSQueues returns queues for the account, optionally scoped to
+// a region. Pass region="" to enumerate every region — used by the
+// /mock/state gatherer (Codex pass 1 SUGGEST item A — fixed).
 func (r *Repository) ListSQSQueues(account, region string) ([]*SQSQueue, error) {
-	rows, err := r.db.Query(
-		`SELECT data FROM sqs_queues WHERE account_id = ? AND region = ? ORDER BY name`,
-		account, region,
-	)
+	var rows *sql.Rows
+	var err error
+	if region == "" {
+		rows, err = r.db.Query(`SELECT data FROM sqs_queues WHERE account_id = ? ORDER BY region, name`, account)
+	} else {
+		rows, err = r.db.Query(
+			`SELECT data FROM sqs_queues WHERE account_id = ? AND region = ? ORDER BY name`,
+			account, region,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +169,26 @@ func (r *Repository) ListSQSQueues(account, region string) ([]*SQSQueue, error) 
 	return out, rows.Err()
 }
 
+// DeleteSQSQueue rebadges in-flight messages to the deleted-queue
+// tombstone before deleting the parent row. Per concepts.md "Standing
+// patterns" item 12: without rebadging, downstream consumers race
+// against deletion. Codex pass 1 BLOCKING #2 fix.
 func (r *Repository) DeleteSQSQueue(account, region, name string) error {
+	if name == SQSDeletedQueueTombstone {
+		// Don't allow callers to nuke the tombstone — that's where
+		// in-flight messages from previously-deleted queues live.
+		return fmt.Errorf("cannot delete the tombstone queue: %w", models.ErrConflict)
+	}
+	if _, err := r.GetSQSQueue(account, region, name); err != nil {
+		return err
+	}
+	// Rebadge first — atomic-ish at the SQL level (single UPDATE).
+	if _, err := r.db.Exec(
+		`UPDATE sqs_messages SET queue_name = ? WHERE account_id = ? AND region = ? AND queue_name = ?`,
+		SQSDeletedQueueTombstone, account, region, name,
+	); err != nil {
+		return fmt.Errorf("rebadge messages to tombstone: %w", err)
+	}
 	res, err := r.db.Exec(
 		`DELETE FROM sqs_queues WHERE account_id = ? AND region = ? AND name = ?`,
 		account, region, name,
@@ -159,9 +203,25 @@ func (r *Repository) DeleteSQSQueue(account, region, name string) error {
 	return nil
 }
 
+// CountSQSTombstonedMessages returns the number of messages currently
+// rebadged under the tombstone queue. Used by regression tests + the
+// /mock/state gatherer.
+func (r *Repository) CountSQSTombstonedMessages(account, region string) (int, error) {
+	var n int
+	err := r.db.QueryRow(
+		`SELECT COUNT(*) FROM sqs_messages WHERE account_id = ? AND region = ? AND queue_name = ?`,
+		account, region, SQSDeletedQueueTombstone,
+	).Scan(&n)
+	return n, err
+}
+
 // ----- Message ops -----
 
 func (r *Repository) SendSQSMessage(account, region string, m *SQSMessage) error {
+	if m.QueueName == SQSDeletedQueueTombstone {
+		// Tombstone queue is read-only — never accept new sends.
+		return fmt.Errorf("cannot send to tombstone queue: %w", models.ErrNotFound)
+	}
 	if _, err := r.GetSQSQueue(account, region, m.QueueName); err != nil {
 		return err
 	}

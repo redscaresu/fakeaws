@@ -267,9 +267,10 @@ func sqsRandID() string {
 func (app *Application) gatherSQSStateReal() map[string]any {
 	const account = awsproto.FakeAccountID
 	out := map[string]any{
-		"queues": []any{},
+		"queues":              []any{},
+		"tombstoned_messages": 0,
 	}
-	queues, _ := app.repo.ListSQSQueues(account, "us-east-1")
+	queues, _ := app.repo.ListSQSQueues(account, "")
 	qOut := make([]map[string]any, 0, len(queues))
 	for _, q := range queues {
 		qOut = append(qOut, map[string]any{
@@ -278,5 +279,15 @@ func (app *Application) gatherSQSStateReal() map[string]any {
 		})
 	}
 	out["queues"] = qOut
+	// Tombstoned-message count surfaces here for regression-test 12
+	// to assert against (Codex pass 1 BLOCKING #2). We probe the
+	// canonical region set; in practice scenarios use us-east-1.
+	totalTombstoned := 0
+	for _, region := range []string{"us-east-1", "us-east-2", "us-west-1", "us-west-2",
+		"eu-west-1", "eu-west-2", "eu-central-1", "ap-southeast-1"} {
+		n, _ := app.repo.CountSQSTombstonedMessages(account, region)
+		totalTombstoned += n
+	}
+	out["tombstoned_messages"] = totalTombstoned
 	return out
 }

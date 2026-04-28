@@ -210,13 +210,53 @@ func TestRegressionRegionVsZoneHeuristic(t *testing.T) {
 // 8. Cache-baseline lifecycle on /mock/reset.
 //
 // Pattern: any in-process cache (SQS visibility timeouts in S46;
-// Route53 change-id cache in S47) MUST clear and snapshot/restore
-// alongside the SQLite repo. Mirror of fakegcp pass-18.
+// Route53 change-id cache in S47) MUST clear alongside the SQLite repo
+// when /mock/reset fires. Mirror of fakegcp pass-18. Codex pass 1
+// BLOCKING #3 — lit up with a real SQS assertion.
 //
-// Today there are no in-process caches yet (IAM + S3 are pure-SQLite),
-// so this test is a placeholder. It flips active when SQS lands.
+// SQS at v1 has no separate in-process cache (visibility timeout is
+// stored in the DB, not a Go map), so the contract reduces to: after
+// /mock/reset, queues + their messages MUST be gone. This is the
+// minimum the cache-clearing pattern requires; richer caches (SQS
+// in-flight tracker, Route53 change-id ring) extend this assertion
+// when they land.
 func TestRegressionCacheBaselineLifecycle(t *testing.T) {
-	requireHandlerImplemented(t, "sqs", "S46", "cache-baseline-lifecycle")
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+	sqsURL := srv.URL + "/sqs/region/" + region
+
+	// Pre: create a queue + send a message, then snapshot via state.
+	post := func(target, body string) (*http.Response, []byte) {
+		req, _ := http.NewRequest(http.MethodPost, sqsURL,
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-amz-json-1.0")
+		req.Header.Set("X-Amz-Target", target)
+		resp, _ := srv.Client().Do(req)
+		defer resp.Body.Close()
+		out := readResponseBody(t, resp)
+		return resp, out
+	}
+
+	post("AmazonSQS.CreateQueue", `{"QueueName":"jobs"}`)
+	state, _ := http.Get(srv.URL + "/mock/state")
+	stateBytes := readResponseBody(t, state)
+	if !strings.Contains(string(stateBytes), `"jobs"`) {
+		t.Fatalf("setup: queue not in pre-reset state: %s", stateBytes)
+	}
+
+	// Reset.
+	resp, _ := http.Post(srv.URL+"/mock/reset", "application/json", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/mock/reset: %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Post-reset: queue is gone (cache + DB cleared together).
+	state, _ = http.Get(srv.URL + "/mock/state")
+	stateBytes = readResponseBody(t, state)
+	if strings.Contains(string(stateBytes), `"jobs"`) {
+		t.Errorf("queue should be gone after /mock/reset; state=%s", stateBytes)
+	}
 }
 
 // 9. Terminal state refuses transitions.
@@ -275,8 +315,46 @@ func TestRegressionHostedZoneDeleteRefusedIfNonEmpty(t *testing.T) {
 // Pattern: SQS queue delete must rebadge in-flight messages to a
 // "_deleted-queue_" tombstone, mirroring fakegcp's pass-25 Pub/Sub
 // pattern. Without this, downstream consumers race against deletion.
+// Codex pass 1 BLOCKING #2 + #3 — lit up with a real assertion now
+// that the tombstone path is implemented in repository/sqs.go;
+// /mock/state surfaces tombstoned_messages count under .sqs.
 func TestRegressionTombstoneSemanticsOnParentDelete(t *testing.T) {
-	requireHandlerImplemented(t, "sqs", "S46", "tombstone-semantics-on-parent-delete")
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+	sqsURL := srv.URL + "/sqs/region/" + region
+
+	post := func(target, body string) []byte {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, sqsURL,
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-amz-json-1.0")
+		req.Header.Set("X-Amz-Target", target)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", target, err)
+		}
+		defer resp.Body.Close()
+		return readResponseBody(t, resp)
+	}
+
+	body := post("AmazonSQS.CreateQueue", `{"QueueName":"jobs"}`)
+	urlStart := strings.Index(string(body), `"QueueUrl":"`) + len(`"QueueUrl":"`)
+	urlEnd := strings.Index(string(body)[urlStart:], `"`) + urlStart
+	queueURL := string(body)[urlStart:urlEnd]
+
+	post("AmazonSQS.SendMessage", `{"QueueUrl":"`+queueURL+`","MessageBody":"hello"}`)
+	post("AmazonSQS.DeleteQueue", `{"QueueUrl":"`+queueURL+`"}`)
+
+	// /mock/state.sqs.tombstoned_messages must be 1 — message rebadged.
+	resp, err := http.Get(srv.URL + "/mock/state")
+	if err != nil {
+		t.Fatalf("GET /mock/state: %v", err)
+	}
+	defer resp.Body.Close()
+	stateBytes := readResponseBody(t, resp)
+	if !strings.Contains(string(stateBytes), `"tombstoned_messages":1`) {
+		t.Errorf("tombstone count after queue delete: state=%s", stateBytes)
+	}
 }
 
 // 13. Resource-existence gate on every sub-resource / child handler.
