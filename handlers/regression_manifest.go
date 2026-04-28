@@ -39,6 +39,7 @@ var LandedServices = []string{
 	"eks",
 	"iam",
 	"rds",
+	"route53",
 	"s3",
 	"sqs",
 }
