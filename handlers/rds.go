@@ -37,43 +37,43 @@ func (app *Application) handleRDS(w http.ResponseWriter, r *http.Request) {
 	case "CreateDBSubnetGroup":
 		app.rdsCreateDBSubnetGroup(w, account, region, req)
 	case "DescribeDBSubnetGroups":
-		app.rdsDescribeDBSubnetGroups(w, account, req)
+		app.rdsDescribeDBSubnetGroups(w, account, region, req)
 	case "DeleteDBSubnetGroup":
-		app.rdsDeleteDBSubnetGroup(w, account, req)
+		app.rdsDeleteDBSubnetGroup(w, account, region, req)
 
 	// ----- DB Parameter Group -----
 	case "CreateDBParameterGroup":
 		app.rdsCreateDBParameterGroup(w, account, region, req)
 	case "DescribeDBParameterGroups":
-		app.rdsDescribeDBParameterGroups(w, account, req)
+		app.rdsDescribeDBParameterGroups(w, account, region, req)
 	case "DeleteDBParameterGroup":
-		app.rdsDeleteDBParameterGroup(w, account, req)
+		app.rdsDeleteDBParameterGroup(w, account, region, req)
 
 	// ----- DB Cluster Parameter Group -----
 	case "CreateDBClusterParameterGroup":
 		app.rdsCreateDBClusterParameterGroup(w, account, region, req)
 	case "DescribeDBClusterParameterGroups":
-		app.rdsDescribeDBClusterParameterGroups(w, account, req)
+		app.rdsDescribeDBClusterParameterGroups(w, account, region, req)
 	case "DeleteDBClusterParameterGroup":
-		app.rdsDeleteDBClusterParameterGroup(w, account, req)
+		app.rdsDeleteDBClusterParameterGroup(w, account, region, req)
 
 	// ----- DB Cluster -----
 	case "CreateDBCluster":
 		app.rdsCreateDBCluster(w, account, region, req)
 	case "DescribeDBClusters":
-		app.rdsDescribeDBClusters(w, account, req)
+		app.rdsDescribeDBClusters(w, account, region, req)
 	case "DeleteDBCluster":
-		app.rdsDeleteDBCluster(w, account, req)
+		app.rdsDeleteDBCluster(w, account, region, req)
 
 	// ----- DB Instance -----
 	case "CreateDBInstance":
 		app.rdsCreateDBInstance(w, account, region, req)
 	case "DescribeDBInstances":
-		app.rdsDescribeDBInstances(w, account, req)
+		app.rdsDescribeDBInstances(w, account, region, req)
 	case "DeleteDBInstance":
-		app.rdsDeleteDBInstance(w, account, req)
+		app.rdsDeleteDBInstance(w, account, region, req)
 	case "ModifyDBInstance":
-		app.rdsModifyDBInstance(w, account, req)
+		app.rdsModifyDBInstance(w, account, region, req)
 
 	default:
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
@@ -142,16 +142,16 @@ func (app *Application) rdsCreateDBSubnetGroup(w http.ResponseWriter, account, r
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	got, _ := app.repo.GetDBSubnetGroup(account, name)
+	got, _ := app.repo.GetDBSubnetGroup(account, region, name)
 	awsproto.WriteQueryRPCResponse(w, "CreateDBSubnetGroup",
 		&rdsCreateSubnetGroupResult{DBSubnetGroup: rdsSubnetGroupToXML(got)})
 }
 
-func (app *Application) rdsDescribeDBSubnetGroups(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) rdsDescribeDBSubnetGroups(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("DBSubnetGroupName")
 	out := rdsDescribeSubnetGroupsResult{DBSubnetGroups: []rdsSubnetGroupXML{}}
 	if name != "" {
-		sg, err := app.repo.GetDBSubnetGroup(account, name)
+		sg, err := app.repo.GetDBSubnetGroup(account, region, name)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
@@ -161,8 +161,8 @@ func (app *Application) rdsDescribeDBSubnetGroups(w http.ResponseWriter, account
 	awsproto.WriteQueryRPCResponse(w, "DescribeDBSubnetGroups", &out)
 }
 
-func (app *Application) rdsDeleteDBSubnetGroup(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteDBSubnetGroup(account, req.Params.Get("DBSubnetGroupName")); err != nil {
+func (app *Application) rdsDeleteDBSubnetGroup(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteDBSubnetGroup(account, region, req.Params.Get("DBSubnetGroupName")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -228,11 +228,11 @@ func (app *Application) rdsCreateDBParameterGroup(w http.ResponseWriter, account
 		}})
 }
 
-func (app *Application) rdsDescribeDBParameterGroups(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) rdsDescribeDBParameterGroups(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("DBParameterGroupName")
 	out := rdsDescribeParamGroupsResult{DBParameterGroups: []rdsParamGroupXML{}}
 	if name != "" {
-		pg, err := app.repo.GetDBParameterGroup(account, name)
+		pg, err := app.repo.GetDBParameterGroup(account, region, name)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
@@ -247,8 +247,8 @@ func (app *Application) rdsDescribeDBParameterGroups(w http.ResponseWriter, acco
 	awsproto.WriteQueryRPCResponse(w, "DescribeDBParameterGroups", &out)
 }
 
-func (app *Application) rdsDeleteDBParameterGroup(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteDBParameterGroup(account, req.Params.Get("DBParameterGroupName")); err != nil {
+func (app *Application) rdsDeleteDBParameterGroup(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteDBParameterGroup(account, region, req.Params.Get("DBParameterGroupName")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -282,11 +282,11 @@ func (app *Application) rdsCreateDBClusterParameterGroup(w http.ResponseWriter, 
 		}})
 }
 
-func (app *Application) rdsDescribeDBClusterParameterGroups(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) rdsDescribeDBClusterParameterGroups(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("DBClusterParameterGroupName")
 	out := rdsDescribeClusterParamGroupsResult{DBClusterParameterGroups: []rdsClusterParamGroupXML{}}
 	if name != "" {
-		pg, err := app.repo.GetDBClusterParameterGroup(account, name)
+		pg, err := app.repo.GetDBClusterParameterGroup(account, region, name)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
@@ -301,8 +301,8 @@ func (app *Application) rdsDescribeDBClusterParameterGroups(w http.ResponseWrite
 	awsproto.WriteQueryRPCResponse(w, "DescribeDBClusterParameterGroups", &out)
 }
 
-func (app *Application) rdsDeleteDBClusterParameterGroup(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteDBClusterParameterGroup(account, req.Params.Get("DBClusterParameterGroupName")); err != nil {
+func (app *Application) rdsDeleteDBClusterParameterGroup(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteDBClusterParameterGroup(account, region, req.Params.Get("DBClusterParameterGroupName")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -368,16 +368,16 @@ func (app *Application) rdsCreateDBCluster(w http.ResponseWriter, account, regio
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	got, _ := app.repo.GetDBCluster(account, id)
+	got, _ := app.repo.GetDBCluster(account, region, id)
 	awsproto.WriteQueryRPCResponse(w, "CreateDBCluster",
 		&rdsCreateClusterResult{DBCluster: rdsClusterToXML(got)})
 }
 
-func (app *Application) rdsDescribeDBClusters(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) rdsDescribeDBClusters(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	id := req.Params.Get("DBClusterIdentifier")
 	out := rdsDescribeClustersResult{DBClusters: []rdsClusterXML{}}
 	if id != "" {
-		c, err := app.repo.GetDBCluster(account, id)
+		c, err := app.repo.GetDBCluster(account, region, id)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
@@ -387,8 +387,8 @@ func (app *Application) rdsDescribeDBClusters(w http.ResponseWriter, account str
 	awsproto.WriteQueryRPCResponse(w, "DescribeDBClusters", &out)
 }
 
-func (app *Application) rdsDeleteDBCluster(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteDBCluster(account, req.Params.Get("DBClusterIdentifier")); err != nil {
+func (app *Application) rdsDeleteDBCluster(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteDBCluster(account, region, req.Params.Get("DBClusterIdentifier")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -431,7 +431,7 @@ func (app *Application) rdsInstanceToXML(account string, inst *repository.RDSIns
 		DBInstanceArn:                         inst.ARN,
 	}
 	if inst.SubnetGroupName != "" {
-		if sg, err := app.repo.GetDBSubnetGroup(account, inst.SubnetGroupName); err == nil {
+		if sg, err := app.repo.GetDBSubnetGroup(account, inst.Region, inst.SubnetGroupName); err == nil {
 			sgXML := rdsSubnetGroupToXML(sg)
 			x.DBSubnetGroup = &sgXML
 		}
@@ -465,16 +465,16 @@ func (app *Application) rdsCreateDBInstance(w http.ResponseWriter, account, regi
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	got, _ := app.repo.GetDBInstance(account, id)
+	got, _ := app.repo.GetDBInstance(account, region, id)
 	awsproto.WriteQueryRPCResponse(w, "CreateDBInstance",
 		&rdsCreateInstanceResult{DBInstance: app.rdsInstanceToXML(account, got)})
 }
 
-func (app *Application) rdsDescribeDBInstances(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) rdsDescribeDBInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	id := req.Params.Get("DBInstanceIdentifier")
 	out := rdsDescribeInstancesResult{DBInstances: []rdsInstanceXML{}}
 	if id != "" {
-		inst, err := app.repo.GetDBInstance(account, id)
+		inst, err := app.repo.GetDBInstance(account, region, id)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
@@ -482,7 +482,7 @@ func (app *Application) rdsDescribeDBInstances(w http.ResponseWriter, account st
 		out.DBInstances = append(out.DBInstances, app.rdsInstanceToXML(account, inst))
 	} else {
 		// Unfiltered list (uncommon but the AWS provider's import path uses it).
-		all, err := app.repo.ListDBInstances(account, "")
+		all, err := app.repo.ListDBInstances(account, region)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
@@ -494,8 +494,8 @@ func (app *Application) rdsDescribeDBInstances(w http.ResponseWriter, account st
 	awsproto.WriteQueryRPCResponse(w, "DescribeDBInstances", &out)
 }
 
-func (app *Application) rdsDeleteDBInstance(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteDBInstance(account, req.Params.Get("DBInstanceIdentifier")); err != nil {
+func (app *Application) rdsDeleteDBInstance(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteDBInstance(account, region, req.Params.Get("DBInstanceIdentifier")); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -507,14 +507,14 @@ func (app *Application) rdsDeleteDBInstance(w http.ResponseWriter, account strin
 // path doesn't 404. Apply-time changes (engine version, instance
 // class) are no-ops; the deletion_protection toggle is the one
 // modification that matters for destroy flows.
-func (app *Application) rdsModifyDBInstance(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+func (app *Application) rdsModifyDBInstance(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	id := req.Params.Get("DBInstanceIdentifier")
 	if id == "" {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
 			fmt.Errorf("DBInstanceIdentifier required: %w", models.ErrConflict))
 		return
 	}
-	inst, err := app.repo.GetDBInstance(account, id)
+	inst, err := app.repo.GetDBInstance(account, region, id)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return

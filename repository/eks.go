@@ -24,6 +24,8 @@ import (
 	"github.com/redscaresu/fakeaws/models"
 )
 
+// EKS schema — region in every PK so same-named clusters can coexist
+// across regions (Codex pass 6 BLOCKING #2).
 var eksMigrations = []string{
 	`CREATE TABLE IF NOT EXISTS eks_clusters (
 		account_id        TEXT NOT NULL,
@@ -37,7 +39,7 @@ var eksMigrations = []string{
 		arn               TEXT NOT NULL,
 		data              TEXT NOT NULL,
 		created_at        TEXT NOT NULL,
-		PRIMARY KEY (account_id, name)
+		PRIMARY KEY (account_id, region, name)
 	)`,
 	`CREATE TABLE IF NOT EXISTS eks_node_groups (
 		account_id     TEXT NOT NULL,
@@ -52,8 +54,8 @@ var eksMigrations = []string{
 		arn            TEXT NOT NULL,
 		data           TEXT NOT NULL,
 		created_at     TEXT NOT NULL,
-		PRIMARY KEY (account_id, cluster_name, name),
-		FOREIGN KEY (account_id, cluster_name) REFERENCES eks_clusters(account_id, name) ON DELETE CASCADE
+		PRIMARY KEY (account_id, region, cluster_name, name),
+		FOREIGN KEY (account_id, region, cluster_name) REFERENCES eks_clusters(account_id, region, name) ON DELETE CASCADE
 	)`,
 	`CREATE TABLE IF NOT EXISTS eks_addons (
 		account_id    TEXT NOT NULL,
@@ -65,8 +67,8 @@ var eksMigrations = []string{
 		arn           TEXT NOT NULL,
 		data          TEXT NOT NULL,
 		created_at    TEXT NOT NULL,
-		PRIMARY KEY (account_id, cluster_name, name),
-		FOREIGN KEY (account_id, cluster_name) REFERENCES eks_clusters(account_id, name) ON DELETE CASCADE
+		PRIMARY KEY (account_id, region, cluster_name, name),
+		FOREIGN KEY (account_id, region, cluster_name) REFERENCES eks_clusters(account_id, region, name) ON DELETE CASCADE
 	)`,
 }
 
@@ -175,9 +177,10 @@ func (r *Repository) CreateEKSCluster(account string, c *EKSCluster) error {
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetEKSCluster(account, name string) (*EKSCluster, error) {
+// GetEKSCluster — region-scoped per Codex pass 6 BLOCKING #2.
+func (r *Repository) GetEKSCluster(account, region, name string) (*EKSCluster, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM eks_clusters WHERE account_id = ? AND name = ?`, account, name).Scan(&data)
+	err := r.db.QueryRow(`SELECT data FROM eks_clusters WHERE account_id = ? AND region = ? AND name = ?`, account, region, name).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -218,8 +221,8 @@ func (r *Repository) ListEKSClusters(account, region string) ([]*EKSCluster, err
 	return out, rows.Err()
 }
 
-func (r *Repository) DeleteEKSCluster(account, name string) error {
-	res, err := r.db.Exec(`DELETE FROM eks_clusters WHERE account_id = ? AND name = ?`, account, name)
+func (r *Repository) DeleteEKSCluster(account, region, name string) error {
+	res, err := r.db.Exec(`DELETE FROM eks_clusters WHERE account_id = ? AND region = ? AND name = ?`, account, region, name)
 	if err != nil {
 		return mapDeleteError(err)
 	}
@@ -233,7 +236,7 @@ func (r *Repository) DeleteEKSCluster(account, name string) error {
 // ----- NodeGroup -----
 
 func (r *Repository) CreateEKSNodeGroup(account string, ng *EKSNodeGroup) error {
-	cluster, err := r.GetEKSCluster(account, ng.ClusterName)
+	cluster, err := r.GetEKSCluster(account, ng.Region, ng.ClusterName)
 	if err != nil {
 		return err
 	}
@@ -273,11 +276,11 @@ func (r *Repository) CreateEKSNodeGroup(account string, ng *EKSNodeGroup) error 
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetEKSNodeGroup(account, clusterName, name string) (*EKSNodeGroup, error) {
+func (r *Repository) GetEKSNodeGroup(account, region, clusterName, name string) (*EKSNodeGroup, error) {
 	var data string
 	err := r.db.QueryRow(
-		`SELECT data FROM eks_node_groups WHERE account_id = ? AND cluster_name = ? AND name = ?`,
-		account, clusterName, name,
+		`SELECT data FROM eks_node_groups WHERE account_id = ? AND region = ? AND cluster_name = ? AND name = ?`,
+		account, region, clusterName, name,
 	).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
@@ -298,13 +301,21 @@ func (r *Repository) GetEKSNodeGroup(account, clusterName, name string) (*EKSNod
 // DB queries from the gatherer, which deadlocks under
 // SetMaxOpenConns(1) when the gather is called inside a request
 // already holding the connection.
-func (r *Repository) ListEKSNodeGroups(account, clusterName string) ([]*EKSNodeGroup, error) {
+// ListEKSNodeGroups returns every nodegroup for the account,
+// optionally filtered by region and cluster. Pass region="" to
+// span all regions; pass clusterName="" to span all clusters.
+func (r *Repository) ListEKSNodeGroups(account, region, clusterName string) ([]*EKSNodeGroup, error) {
 	var rows *sql.Rows
 	var err error
-	if clusterName == "" {
+	switch {
+	case region == "" && clusterName == "":
 		rows, err = r.db.Query(`SELECT data FROM eks_node_groups WHERE account_id = ? ORDER BY cluster_name, name`, account)
-	} else {
+	case region == "":
 		rows, err = r.db.Query(`SELECT data FROM eks_node_groups WHERE account_id = ? AND cluster_name = ? ORDER BY name`, account, clusterName)
+	case clusterName == "":
+		rows, err = r.db.Query(`SELECT data FROM eks_node_groups WHERE account_id = ? AND region = ? ORDER BY cluster_name, name`, account, region)
+	default:
+		rows, err = r.db.Query(`SELECT data FROM eks_node_groups WHERE account_id = ? AND region = ? AND cluster_name = ? ORDER BY name`, account, region, clusterName)
 	}
 	if err != nil {
 		return nil, err
@@ -327,13 +338,20 @@ func (r *Repository) ListEKSNodeGroups(account, clusterName string) ([]*EKSNodeG
 
 // ListEKSAddons returns every addon for the account, optionally
 // filtered by cluster.
-func (r *Repository) ListEKSAddons(account, clusterName string) ([]*EKSAddon, error) {
+// ListEKSAddons returns every addon for the account, optionally
+// filtered by region and cluster.
+func (r *Repository) ListEKSAddons(account, region, clusterName string) ([]*EKSAddon, error) {
 	var rows *sql.Rows
 	var err error
-	if clusterName == "" {
+	switch {
+	case region == "" && clusterName == "":
 		rows, err = r.db.Query(`SELECT data FROM eks_addons WHERE account_id = ? ORDER BY cluster_name, name`, account)
-	} else {
+	case region == "":
 		rows, err = r.db.Query(`SELECT data FROM eks_addons WHERE account_id = ? AND cluster_name = ? ORDER BY name`, account, clusterName)
+	case clusterName == "":
+		rows, err = r.db.Query(`SELECT data FROM eks_addons WHERE account_id = ? AND region = ? ORDER BY cluster_name, name`, account, region)
+	default:
+		rows, err = r.db.Query(`SELECT data FROM eks_addons WHERE account_id = ? AND region = ? AND cluster_name = ? ORDER BY name`, account, region, clusterName)
 	}
 	if err != nil {
 		return nil, err
@@ -354,10 +372,10 @@ func (r *Repository) ListEKSAddons(account, clusterName string) ([]*EKSAddon, er
 	return out, rows.Err()
 }
 
-func (r *Repository) DeleteEKSNodeGroup(account, clusterName, name string) error {
+func (r *Repository) DeleteEKSNodeGroup(account, region, clusterName, name string) error {
 	res, err := r.db.Exec(
-		`DELETE FROM eks_node_groups WHERE account_id = ? AND cluster_name = ? AND name = ?`,
-		account, clusterName, name,
+		`DELETE FROM eks_node_groups WHERE account_id = ? AND region = ? AND cluster_name = ? AND name = ?`,
+		account, region, clusterName, name,
 	)
 	if err != nil {
 		return mapDeleteError(err)
@@ -372,7 +390,7 @@ func (r *Repository) DeleteEKSNodeGroup(account, clusterName, name string) error
 // ----- Addon -----
 
 func (r *Repository) CreateEKSAddon(account string, a *EKSAddon) error {
-	if _, err := r.GetEKSCluster(account, a.ClusterName); err != nil {
+	if _, err := r.GetEKSCluster(account, a.Region, a.ClusterName); err != nil {
 		return err
 	}
 	if a.Status == "" {
@@ -386,11 +404,11 @@ func (r *Repository) CreateEKSAddon(account string, a *EKSAddon) error {
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetEKSAddon(account, clusterName, name string) (*EKSAddon, error) {
+func (r *Repository) GetEKSAddon(account, region, clusterName, name string) (*EKSAddon, error) {
 	var data string
 	err := r.db.QueryRow(
-		`SELECT data FROM eks_addons WHERE account_id = ? AND cluster_name = ? AND name = ?`,
-		account, clusterName, name,
+		`SELECT data FROM eks_addons WHERE account_id = ? AND region = ? AND cluster_name = ? AND name = ?`,
+		account, region, clusterName, name,
 	).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
@@ -405,10 +423,10 @@ func (r *Repository) GetEKSAddon(account, clusterName, name string) (*EKSAddon, 
 	return &a, nil
 }
 
-func (r *Repository) DeleteEKSAddon(account, clusterName, name string) error {
+func (r *Repository) DeleteEKSAddon(account, region, clusterName, name string) error {
 	res, err := r.db.Exec(
-		`DELETE FROM eks_addons WHERE account_id = ? AND cluster_name = ? AND name = ?`,
-		account, clusterName, name,
+		`DELETE FROM eks_addons WHERE account_id = ? AND region = ? AND cluster_name = ? AND name = ?`,
+		account, region, clusterName, name,
 	)
 	if err != nil {
 		return mapDeleteError(err)

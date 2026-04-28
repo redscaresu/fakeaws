@@ -109,7 +109,7 @@ func (app *Application) eksCreateCluster(w http.ResponseWriter, r *http.Request)
 
 func (app *Application) eksDescribeCluster(w http.ResponseWriter, r *http.Request) {
 	const account = awsproto.FakeAccountID
-	c, err := app.repo.GetEKSCluster(account, chi.URLParam(r, "name"))
+	c, err := app.repo.GetEKSCluster(account, chi.URLParam(r, "region"), chi.URLParam(r, "name"))
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
@@ -138,13 +138,14 @@ func (app *Application) eksListClusters(w http.ResponseWriter, r *http.Request) 
 
 func (app *Application) eksDeleteCluster(w http.ResponseWriter, r *http.Request) {
 	const account = awsproto.FakeAccountID
+	region := chi.URLParam(r, "region")
 	name := chi.URLParam(r, "name")
-	c, err := app.repo.GetEKSCluster(account, name)
+	c, err := app.repo.GetEKSCluster(account, region, name)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
-	if err := app.repo.DeleteEKSCluster(account, name); err != nil {
+	if err := app.repo.DeleteEKSCluster(account, region, name); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
@@ -221,7 +222,7 @@ func eksNodeGroupToDesc(ng *repository.EKSNodeGroup) eksNodeGroupDescription {
 
 func (app *Application) eksDescribeNodeGroup(w http.ResponseWriter, r *http.Request) {
 	const account = awsproto.FakeAccountID
-	ng, err := app.repo.GetEKSNodeGroup(account, chi.URLParam(r, "name"), chi.URLParam(r, "ng"))
+	ng, err := app.repo.GetEKSNodeGroup(account, chi.URLParam(r, "region"), chi.URLParam(r, "name"), chi.URLParam(r, "ng"))
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
@@ -233,14 +234,15 @@ func (app *Application) eksDescribeNodeGroup(w http.ResponseWriter, r *http.Requ
 
 func (app *Application) eksDeleteNodeGroup(w http.ResponseWriter, r *http.Request) {
 	const account = awsproto.FakeAccountID
+	region := chi.URLParam(r, "region")
 	clusterName := chi.URLParam(r, "name")
 	ngName := chi.URLParam(r, "ng")
-	ng, err := app.repo.GetEKSNodeGroup(account, clusterName, ngName)
+	ng, err := app.repo.GetEKSNodeGroup(account, region, clusterName, ngName)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
-	if err := app.repo.DeleteEKSNodeGroup(account, clusterName, ngName); err != nil {
+	if err := app.repo.DeleteEKSNodeGroup(account, region, clusterName, ngName); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
@@ -303,7 +305,7 @@ func eksAddonToDesc(a *repository.EKSAddon) eksAddonDescription {
 
 func (app *Application) eksDescribeAddon(w http.ResponseWriter, r *http.Request) {
 	const account = awsproto.FakeAccountID
-	a, err := app.repo.GetEKSAddon(account, chi.URLParam(r, "name"), chi.URLParam(r, "addon"))
+	a, err := app.repo.GetEKSAddon(account, chi.URLParam(r, "region"), chi.URLParam(r, "name"), chi.URLParam(r, "addon"))
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
@@ -315,14 +317,15 @@ func (app *Application) eksDescribeAddon(w http.ResponseWriter, r *http.Request)
 
 func (app *Application) eksDeleteAddon(w http.ResponseWriter, r *http.Request) {
 	const account = awsproto.FakeAccountID
+	region := chi.URLParam(r, "region")
 	clusterName := chi.URLParam(r, "name")
 	addonName := chi.URLParam(r, "addon")
-	a, err := app.repo.GetEKSAddon(account, clusterName, addonName)
+	a, err := app.repo.GetEKSAddon(account, region, clusterName, addonName)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
-	if err := app.repo.DeleteEKSAddon(account, clusterName, addonName); err != nil {
+	if err := app.repo.DeleteEKSAddon(account, region, clusterName, addonName); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
@@ -357,7 +360,7 @@ func (app *Application) gatherEKSStateReal() map[string]any {
 	// instead of raw nested queries. The previous implementation
 	// risked deadlock under SetMaxOpenConns(1) by holding `rows`
 	// open while issuing nested Get* queries on the same connection.
-	ngs, _ := app.repo.ListEKSNodeGroups(account, "")
+	ngs, _ := app.repo.ListEKSNodeGroups(account, "", "")
 	ngOut := make([]map[string]any, 0, len(ngs))
 	for _, ng := range ngs {
 		ngOut = append(ngOut, map[string]any{
@@ -366,7 +369,7 @@ func (app *Application) gatherEKSStateReal() map[string]any {
 			"status": ng.Status, "region": ng.Region, "arn": ng.ARN,
 		})
 	}
-	addons, _ := app.repo.ListEKSAddons(account, "")
+	addons, _ := app.repo.ListEKSAddons(account, "", "")
 	addOut := make([]map[string]any, 0, len(addons))
 	for _, a := range addons {
 		addOut = append(addOut, map[string]any{

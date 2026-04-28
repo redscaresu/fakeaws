@@ -107,6 +107,62 @@ func TestDynamoDBTableDeleteCASCADESItems(t *testing.T) {
 	}
 }
 
+// TestDynamoDBItemRegionIsolation pins the Codex pass 6 BLOCKING #1
+// fix: same-named tables in different regions must hold their own
+// item sets without bleeding across regions.
+func TestDynamoDBItemRegionIsolation(t *testing.T) {
+	r := setupRepo(t)
+	// Create two tables with the same name in different regions.
+	for _, region := range []string{"us-east-1", "eu-west-1"} {
+		if err := r.CreateDynamoDBTable(testAccount, &DynamoDBTable{
+			Name: "Users", HashKey: "id",
+			Attributes: []DynamoDBAttributeDef{{Name: "id", Type: "S"}},
+			Region: region, ARN: "arn:" + region, CreatedAt: "t",
+		}); err != nil {
+			t.Fatalf("CreateDynamoDBTable %s: %v", region, err)
+		}
+	}
+	// Put items in each region.
+	r.PutDynamoDBItem(testAccount, "us-east-1", &DynamoDBItem{
+		TableName: "Users", HashValue: "alice",
+		Item: []byte(`{"id":{"S":"alice"},"region":{"S":"us-east-1"}}`),
+	})
+	r.PutDynamoDBItem(testAccount, "eu-west-1", &DynamoDBItem{
+		TableName: "Users", HashValue: "alice",
+		Item: []byte(`{"id":{"S":"alice"},"region":{"S":"eu-west-1"}}`),
+	})
+
+	// Each region returns its own item — no cross-region bleed.
+	usItem, _ := r.GetDynamoDBItem(testAccount, "us-east-1", "Users", "alice", "")
+	euItem, _ := r.GetDynamoDBItem(testAccount, "eu-west-1", "Users", "alice", "")
+	if string(usItem.Item) == string(euItem.Item) {
+		t.Errorf("region isolation violated — items match: %s", usItem.Item)
+	}
+	if !contains(string(usItem.Item), "us-east-1") {
+		t.Errorf("us-east-1 item bled: %s", usItem.Item)
+	}
+	if !contains(string(euItem.Item), "eu-west-1") {
+		t.Errorf("eu-west-1 item bled: %s", euItem.Item)
+	}
+
+	// Delete in one region leaves the other intact.
+	r.DeleteDynamoDBItem(testAccount, "us-east-1", "Users", "alice", "")
+	if _, err := r.GetDynamoDBItem(testAccount, "eu-west-1", "Users", "alice", ""); err != nil {
+		t.Errorf("eu-west-1 item should survive us-east-1 delete: %v", err)
+	}
+}
+
+// contains is a tiny strings.Contains shim — avoids importing strings
+// just for the regression assertion above.
+func contains(s, substr string) bool {
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDynamoDBScanReturnsAllItems(t *testing.T) {
 	r := setupRepo(t)
 	r.CreateDynamoDBTable(testAccount, &DynamoDBTable{

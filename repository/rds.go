@@ -26,6 +26,8 @@ import (
 	"github.com/redscaresu/fakeaws/models"
 )
 
+// RDS schema — region in every PK so same-named groups/instances/
+// clusters can coexist across regions (Codex pass 6 BLOCKING #3).
 var rdsMigrations = []string{
 	`CREATE TABLE IF NOT EXISTS rds_db_subnet_groups (
 		account_id   TEXT NOT NULL,
@@ -37,7 +39,7 @@ var rdsMigrations = []string{
 		arn          TEXT NOT NULL,
 		data         TEXT NOT NULL,
 		created_at   TEXT NOT NULL,
-		PRIMARY KEY (account_id, name)
+		PRIMARY KEY (account_id, region, name)
 	)`,
 	`CREATE TABLE IF NOT EXISTS rds_db_parameter_groups (
 		account_id  TEXT NOT NULL,
@@ -48,7 +50,7 @@ var rdsMigrations = []string{
 		arn         TEXT NOT NULL,
 		data        TEXT NOT NULL,
 		created_at  TEXT NOT NULL,
-		PRIMARY KEY (account_id, name)
+		PRIMARY KEY (account_id, region, name)
 	)`,
 	`CREATE TABLE IF NOT EXISTS rds_db_cluster_parameter_groups (
 		account_id  TEXT NOT NULL,
@@ -59,7 +61,7 @@ var rdsMigrations = []string{
 		arn         TEXT NOT NULL,
 		data        TEXT NOT NULL,
 		created_at  TEXT NOT NULL,
-		PRIMARY KEY (account_id, name)
+		PRIMARY KEY (account_id, region, name)
 	)`,
 	`CREATE TABLE IF NOT EXISTS rds_db_clusters (
 		account_id                       TEXT NOT NULL,
@@ -75,9 +77,9 @@ var rdsMigrations = []string{
 		arn                              TEXT NOT NULL,
 		data                             TEXT NOT NULL,
 		created_at                       TEXT NOT NULL,
-		PRIMARY KEY (account_id, id),
-		FOREIGN KEY (account_id, subnet_group_name) REFERENCES rds_db_subnet_groups(account_id, name) ON DELETE RESTRICT,
-		FOREIGN KEY (account_id, cluster_parameter_group_name) REFERENCES rds_db_cluster_parameter_groups(account_id, name) ON DELETE RESTRICT
+		PRIMARY KEY (account_id, region, id),
+		FOREIGN KEY (account_id, region, subnet_group_name) REFERENCES rds_db_subnet_groups(account_id, region, name) ON DELETE RESTRICT,
+		FOREIGN KEY (account_id, region, cluster_parameter_group_name) REFERENCES rds_db_cluster_parameter_groups(account_id, region, name) ON DELETE RESTRICT
 	)`,
 	`CREATE TABLE IF NOT EXISTS rds_db_instances (
 		account_id              TEXT NOT NULL,
@@ -96,11 +98,11 @@ var rdsMigrations = []string{
 		arn                     TEXT NOT NULL,
 		data                    TEXT NOT NULL,
 		created_at              TEXT NOT NULL,
-		PRIMARY KEY (account_id, id),
-		FOREIGN KEY (account_id, subnet_group_name)    REFERENCES rds_db_subnet_groups(account_id, name)    ON DELETE RESTRICT,
-		FOREIGN KEY (account_id, cluster_id)           REFERENCES rds_db_clusters(account_id, id)           ON DELETE RESTRICT,
-		FOREIGN KEY (account_id, parameter_group_name) REFERENCES rds_db_parameter_groups(account_id, name) ON DELETE RESTRICT,
-		FOREIGN KEY (account_id, replicate_source_db)  REFERENCES rds_db_instances(account_id, id)          ON DELETE RESTRICT
+		PRIMARY KEY (account_id, region, id),
+		FOREIGN KEY (account_id, region, subnet_group_name)    REFERENCES rds_db_subnet_groups(account_id, region, name)    ON DELETE RESTRICT,
+		FOREIGN KEY (account_id, region, cluster_id)           REFERENCES rds_db_clusters(account_id, region, id)           ON DELETE RESTRICT,
+		FOREIGN KEY (account_id, region, parameter_group_name) REFERENCES rds_db_parameter_groups(account_id, region, name) ON DELETE RESTRICT,
+		FOREIGN KEY (account_id, region, replicate_source_db)  REFERENCES rds_db_instances(account_id, region, id)          ON DELETE RESTRICT
 	)`,
 }
 
@@ -174,6 +176,11 @@ type RDSInstance struct {
 
 // ----- DB Subnet Group -----
 
+// All RDS Get/Delete methods are region-scoped per Codex pass 6
+// BLOCKING #3 — same-named groups/instances/clusters can coexist
+// across regions. CreateXxx callers stamp region into the model
+// before calling; Get/Delete callers thread the request region
+// through.
 func (r *Repository) CreateDBSubnetGroup(account string, sg *RDSSubnetGroup) error {
 	// Validate every subnet exists and belongs to the same VPC
 	// (S45-T0 pitfall: "subnets must be in the same VPC"). Caller
@@ -203,9 +210,9 @@ func (r *Repository) CreateDBSubnetGroup(account string, sg *RDSSubnetGroup) err
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetDBSubnetGroup(account, name string) (*RDSSubnetGroup, error) {
+func (r *Repository) GetDBSubnetGroup(account, region, name string) (*RDSSubnetGroup, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM rds_db_subnet_groups WHERE account_id = ? AND name = ?`, account, name).Scan(&data)
+	err := r.db.QueryRow(`SELECT data FROM rds_db_subnet_groups WHERE account_id = ? AND region = ? AND name = ?`, account, region, name).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -219,8 +226,8 @@ func (r *Repository) GetDBSubnetGroup(account, name string) (*RDSSubnetGroup, er
 	return &sg, nil
 }
 
-func (r *Repository) DeleteDBSubnetGroup(account, name string) error {
-	res, err := r.db.Exec(`DELETE FROM rds_db_subnet_groups WHERE account_id = ? AND name = ?`, account, name)
+func (r *Repository) DeleteDBSubnetGroup(account, region, name string) error {
+	res, err := r.db.Exec(`DELETE FROM rds_db_subnet_groups WHERE account_id = ? AND region = ? AND name = ?`, account, region, name)
 	if err != nil {
 		return mapDeleteError(err)
 	}
@@ -337,9 +344,9 @@ func (r *Repository) CreateDBParameterGroup(account string, pg *RDSParameterGrou
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetDBParameterGroup(account, name string) (*RDSParameterGroup, error) {
+func (r *Repository) GetDBParameterGroup(account, region, name string) (*RDSParameterGroup, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM rds_db_parameter_groups WHERE account_id = ? AND name = ?`, account, name).Scan(&data)
+	err := r.db.QueryRow(`SELECT data FROM rds_db_parameter_groups WHERE account_id = ? AND region = ? AND name = ?`, account, region, name).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -353,8 +360,8 @@ func (r *Repository) GetDBParameterGroup(account, name string) (*RDSParameterGro
 	return &pg, nil
 }
 
-func (r *Repository) DeleteDBParameterGroup(account, name string) error {
-	res, err := r.db.Exec(`DELETE FROM rds_db_parameter_groups WHERE account_id = ? AND name = ?`, account, name)
+func (r *Repository) DeleteDBParameterGroup(account, region, name string) error {
+	res, err := r.db.Exec(`DELETE FROM rds_db_parameter_groups WHERE account_id = ? AND region = ? AND name = ?`, account, region, name)
 	if err != nil {
 		return mapDeleteError(err)
 	}
@@ -374,9 +381,9 @@ func (r *Repository) CreateDBClusterParameterGroup(account string, pg *RDSCluste
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetDBClusterParameterGroup(account, name string) (*RDSClusterParameterGroup, error) {
+func (r *Repository) GetDBClusterParameterGroup(account, region, name string) (*RDSClusterParameterGroup, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM rds_db_cluster_parameter_groups WHERE account_id = ? AND name = ?`, account, name).Scan(&data)
+	err := r.db.QueryRow(`SELECT data FROM rds_db_cluster_parameter_groups WHERE account_id = ? AND region = ? AND name = ?`, account, region, name).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -390,8 +397,8 @@ func (r *Repository) GetDBClusterParameterGroup(account, name string) (*RDSClust
 	return &pg, nil
 }
 
-func (r *Repository) DeleteDBClusterParameterGroup(account, name string) error {
-	res, err := r.db.Exec(`DELETE FROM rds_db_cluster_parameter_groups WHERE account_id = ? AND name = ?`, account, name)
+func (r *Repository) DeleteDBClusterParameterGroup(account, region, name string) error {
+	res, err := r.db.Exec(`DELETE FROM rds_db_cluster_parameter_groups WHERE account_id = ? AND region = ? AND name = ?`, account, region, name)
 	if err != nil {
 		return mapDeleteError(err)
 	}
@@ -406,12 +413,12 @@ func (r *Repository) DeleteDBClusterParameterGroup(account, name string) error {
 
 func (r *Repository) CreateDBCluster(account string, c *RDSCluster) error {
 	if c.SubnetGroupName != "" {
-		if _, err := r.GetDBSubnetGroup(account, c.SubnetGroupName); err != nil {
+		if _, err := r.GetDBSubnetGroup(account, c.Region, c.SubnetGroupName); err != nil {
 			return err
 		}
 	}
 	if c.ClusterParameterGroupName != "" {
-		if _, err := r.GetDBClusterParameterGroup(account, c.ClusterParameterGroupName); err != nil {
+		if _, err := r.GetDBClusterParameterGroup(account, c.Region, c.ClusterParameterGroupName); err != nil {
 			return err
 		}
 	}
@@ -429,9 +436,9 @@ func (r *Repository) CreateDBCluster(account string, c *RDSCluster) error {
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetDBCluster(account, id string) (*RDSCluster, error) {
+func (r *Repository) GetDBCluster(account, region, id string) (*RDSCluster, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM rds_db_clusters WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	err := r.db.QueryRow(`SELECT data FROM rds_db_clusters WHERE account_id = ? AND region = ? AND id = ?`, account, region, id).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -445,8 +452,8 @@ func (r *Repository) GetDBCluster(account, id string) (*RDSCluster, error) {
 	return &c, nil
 }
 
-func (r *Repository) DeleteDBCluster(account, id string) error {
-	c, err := r.GetDBCluster(account, id)
+func (r *Repository) DeleteDBCluster(account, region, id string) error {
+	c, err := r.GetDBCluster(account, region, id)
 	if err != nil {
 		return err
 	}
@@ -455,7 +462,7 @@ func (r *Repository) DeleteDBCluster(account, id string) error {
 		// protected-resource refusal.
 		return fmt.Errorf("cluster %q has deletion_protection enabled: %w", id, models.ErrConflict)
 	}
-	res, err := r.db.Exec(`DELETE FROM rds_db_clusters WHERE account_id = ? AND id = ?`, account, id)
+	res, err := r.db.Exec(`DELETE FROM rds_db_clusters WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
 	if err != nil {
 		return mapDeleteError(err)
 	}
@@ -470,22 +477,22 @@ func (r *Repository) DeleteDBCluster(account, id string) error {
 
 func (r *Repository) CreateDBInstance(account string, inst *RDSInstance) error {
 	if inst.SubnetGroupName != "" {
-		if _, err := r.GetDBSubnetGroup(account, inst.SubnetGroupName); err != nil {
+		if _, err := r.GetDBSubnetGroup(account, inst.Region, inst.SubnetGroupName); err != nil {
 			return err
 		}
 	}
 	if inst.ClusterID != "" {
-		if _, err := r.GetDBCluster(account, inst.ClusterID); err != nil {
+		if _, err := r.GetDBCluster(account, inst.Region, inst.ClusterID); err != nil {
 			return err
 		}
 	}
 	if inst.ParameterGroupName != "" {
-		if _, err := r.GetDBParameterGroup(account, inst.ParameterGroupName); err != nil {
+		if _, err := r.GetDBParameterGroup(account, inst.Region, inst.ParameterGroupName); err != nil {
 			return err
 		}
 	}
 	if inst.ReplicateSourceDB != "" {
-		if _, err := r.GetDBInstance(account, inst.ReplicateSourceDB); err != nil {
+		if _, err := r.GetDBInstance(account, inst.Region, inst.ReplicateSourceDB); err != nil {
 			return err
 		}
 	}
@@ -504,9 +511,9 @@ func (r *Repository) CreateDBInstance(account string, inst *RDSInstance) error {
 	return mapInsertError(err)
 }
 
-func (r *Repository) GetDBInstance(account, id string) (*RDSInstance, error) {
+func (r *Repository) GetDBInstance(account, region, id string) (*RDSInstance, error) {
 	var data string
-	err := r.db.QueryRow(`SELECT data FROM rds_db_instances WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
+	err := r.db.QueryRow(`SELECT data FROM rds_db_instances WHERE account_id = ? AND region = ? AND id = ?`, account, region, id).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -549,8 +556,8 @@ func (r *Repository) ListDBInstances(account, region string) ([]*RDSInstance, er
 	return out, rows.Err()
 }
 
-func (r *Repository) DeleteDBInstance(account, id string) error {
-	inst, err := r.GetDBInstance(account, id)
+func (r *Repository) DeleteDBInstance(account, region, id string) error {
+	inst, err := r.GetDBInstance(account, region, id)
 	if err != nil {
 		return err
 	}
@@ -562,8 +569,8 @@ func (r *Repository) DeleteDBInstance(account, id string) error {
 	// pitfall: "deleting source while replicas exist fails").
 	var n int
 	if err := r.db.QueryRow(
-		`SELECT COUNT(*) FROM rds_db_instances WHERE account_id = ? AND replicate_source_db = ?`,
-		account, id,
+		`SELECT COUNT(*) FROM rds_db_instances WHERE account_id = ? AND region = ? AND replicate_source_db = ?`,
+		account, region, id,
 	).Scan(&n); err != nil {
 		return err
 	}
@@ -571,7 +578,7 @@ func (r *Repository) DeleteDBInstance(account, id string) error {
 		return fmt.Errorf("instance %q has %d replica(s); promote or delete them first: %w",
 			id, n, models.ErrConflict)
 	}
-	res, err := r.db.Exec(`DELETE FROM rds_db_instances WHERE account_id = ? AND id = ?`, account, id)
+	res, err := r.db.Exec(`DELETE FROM rds_db_instances WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
 	if err != nil {
 		return mapDeleteError(err)
 	}

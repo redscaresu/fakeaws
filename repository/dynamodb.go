@@ -46,7 +46,10 @@ var dynamodbMigrations = []string{
 		hash_value  TEXT NOT NULL,
 		range_value TEXT NOT NULL DEFAULT '',
 		item        TEXT NOT NULL,
-		PRIMARY KEY (account_id, table_name, hash_value, range_value),
+		-- Codex pass 6 BLOCKING #1: region must be in the PK so
+		-- same-named tables in different regions can hold their
+		-- own item sets without bleeding across regions.
+		PRIMARY KEY (account_id, region, table_name, hash_value, range_value),
 		FOREIGN KEY (account_id, region, table_name)
 		    REFERENCES dynamodb_tables(account_id, region, name) ON DELETE CASCADE
 	)`,
@@ -187,8 +190,8 @@ func (r *Repository) PutDynamoDBItem(account, region string, item *DynamoDBItem)
 func (r *Repository) GetDynamoDBItem(account, region, tableName, hashValue, rangeValue string) (*DynamoDBItem, error) {
 	var raw string
 	err := r.db.QueryRow(
-		`SELECT item FROM dynamodb_items WHERE account_id = ? AND table_name = ? AND hash_value = ? AND range_value = ?`,
-		account, tableName, hashValue, rangeValue,
+		`SELECT item FROM dynamodb_items WHERE account_id = ? AND region = ? AND table_name = ? AND hash_value = ? AND range_value = ?`,
+		account, region, tableName, hashValue, rangeValue,
 	).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
@@ -204,8 +207,8 @@ func (r *Repository) GetDynamoDBItem(account, region, tableName, hashValue, rang
 
 func (r *Repository) DeleteDynamoDBItem(account, region, tableName, hashValue, rangeValue string) error {
 	res, err := r.db.Exec(
-		`DELETE FROM dynamodb_items WHERE account_id = ? AND table_name = ? AND hash_value = ? AND range_value = ?`,
-		account, tableName, hashValue, rangeValue,
+		`DELETE FROM dynamodb_items WHERE account_id = ? AND region = ? AND table_name = ? AND hash_value = ? AND range_value = ?`,
+		account, region, tableName, hashValue, rangeValue,
 	)
 	if err != nil {
 		return err
@@ -225,8 +228,8 @@ func (r *Repository) ScanDynamoDBTable(account, region, tableName string) ([]*Dy
 		return nil, err
 	}
 	rows, err := r.db.Query(
-		`SELECT hash_value, range_value, item FROM dynamodb_items WHERE account_id = ? AND table_name = ? ORDER BY hash_value, range_value`,
-		account, tableName,
+		`SELECT hash_value, range_value, item FROM dynamodb_items WHERE account_id = ? AND region = ? AND table_name = ? ORDER BY hash_value, range_value`,
+		account, region, tableName,
 	)
 	if err != nil {
 		return nil, err

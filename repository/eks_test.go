@@ -156,13 +156,13 @@ func TestEKSCluster_DeleteCASCADESChildren(t *testing.T) {
 		Region: testRegion, ARN: "arn:addon", CreatedAt: "t",
 	})
 
-	if err := r.DeleteEKSCluster(testAccount, "demo"); err != nil {
+	if err := r.DeleteEKSCluster(testAccount, testRegion, "demo"); err != nil {
 		t.Fatalf("DeleteEKSCluster: %v", err)
 	}
-	if _, err := r.GetEKSNodeGroup(testAccount, "demo", "ng"); !errors.Is(err, models.ErrNotFound) {
+	if _, err := r.GetEKSNodeGroup(testAccount, testRegion, "demo", "ng"); !errors.Is(err, models.ErrNotFound) {
 		t.Errorf("CASCADE: nodegroup should be gone, got %v", err)
 	}
-	if _, err := r.GetEKSAddon(testAccount, "demo", "vpc-cni"); !errors.Is(err, models.ErrNotFound) {
+	if _, err := r.GetEKSAddon(testAccount, testRegion, "demo", "vpc-cni"); !errors.Is(err, models.ErrNotFound) {
 		t.Errorf("CASCADE: addon should be gone, got %v", err)
 	}
 }
