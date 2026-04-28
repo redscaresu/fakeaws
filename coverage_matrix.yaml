@@ -123,6 +123,18 @@ entries:
     updates_exempt: true
     updates_exempt_reason: "Ownership rule is a single-document Put; partial-update is exercised by replacing the rule."
     integration_test_func_name: "^TestCoverage_S3OwnershipAndEncryption$"
+  # Codex pass 12 BLOCKING fix — landed S3 tagging surface + EC2
+  # security group rule resource types were undeclared, leaving
+  # TestFullCoverageAudit blind to them.
+  - aws_service: s3
+    aws_resource_type: aws_s3_bucket_tagging
+    working_exempt: true
+    working_exempt_reason: "Tagging round-trip is asserted in TestS3_TaggingRoundTrip; standalone working/s3_bucket_tagging/ would duplicate."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Tagging is a single-document Put with no cross-resource FK refs."
+    updates_exempt: true
+    updates_exempt_reason: "Tag-set updates are full-replacement Puts; partial-update is exercised by re-Putting."
+    integration_test_func_name: "^TestS3_TaggingRoundTrip$"
 
   # EC2 (S44 handlers in fakeaws@485391b/cd1e76c/1987703/1713ba3,
   # S44-T12 e2e + these matrix entries). VPC, Subnet, IGW, RouteTable,
@@ -188,6 +200,19 @@ entries:
     working_dir_name: vpc_network
     misconfigured_exempt: true
     misconfigured_exempt_reason: "Duplicate-name and missing-VPC failures asserted in TestEC2_SecurityGroupCRUDPlusRules + the post-merge regression test."
+    updates_dir_name: update_security_group_rules
+    integration_test_func_name: "^TestEC2_SecurityGroupCRUDPlusRules$"
+  # Codex pass 12 BLOCKING fix — aws_security_group_rule is a
+  # landed surface (Authorize/Revoke ingress + egress paths,
+  # exercised by the update_security_group_rules example) but was
+  # undeclared. scenario_resource_type omitted: rules are nested
+  # inside the parent SG resource in scenarios.
+  - aws_service: ec2
+    aws_resource_type: aws_security_group_rule
+    working_exempt: true
+    working_exempt_reason: "Authorize/Revoke + idempotency are asserted inside TestEC2_SecurityGroupCRUDPlusRules; standalone working/security_group_rule/ would duplicate."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Rules ride the parent SG's existence gate (TestEC2_SecurityGroupCRUDPlusRules covers missing-SG)."
     updates_dir_name: update_security_group_rules
     integration_test_func_name: "^TestEC2_SecurityGroupCRUDPlusRules$"
   - aws_service: ec2
