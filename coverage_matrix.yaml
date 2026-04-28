@@ -194,15 +194,88 @@ entries:
     misconfigured_dir_name: rds_missing_subnet_group
     updates_dir_name: update_rds_parameter_group
     integration_test_func_name: "^TestRDS_DBInstance_FullChain$"
-  # Note: aws_rds_cluster (Aurora) and the read-replica chain are
-  # tested in repository/rds_test.go (TestRDSCluster_ParameterGroupAttachment,
-  # TestRDS_ReadReplicaChainRESTRICT) and handlers/rds_test.go
-  # (TestRDS_ReadReplicaChainRESTRICT) but no dedicated coverage_matrix
-  # entry exists yet because (a) no scenario currently lands an Aurora
-  # cluster — scenarios/training/aws-rds.yaml uses a single instance,
-  # (b) aws_db_instance with replicate_source_db is the same resource
-  # type as aws_db_instance, just with one extra arg. Both gap-fill
-  # under S48-T6 if scenarios require Aurora or read replicas.
+  # Codex pass 5 BLOCKING fix — additional IAM, EC2, RDS entries that
+  # have shipped handlers + tests but were previously undeclared. The
+  # matrix is the source-of-truth manifest; missing entries leave
+  # TestFullCoverageAudit blind to them. Per-scenario coverage may
+  # still be exempt where the resource is exercised inside a parent
+  # bundle — exemptions documented inline.
+
+  # IAM — instance profile + user + access key (S43 surface).
+  # scenario_resource_type omitted: these resources ship with the IAM
+  # handler surface but no scenario at v1 specifically demands them
+  # in HCL. The audit's scenario half is skipped per
+  # internal/audit/audit_test.go::assertScenarioCoversResource when
+  # scenario_resource_type is empty.
+  - aws_service: iam
+    aws_resource_type: aws_iam_instance_profile
+    working_exempt: true
+    working_exempt_reason: "Instance-profile lifecycle is asserted inline in TestCoverage_IAMInstanceProfileAndUser; standalone working/iam_instance_profile/ would duplicate."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "No cross-resource FK gates that aren't already covered by the iam_attachment_missing_role example."
+    updates_exempt: true
+    updates_exempt_reason: "Profile metadata is set-once at v1 (path is the only field)."
+    integration_test_func_name: "^TestCoverage_IAMInstanceProfileAndUser$"
+  - aws_service: iam
+    aws_resource_type: aws_iam_user
+    working_exempt: true
+    working_exempt_reason: "User CRUD is exercised in TestCoverage_IAMInstanceProfileAndUser; aws-iam.yaml scenarios focus on the role+policy chain at v1."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "No FK refs on standalone user."
+    updates_exempt: true
+    updates_exempt_reason: "User attribute updates are out of scope at v1 (no UpdateUser endpoint surfaced)."
+    integration_test_func_name: "^TestCoverage_IAMInstanceProfileAndUser$"
+  - aws_service: iam
+    aws_resource_type: aws_iam_access_key
+    working_exempt: true
+    working_exempt_reason: "Access-key Create/Delete is exercised in TestCoverage_IAMInstanceProfileAndUser inline; standalone working/iam_access_key/ would duplicate."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Access-key creation requires an existing user; FK gate exercised via the inline test."
+    updates_exempt: true
+    updates_exempt_reason: "Access-key status changes (Active/Inactive) are out of scope at v1."
+    integration_test_func_name: "^TestCoverage_IAMInstanceProfileAndUser$"
+
+  # EC2 — EIP + KeyPair (S44 surface). scenario_resource_type omitted:
+  # see IAM-side comment above.
+  - aws_service: ec2
+    aws_resource_type: aws_eip
+    working_exempt: true
+    working_exempt_reason: "EIP allocate/describe/release is exercised in TestEC2_EIPLifecycle; aws-vpc-network.yaml doesn't demand a public EIP at v1."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Domain=standard rejection asserted in TestEC2_EIPLifecycle; standalone misconfigured tofu example would duplicate."
+    updates_exempt: true
+    updates_exempt_reason: "EIP attributes are set-once at v1 (no UpdateEIP)."
+    integration_test_func_name: "^TestEC2_EIPLifecycle$"
+  - aws_service: ec2
+    aws_resource_type: aws_key_pair
+    working_exempt: true
+    working_exempt_reason: "KeyPair Import/Describe/Delete is exercised in TestEC2_KeyPairImportDescribeDelete; aws-instance.yaml scenarios don't pin a key pair at v1."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Missing PublicKeyMaterial 409 + missing-name 404 covered in handler tests; tofu doesn't expose a meaningful misconfigure path."
+    updates_exempt: true
+    updates_exempt_reason: "KeyPair is set-once at v1 (delete + recreate)."
+    integration_test_func_name: "^TestEC2_KeyPairImportDescribeDelete$"
+
+  # RDS — Aurora cluster + cluster parameter group (S45 surface).
+  # scenario_resource_type omitted: see IAM-side comment.
+  - aws_service: rds
+    aws_resource_type: aws_rds_cluster
+    working_exempt: true
+    working_exempt_reason: "Aurora cluster lifecycle is asserted in TestCoverage_RDSCluster (CreateDBCluster + DescribeDBClusters + DeleteDBCluster). aws-rds.yaml currently uses a single instance — Aurora-specific scenario reconsidered if/when scenarios require it."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Cluster FK violations (missing subnet group, missing param group, deletion_protection refusal) covered by repository tests."
+    updates_exempt: true
+    updates_exempt_reason: "Cluster modify is no-op at v1 (cluster_parameter_group attachment is set-once)."
+    integration_test_func_name: "^TestCoverage_RDSCluster$"
+  - aws_service: rds
+    aws_resource_type: aws_rds_cluster_parameter_group
+    working_exempt: true
+    working_exempt_reason: "Cluster parameter group create/describe/delete is exercised in TestCoverage_RDSParameterGroupDescribe alongside the instance parameter group."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "No misconfigured paths beyond what TestRDSCluster_ParameterGroupAttachment already pins (FK to cluster)."
+    updates_exempt: true
+    updates_exempt_reason: "Parameter group families are set-once at v1; attribute mutation is out of scope."
+    integration_test_func_name: "^TestCoverage_RDSParameterGroupDescribe$"
 
   # DynamoDB (S45-T5 handlers, S45-T10 e2e + this matrix entry).
   - aws_service: dynamodb

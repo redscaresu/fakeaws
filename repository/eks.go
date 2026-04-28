@@ -292,6 +292,68 @@ func (r *Repository) GetEKSNodeGroup(account, clusterName, name string) (*EKSNod
 	return &ng, nil
 }
 
+// ListEKSNodeGroups returns every nodegroup for the account,
+// optionally filtered by cluster (empty string = all clusters).
+// Codex pass 5 SUGGEST fix — was previously only reachable via raw
+// DB queries from the gatherer, which deadlocks under
+// SetMaxOpenConns(1) when the gather is called inside a request
+// already holding the connection.
+func (r *Repository) ListEKSNodeGroups(account, clusterName string) ([]*EKSNodeGroup, error) {
+	var rows *sql.Rows
+	var err error
+	if clusterName == "" {
+		rows, err = r.db.Query(`SELECT data FROM eks_node_groups WHERE account_id = ? ORDER BY cluster_name, name`, account)
+	} else {
+		rows, err = r.db.Query(`SELECT data FROM eks_node_groups WHERE account_id = ? AND cluster_name = ? ORDER BY name`, account, clusterName)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*EKSNodeGroup
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var ng EKSNodeGroup
+		if err := json.Unmarshal([]byte(data), &ng); err != nil {
+			return nil, err
+		}
+		out = append(out, &ng)
+	}
+	return out, rows.Err()
+}
+
+// ListEKSAddons returns every addon for the account, optionally
+// filtered by cluster.
+func (r *Repository) ListEKSAddons(account, clusterName string) ([]*EKSAddon, error) {
+	var rows *sql.Rows
+	var err error
+	if clusterName == "" {
+		rows, err = r.db.Query(`SELECT data FROM eks_addons WHERE account_id = ? ORDER BY cluster_name, name`, account)
+	} else {
+		rows, err = r.db.Query(`SELECT data FROM eks_addons WHERE account_id = ? AND cluster_name = ? ORDER BY name`, account, clusterName)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*EKSAddon
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var a EKSAddon
+		if err := json.Unmarshal([]byte(data), &a); err != nil {
+			return nil, err
+		}
+		out = append(out, &a)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) DeleteEKSNodeGroup(account, clusterName, name string) error {
 	res, err := r.db.Exec(
 		`DELETE FROM eks_node_groups WHERE account_id = ? AND cluster_name = ? AND name = ?`,

@@ -353,62 +353,26 @@ func (app *Application) gatherEKSStateReal() map[string]any {
 		})
 	}
 	out["clusters"] = cOut
-	// The repo doesn't expose unfiltered nodegroup/addon list paths;
-	// the data lives keyed by (cluster, name). Probe via raw DB
-	// query for everything under each cluster.
-	ngOut := []map[string]any{}
-	addOut := []map[string]any{}
-	for _, c := range clusters {
-		// We don't have a per-cluster list either; per concepts.md
-		// /mock/state surfaces what the audit needs (cluster names
-		// and their child counts). We surface nodegroup/addon
-		// existence via the DB directly using raw queries we have:
-		// the gather helper extracts (cluster_name, name) tuples.
-		// Use a reflective probe via repository's underlying DB.
-		_ = c
+	// Codex pass 5 SUGGEST fix: use proper repository List methods
+	// instead of raw nested queries. The previous implementation
+	// risked deadlock under SetMaxOpenConns(1) by holding `rows`
+	// open while issuing nested Get* queries on the same connection.
+	ngs, _ := app.repo.ListEKSNodeGroups(account, "")
+	ngOut := make([]map[string]any, 0, len(ngs))
+	for _, ng := range ngs {
+		ngOut = append(ngOut, map[string]any{
+			"cluster_name": ng.ClusterName, "name": ng.Name,
+			"node_role_arn": ng.NodeRoleARN, "subnet_ids": ng.SubnetIDs,
+			"status": ng.Status, "region": ng.Region, "arn": ng.ARN,
+		})
 	}
-	// Walk every modeled service via the DB directly. The repo
-	// already exposes Get* per-tuple; gather just iterates.
-	if rows, err := app.repo.DB().Query(
-		`SELECT cluster_name, name FROM eks_node_groups WHERE account_id = ? ORDER BY cluster_name, name`,
-		account,
-	); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var cluster, name string
-			if rows.Scan(&cluster, &name) != nil {
-				continue
-			}
-			ng, err := app.repo.GetEKSNodeGroup(account, cluster, name)
-			if err != nil {
-				continue
-			}
-			ngOut = append(ngOut, map[string]any{
-				"cluster_name": ng.ClusterName, "name": ng.Name,
-				"node_role_arn": ng.NodeRoleARN, "subnet_ids": ng.SubnetIDs,
-				"status": ng.Status, "region": ng.Region, "arn": ng.ARN,
-			})
-		}
-	}
-	if rows, err := app.repo.DB().Query(
-		`SELECT cluster_name, name FROM eks_addons WHERE account_id = ? ORDER BY cluster_name, name`,
-		account,
-	); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var cluster, name string
-			if rows.Scan(&cluster, &name) != nil {
-				continue
-			}
-			a, err := app.repo.GetEKSAddon(account, cluster, name)
-			if err != nil {
-				continue
-			}
-			addOut = append(addOut, map[string]any{
-				"cluster_name": a.ClusterName, "name": a.Name, "version": a.Version,
-				"status": a.Status, "region": a.Region, "arn": a.ARN,
-			})
-		}
+	addons, _ := app.repo.ListEKSAddons(account, "")
+	addOut := make([]map[string]any, 0, len(addons))
+	for _, a := range addons {
+		addOut = append(addOut, map[string]any{
+			"cluster_name": a.ClusterName, "name": a.Name, "version": a.Version,
+			"status": a.Status, "region": a.Region, "arn": a.ARN,
+		})
 	}
 	out["node_groups"] = ngOut
 	out["addons"] = addOut
