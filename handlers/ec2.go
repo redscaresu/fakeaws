@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net/http"
@@ -91,10 +92,25 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "ReleaseAddress":
 		app.ec2ReleaseAddress(w, account, req)
 
-	// Remaining actions (SG in S44-T5, Instance / KeyPair / AMI in
-	// S44-T7) hit the default arm and surface as 404 with a log line
-	// — per concepts.md "Anti-patterns explicitly forbidden", no
-	// silent 200.
+	// ----- SecurityGroup -----
+	case "CreateSecurityGroup":
+		app.ec2CreateSecurityGroup(w, account, region, req)
+	case "DescribeSecurityGroups":
+		app.ec2DescribeSecurityGroups(w, account, req)
+	case "DeleteSecurityGroup":
+		app.ec2DeleteSecurityGroup(w, account, req)
+	case "AuthorizeSecurityGroupIngress":
+		app.ec2AuthorizeSecurityGroupRules(w, account, "ingress", req)
+	case "RevokeSecurityGroupIngress":
+		app.ec2RevokeSecurityGroupRules(w, account, "ingress", req)
+	case "AuthorizeSecurityGroupEgress":
+		app.ec2AuthorizeSecurityGroupRules(w, account, "egress", req)
+	case "RevokeSecurityGroupEgress":
+		app.ec2RevokeSecurityGroupRules(w, account, "egress", req)
+
+	// Remaining actions (Instance / KeyPair / AMI in S44-T7) hit the
+	// default arm and surface as 404 with a log line — per concepts.md
+	// "Anti-patterns explicitly forbidden", no silent 200.
 	default:
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
 			fmt.Errorf("EC2 action %q not yet implemented in fakeaws v1: %w", req.Action, models.ErrNotFound))
@@ -565,4 +581,336 @@ func (app *Application) ec2ReleaseAddress(w http.ResponseWriter, account string,
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "ReleaseAddress", nil)
+}
+
+// ----- SecurityGroup handlers -----
+//
+// AWS SG rules are passed as flattened Query params:
+//   IpPermissions.1.IpProtocol = tcp
+//   IpPermissions.1.FromPort   = 443
+//   IpPermissions.1.ToPort     = 443
+//   IpPermissions.1.IpRanges.1.CidrIp = 0.0.0.0/0
+// We parse these into a canonical IpPermission shape persisted as
+// JSON in the ingress/egress columns. The shape is intentionally
+// minimal; v1 covers CidrIp ranges and stores other fields as
+// emitted-back-verbatim strings if the AWS provider sends them.
+
+type ec2IpRange struct {
+	CidrIp string `json:"CidrIp"`
+}
+
+type ec2IpPermission struct {
+	IpProtocol string       `json:"IpProtocol"`
+	FromPort   int          `json:"FromPort"`
+	ToPort     int          `json:"ToPort"`
+	IpRanges   []ec2IpRange `json:"IpRanges,omitempty"`
+}
+
+type ec2SgIpRangeXML struct {
+	XMLName xml.Name `xml:"item"`
+	CidrIp  string   `xml:"cidrIp"`
+}
+
+type ec2SgIpPermissionXML struct {
+	XMLName    xml.Name          `xml:"item"`
+	IpProtocol string            `xml:"ipProtocol"`
+	FromPort   int               `xml:"fromPort"`
+	ToPort     int               `xml:"toPort"`
+	IpRanges   []ec2SgIpRangeXML `xml:"ipRanges>item,omitempty"`
+}
+
+type ec2SecurityGroupXML struct {
+	XMLName       xml.Name               `xml:"item"`
+	GroupId       string                 `xml:"groupId"`
+	GroupName     string                 `xml:"groupName"`
+	GroupDesc     string                 `xml:"groupDescription"`
+	VpcId         string                 `xml:"vpcId"`
+	IpPermissions []ec2SgIpPermissionXML `xml:"ipPermissions>item,omitempty"`
+	IpPermsEgress []ec2SgIpPermissionXML `xml:"ipPermissionsEgress>item,omitempty"`
+}
+
+type ec2CreateSecurityGroupResult struct {
+	XMLName xml.Name `xml:"CreateSecurityGroupResult"`
+	GroupId string   `xml:"groupId"`
+}
+
+type ec2DescribeSecurityGroupsResult struct {
+	XMLName          xml.Name              `xml:"DescribeSecurityGroupsResult"`
+	SecurityGroupSet []ec2SecurityGroupXML `xml:"securityGroupInfo>item"`
+}
+
+// parseIpPermissions reads the flattened IpPermissions.<n>.* params
+// out of the Query-RPC body and returns the canonical JSON-shaped
+// permission slice.
+func parseIpPermissions(req awsproto.QueryRPCRequest) []ec2IpPermission {
+	// First, collect indexes used: every key starting with
+	// "IpPermissions." has a numeric segment after the dot.
+	indexes := map[string]bool{}
+	for k := range req.Params {
+		if !strings.HasPrefix(k, "IpPermissions.") {
+			continue
+		}
+		rest := strings.TrimPrefix(k, "IpPermissions.")
+		if i := strings.Index(rest, "."); i > 0 {
+			indexes[rest[:i]] = true
+		}
+	}
+	out := make([]ec2IpPermission, 0, len(indexes))
+	for n := range indexes {
+		base := "IpPermissions." + n + "."
+		perm := ec2IpPermission{
+			IpProtocol: req.Params.Get(base + "IpProtocol"),
+		}
+		if v := req.Params.Get(base + "FromPort"); v != "" {
+			fmt.Sscanf(v, "%d", &perm.FromPort)
+		}
+		if v := req.Params.Get(base + "ToPort"); v != "" {
+			fmt.Sscanf(v, "%d", &perm.ToPort)
+		}
+		// IpRanges.<m>.CidrIp.
+		rangeIdx := map[string]bool{}
+		rangePrefix := base + "IpRanges."
+		for k := range req.Params {
+			if !strings.HasPrefix(k, rangePrefix) {
+				continue
+			}
+			rest := strings.TrimPrefix(k, rangePrefix)
+			if i := strings.Index(rest, "."); i > 0 {
+				rangeIdx[rest[:i]] = true
+			}
+		}
+		for m := range rangeIdx {
+			cidr := req.Params.Get(rangePrefix + m + ".CidrIp")
+			if cidr != "" {
+				perm.IpRanges = append(perm.IpRanges, ec2IpRange{CidrIp: cidr})
+			}
+		}
+		out = append(out, perm)
+	}
+	return out
+}
+
+func ec2SgRulesToXML(rules []byte) []ec2SgIpPermissionXML {
+	if len(rules) == 0 {
+		return nil
+	}
+	var perms []ec2IpPermission
+	if err := json.Unmarshal(rules, &perms); err != nil {
+		return nil
+	}
+	out := make([]ec2SgIpPermissionXML, 0, len(perms))
+	for _, p := range perms {
+		x := ec2SgIpPermissionXML{
+			IpProtocol: p.IpProtocol, FromPort: p.FromPort, ToPort: p.ToPort,
+		}
+		for _, r := range p.IpRanges {
+			x.IpRanges = append(x.IpRanges, ec2SgIpRangeXML{CidrIp: r.CidrIp})
+		}
+		out = append(out, x)
+	}
+	return out
+}
+
+func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	groupName := req.Params.Get("GroupName")
+	desc := req.Params.Get("GroupDescription")
+	vpcID := req.Params.Get("VpcId")
+	if groupName == "" || desc == "" || vpcID == "" {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+			fmt.Errorf("GroupName, GroupDescription, and VpcId required: %w", models.ErrConflict))
+		return
+	}
+	id := "sg-" + ec2RandID()
+	sg := &repository.EC2SecurityGroup{
+		ID: id, VPCID: vpcID, GroupName: groupName, Description: desc,
+		Region: region,
+		ARN:    awsproto.BuildEC2SecurityGroupARN(region, id),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := app.repo.CreateSecurityGroup(account, sg); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "CreateSecurityGroup",
+		&ec2CreateSecurityGroupResult{GroupId: sg.ID})
+}
+
+func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	// GroupId.<n> filter — most common from terraform-provider-aws.
+	wanted := []string{}
+	for k, vs := range req.Params {
+		if strings.HasPrefix(k, "GroupId.") && len(vs) > 0 {
+			wanted = append(wanted, vs[0])
+		}
+	}
+	if len(wanted) == 0 {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+			fmt.Errorf("DescribeSecurityGroups without GroupId.<n> filter not yet supported: %w", models.ErrConflict))
+		return
+	}
+	out := ec2DescribeSecurityGroupsResult{SecurityGroupSet: make([]ec2SecurityGroupXML, 0, len(wanted))}
+	for _, id := range wanted {
+		sg, err := app.repo.GetSecurityGroup(account, id)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			return
+		}
+		ing, eg, err := app.repo.GetSecurityGroupRules(account, id)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			return
+		}
+		out.SecurityGroupSet = append(out.SecurityGroupSet, ec2SecurityGroupXML{
+			GroupId: sg.ID, GroupName: sg.GroupName, GroupDesc: sg.Description, VpcId: sg.VPCID,
+			IpPermissions: ec2SgRulesToXML(ing),
+			IpPermsEgress: ec2SgRulesToXML(eg),
+		})
+	}
+	awsproto.WriteQueryRPCResponse(w, "DescribeSecurityGroups", &out)
+}
+
+func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	id := req.Params.Get("GroupId")
+	if id == "" {
+		// AWS also accepts GroupName for non-VPC SGs; v1 supports GroupId only.
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+			fmt.Errorf("GroupId required: %w", models.ErrConflict))
+		return
+	}
+	if err := app.repo.DeleteSecurityGroup(account, id); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "DeleteSecurityGroup", nil)
+}
+
+// ec2AuthorizeSecurityGroupRules adds the parsed IpPermissions to the
+// SG's existing direction column. Authorize is additive at the AWS
+// contract; we union with the existing rules and dedupe by
+// (proto, from, to, range-set).
+func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, account, direction string, req awsproto.QueryRPCRequest) {
+	sgID := req.Params.Get("GroupId")
+	if sgID == "" {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+			fmt.Errorf("GroupId required: %w", models.ErrConflict))
+		return
+	}
+	add := parseIpPermissions(req)
+	if len(add) == 0 {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+			fmt.Errorf("at least one IpPermissions.<n>.* required: %w", models.ErrConflict))
+		return
+	}
+	existing, err := loadSGRules(app, account, sgID, direction)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	merged := mergeIpPermissions(existing, add)
+	body, _ := json.Marshal(merged)
+	if err := app.repo.UpdateSecurityGroupRules(account, sgID, direction, body); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	action := "AuthorizeSecurityGroupIngress"
+	if direction == "egress" {
+		action = "AuthorizeSecurityGroupEgress"
+	}
+	awsproto.WriteQueryRPCResponse(w, action, nil)
+}
+
+func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, account, direction string, req awsproto.QueryRPCRequest) {
+	sgID := req.Params.Get("GroupId")
+	if sgID == "" {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+			fmt.Errorf("GroupId required: %w", models.ErrConflict))
+		return
+	}
+	rm := parseIpPermissions(req)
+	existing, err := loadSGRules(app, account, sgID, direction)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	remaining := subtractIpPermissions(existing, rm)
+	body, _ := json.Marshal(remaining)
+	if err := app.repo.UpdateSecurityGroupRules(account, sgID, direction, body); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	action := "RevokeSecurityGroupIngress"
+	if direction == "egress" {
+		action = "RevokeSecurityGroupEgress"
+	}
+	awsproto.WriteQueryRPCResponse(w, action, nil)
+}
+
+func loadSGRules(app *Application, account, id, direction string) ([]ec2IpPermission, error) {
+	ing, eg, err := app.repo.GetSecurityGroupRules(account, id)
+	if err != nil {
+		return nil, err
+	}
+	body := ing
+	if direction == "egress" {
+		body = eg
+	}
+	if len(body) == 0 {
+		return nil, nil
+	}
+	var out []ec2IpPermission
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func ipPermissionKey(p ec2IpPermission) string {
+	cidrs := make([]string, 0, len(p.IpRanges))
+	for _, r := range p.IpRanges {
+		cidrs = append(cidrs, r.CidrIp)
+	}
+	sortedCidrs := append([]string(nil), cidrs...)
+	// stable order so the same set produces the same key
+	for i := 1; i < len(sortedCidrs); i++ {
+		for j := i; j > 0 && sortedCidrs[j-1] > sortedCidrs[j]; j-- {
+			sortedCidrs[j-1], sortedCidrs[j] = sortedCidrs[j], sortedCidrs[j-1]
+		}
+	}
+	return fmt.Sprintf("%s|%d|%d|%s", p.IpProtocol, p.FromPort, p.ToPort,
+		strings.Join(sortedCidrs, ","))
+}
+
+func mergeIpPermissions(a, b []ec2IpPermission) []ec2IpPermission {
+	seen := map[string]bool{}
+	out := make([]ec2IpPermission, 0, len(a)+len(b))
+	for _, p := range a {
+		k := ipPermissionKey(p)
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, p)
+		}
+	}
+	for _, p := range b {
+		k := ipPermissionKey(p)
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func subtractIpPermissions(existing, rm []ec2IpPermission) []ec2IpPermission {
+	rmSet := map[string]bool{}
+	for _, p := range rm {
+		rmSet[ipPermissionKey(p)] = true
+	}
+	out := make([]ec2IpPermission, 0, len(existing))
+	for _, p := range existing {
+		if rmSet[ipPermissionKey(p)] {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }

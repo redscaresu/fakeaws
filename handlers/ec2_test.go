@@ -312,6 +312,121 @@ func TestEC2_RouteTableAndAssociation(t *testing.T) {
 	}
 }
 
+func TestEC2_SecurityGroupCRUDPlusRules(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	_, body := ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	vpcID := extractEC2Tag(body, "vpcId")
+
+	// CreateSecurityGroup.
+	resp, body := ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
+		"GroupName":        {"web"},
+		"GroupDescription": {"web tier"},
+		"VpcId":            {vpcID},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateSecurityGroup: %d %s", resp.StatusCode, body)
+	}
+	sgID := extractEC2Tag(body, "groupId")
+	if !strings.HasPrefix(sgID, "sg-") {
+		t.Fatalf("CreateSecurityGroup missing groupId: %s", body)
+	}
+
+	// Duplicate group_name in same VPC → 409.
+	resp, _ = ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
+		"GroupName": {"web"}, "GroupDescription": {"x"}, "VpcId": {vpcID},
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("duplicate SG name in same VPC: got %d, want 409", resp.StatusCode)
+	}
+
+	// AuthorizeSecurityGroupIngress: tcp 443 from 0.0.0.0/0.
+	resp, _ = ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{
+		"GroupId":                          {sgID},
+		"IpPermissions.1.IpProtocol":       {"tcp"},
+		"IpPermissions.1.FromPort":         {"443"},
+		"IpPermissions.1.ToPort":           {"443"},
+		"IpPermissions.1.IpRanges.1.CidrIp": {"0.0.0.0/0"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("AuthorizeSecurityGroupIngress: %d", resp.StatusCode)
+	}
+
+	// DescribeSecurityGroups echoes the rule back.
+	params := url.Values{}
+	params.Set("GroupId.1", sgID)
+	resp, body = ec2Call(t, srv, region, "DescribeSecurityGroups", params)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeSecurityGroups: %d %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "<cidrIp>0.0.0.0/0</cidrIp>") {
+		t.Errorf("DescribeSecurityGroups missing cidrIp: %s", body)
+	}
+	if !strings.Contains(string(body), "<fromPort>443</fromPort>") {
+		t.Errorf("DescribeSecurityGroups missing fromPort: %s", body)
+	}
+
+	// Authorize same rule twice → idempotent (dedup by key).
+	for i := 0; i < 2; i++ {
+		ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{
+			"GroupId":                          {sgID},
+			"IpPermissions.1.IpProtocol":       {"tcp"},
+			"IpPermissions.1.FromPort":         {"443"},
+			"IpPermissions.1.ToPort":           {"443"},
+			"IpPermissions.1.IpRanges.1.CidrIp": {"0.0.0.0/0"},
+		})
+	}
+	_, body = ec2Call(t, srv, region, "DescribeSecurityGroups", params)
+	if strings.Count(string(body), "<cidrIp>0.0.0.0/0</cidrIp>") != 1 {
+		t.Errorf("Authorize must be idempotent on identical rule; body=%s", body)
+	}
+
+	// Revoke removes it.
+	resp, _ = ec2Call(t, srv, region, "RevokeSecurityGroupIngress", url.Values{
+		"GroupId":                          {sgID},
+		"IpPermissions.1.IpProtocol":       {"tcp"},
+		"IpPermissions.1.FromPort":         {"443"},
+		"IpPermissions.1.ToPort":           {"443"},
+		"IpPermissions.1.IpRanges.1.CidrIp": {"0.0.0.0/0"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("RevokeSecurityGroupIngress: %d", resp.StatusCode)
+	}
+	_, body = ec2Call(t, srv, region, "DescribeSecurityGroups", params)
+	if strings.Contains(string(body), "<cidrIp>0.0.0.0/0</cidrIp>") {
+		t.Errorf("Revoke should remove rule; body=%s", body)
+	}
+
+	// AuthorizeSecurityGroupEgress.
+	resp, _ = ec2Call(t, srv, region, "AuthorizeSecurityGroupEgress", url.Values{
+		"GroupId":                           {sgID},
+		"IpPermissions.1.IpProtocol":        {"-1"},
+		"IpPermissions.1.IpRanges.1.CidrIp": {"0.0.0.0/0"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("AuthorizeSecurityGroupEgress: %d", resp.StatusCode)
+	}
+	_, body = ec2Call(t, srv, region, "DescribeSecurityGroups", params)
+	if !strings.Contains(string(body), "<ipPermissionsEgress>") {
+		t.Errorf("egress rule not echoed: %s", body)
+	}
+
+	// SG on missing VPC → 404.
+	resp, _ = ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
+		"GroupName": {"x"}, "GroupDescription": {"x"}, "VpcId": {"vpc-missing"},
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("SG with missing VPC: got %d, want 404", resp.StatusCode)
+	}
+
+	// DeleteSecurityGroup.
+	resp, _ = ec2Call(t, srv, region, "DeleteSecurityGroup", url.Values{"GroupId": {sgID}})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DeleteSecurityGroup: %d", resp.StatusCode)
+	}
+}
+
 func TestEC2_EIPLifecycle(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	const region = "us-east-1"
