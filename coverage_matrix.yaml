@@ -167,3 +167,50 @@ entries:
     updates_exempt_reason: "Instance attribute updates are no-ops at v1 (state machine handles lifecycle); update_security_group_rules covers the SG-membership update flow that AWS provider applies to instances."
     integration_test_func_name: "^TestEC2_RunInstancesAndTerminate$"
 
+
+  # RDS (S45-T3 handlers, S45-T10 e2e + these matrix entries). 5
+  # entries mirroring scenarios/training/aws-rds.yaml's anchor list
+  # (aws_vpc + aws_subnet are already credited via EC2 entries).
+  - aws_service: rds
+    aws_resource_type: aws_db_subnet_group
+    scenario_resource_type: database
+    working_dir_name: rds_instance
+    misconfigured_dir_name: rds_missing_subnet_group
+    updates_exempt: true
+    updates_exempt_reason: "Subnet group is set-once at v1 — instance-side parameter group updates exercised in update_rds_parameter_group."
+    integration_test_func_name: "^TestRDS_DBSubnetGroupCRUD$"
+  - aws_service: rds
+    aws_resource_type: aws_db_parameter_group
+    scenario_resource_type: database
+    working_dir_name: rds_instance
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Parameter group has no inbound FK refs (the FK is on the instance side); orphan parameter groups don't fail."
+    updates_dir_name: update_rds_parameter_group
+    integration_test_func_name: "^TestRDS_ParameterGroupCRUD$"
+  - aws_service: rds
+    aws_resource_type: aws_db_instance
+    scenario_resource_type: database
+    working_dir_name: rds_instance
+    misconfigured_dir_name: rds_missing_subnet_group
+    updates_dir_name: update_rds_parameter_group
+    integration_test_func_name: "^TestRDS_DBInstance_FullChain$"
+  # Note: aws_rds_cluster (Aurora) and the read-replica chain are
+  # tested in repository/rds_test.go (TestRDSCluster_ParameterGroupAttachment,
+  # TestRDS_ReadReplicaChainRESTRICT) and handlers/rds_test.go
+  # (TestRDS_ReadReplicaChainRESTRICT) but no dedicated coverage_matrix
+  # entry exists yet because (a) no scenario currently lands an Aurora
+  # cluster — scenarios/training/aws-rds.yaml uses a single instance,
+  # (b) aws_db_instance with replicate_source_db is the same resource
+  # type as aws_db_instance, just with one extra arg. Both gap-fill
+  # under S48-T6 if scenarios require Aurora or read replicas.
+
+  # DynamoDB (S45-T5 handlers, S45-T10 e2e + this matrix entry).
+  - aws_service: dynamodb
+    aws_resource_type: aws_dynamodb_table
+    scenario_resource_type: dynamodb
+    working_dir_name: dynamodb_table
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "DynamoDB table at v1 has no cross-resource FK refs (item-level FKs are out of scope; handler-level table existence is asserted in TestDynamoDB_PutItemMissingTable404)."
+    updates_exempt: true
+    updates_exempt_reason: "Table mutation (billing_mode flip, GSI addition) is out of scope at v1; the table itself is set-once. S48-T6 reconsiders if scenarios require it."
+    integration_test_func_name: "^TestDynamoDB_TableLifecycle$"
