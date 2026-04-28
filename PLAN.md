@@ -275,4 +275,76 @@ dynamodb_items         (account_id, table_name, hash_value, range_value)
   S45-T10  gated TestE2E_AWS_RDS + TestE2E_AWS_DynamoDB; same PR adds
            coverage_matrix.yaml entries.
 
-Phase 4+ design notes will be written as those phases land.
+## Phase 4 — Containers + queues (S46)
+
+EKS and SQS. Two more disparate wire formats.
+
+- **EKS** speaks JSON-REST (path-based routing, `application/json`,
+  no x-amz-target). Endpoint convention: `/eks/region/<region>/...`
+  matches AWS's actual REST shape (e.g., `/clusters`,
+  `/clusters/{name}/node-groups`).
+- **SQS** speaks JSON 1.0 with x-amz-target (post-2023 protocol
+  modernization). Endpoint: `/sqs/region/<region>` with
+  `X-Amz-Target: AmazonSQS.<Operation>`. queue_url returned by
+  CreateQueue uses the same path-style URL.
+
+### EKS schema (S46-T2)
+
+```sql
+eks_clusters     (account_id, region, name)
+                 role_arn (FK → iam_roles.arn — cross-service handler check),
+                 subnet_ids (JSON), security_group_ids (JSON),
+                 status ('ACTIVE' v1), arn, kubernetes_version
+eks_node_groups  (account_id, cluster_name, name)
+                 node_role_arn (cross-service IAM FK),
+                 subnet_ids (JSON, must be subset of cluster's),
+                 status, arn, instance_types (JSON), scaling_config (JSON)
+                 ON DELETE CASCADE on cluster_name
+eks_addons       (account_id, cluster_name, name)
+                 version, status
+                 ON DELETE CASCADE on cluster_name
+```
+
+### SQS schema (S46-T4)
+
+```sql
+sqs_queues   (account_id, region, name)
+             queue_url, arn, attributes (JSON)
+             — attributes covers VisibilityTimeout, MessageRetentionPeriod,
+               RedrivePolicy (JSON-encoded string per S46-T0 pitfall),
+               FifoQueue boolean, etc.
+sqs_messages (account_id, queue_arn, message_id)
+             body, attributes, receipt_handle (re-issued each Receive),
+             visible_after (timestamp), receive_count
+             — visibility timeout collapsed: messages are immediately
+               re-visible after Delete or after the timeout elapses.
+             ON DELETE CASCADE on queue (re-bagging tombstone covered
+             in S48 if needed)
+```
+
+### State machines (collapsed)
+
+- EKS cluster: status defaults to "ACTIVE" on create. No "CREATING"
+  intermediate state at v1.
+- SQS messages: in-flight tracking is best-effort; ReceiveMessage
+  bumps receive_count and re-issues a receipt_handle. DeleteMessage
+  removes by receipt_handle. visibility_timeout is honoured but
+  collapsed (no scheduled re-delivery — Receive returns nothing if
+  no visible messages).
+
+### What lands when
+
+  S46-T0   pitfalls (DONE — infrafactory@c4e121e)
+  S46-T1   this design note (this commit)
+  S46-T2   repository/eks.go (3 tables + CRUD with cross-service IAM checks)
+  S46-T3   handlers/eks.go (JSON-REST dispatcher: cluster + nodegroup + addon)
+  S46-T4   repository/sqs.go (queues + messages + visibility timeout)
+  S46-T5   handlers/sqs.go (JSON 1.0 + x-amz-target dispatcher)
+  S46-T6   handlers_test.go for EKS + SQS
+  S46-T7   regression coverage for EKS dependency chain + SQS DLQ
+  S46-T8   scenarios/training/aws-eks.yaml + aws-sqs.yaml
+  S46-T9   examples/working/{eks_cluster,sqs_queue} + matching
+           misconfigured + updates dirs
+  S46-T10  gated TestE2E_AWS_EKS + TestE2E_AWS_SQS; coverage matrix entries.
+
+Phase 5+ design notes will be written as those phases land.
