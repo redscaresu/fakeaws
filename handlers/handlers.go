@@ -94,6 +94,7 @@ func (app *Application) RegisterRoutes(r chi.Router) {
 	app.registerS3Routes(r)
 	app.registerEC2Routes(r)
 	app.registerRDSRoutes(r)
+	app.registerDynamoDBRoutes(r)
 	// Everything else 501s with an UNIMPLEMENTED log line so the next
 	// caller sees what's missing — no Moto-style silent fallback.
 	r.NotFound(unimplementedHandler)

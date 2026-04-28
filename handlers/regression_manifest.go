@@ -34,6 +34,7 @@ import (
 // here corresponds to ≥1 handlers/<id>*.go file AND every service
 // prefix in handlers/ has a manifest entry.
 var LandedServices = []string{
+	"dynamodb",
 	"ec2",
 	"iam",
 	"rds",
