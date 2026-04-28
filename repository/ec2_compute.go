@@ -269,11 +269,23 @@ func (r *Repository) GetKeyPair(account, region, name string) (*EC2KeyPair, erro
 	return &kp, nil
 }
 
+// ListKeyPairs returns key pairs for the account, optionally scoped
+// to a region. Empty region = all regions (Codex pass 8 BLOCKING #2:
+// /mock/state previously walked a hard-coded region slice).
 func (r *Repository) ListKeyPairs(account, region string) ([]*EC2KeyPair, error) {
-	rows, err := r.db.Query(
-		`SELECT data FROM ec2_key_pairs WHERE account_id = ? AND region = ? ORDER BY name`,
-		account, region,
-	)
+	var rows *sql.Rows
+	var err error
+	if region == "" {
+		rows, err = r.db.Query(
+			`SELECT data FROM ec2_key_pairs WHERE account_id = ? ORDER BY region, name`,
+			account,
+		)
+	} else {
+		rows, err = r.db.Query(
+			`SELECT data FROM ec2_key_pairs WHERE account_id = ? AND region = ? ORDER BY name`,
+			account, region,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}

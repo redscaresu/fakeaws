@@ -688,6 +688,85 @@ func TestRegressionStateGatherCollectionsComplete(t *testing.T) {
 	}
 }
 
+// TestRegressionEC2DescribeRegionScoped pins Codex pass 8 BLOCKING #1:
+// DescribeSubnets and DescribeInternetGateways must scope to the
+// request region. Previously both list paths queried account-wide
+// and leaked rows from other regions.
+func TestRegressionEC2DescribeRegionScoped(t *testing.T) {
+	srv := newTestServerForRegression(t)
+
+	// Seed: VPC + Subnet + IGW in us-east-1 AND eu-west-1.
+	for _, region := range []string{"us-east-1", "eu-west-1"} {
+		_, body := ec2PostRegression(t, srv, region, "CreateVpc", url.Values{
+			"CidrBlock": {"10.0.0.0/16"},
+		})
+		vpcID := xmlExtract(body, "vpcId")
+		ec2PostRegression(t, srv, region, "CreateSubnet", url.Values{
+			"VpcId":            {vpcID},
+			"CidrBlock":        {"10.0.1.0/24"},
+			"AvailabilityZone": {region + "a"},
+		})
+		ec2PostRegression(t, srv, region, "CreateInternetGateway", url.Values{})
+	}
+
+	// DescribeSubnets in us-east-1: must NOT contain eu-west-1's subnet.
+	_, body := ec2PostRegression(t, srv, "us-east-1", "DescribeSubnets", nil)
+	if strings.Contains(string(body), "eu-west-1") {
+		t.Errorf("DescribeSubnets us-east-1 leaked eu-west-1 row: %s", body)
+	}
+
+	// DescribeInternetGateways in us-east-1: same isolation.
+	_, body = ec2PostRegression(t, srv, "us-east-1", "DescribeInternetGateways", nil)
+	if strings.Contains(string(body), "eu-west-1") {
+		t.Errorf("DescribeInternetGateways us-east-1 leaked eu-west-1 row: %s", body)
+	}
+}
+
+// TestRegressionStateGatherAccountWide pins Codex pass 8 BLOCKING #2:
+// /mock/state must enumerate account-wide for collections that were
+// previously walked via a hard-coded region slice (key pairs and
+// Secrets Manager). Resources created outside that slice must still
+// appear in the state surface.
+func TestRegressionStateGatherAccountWide(t *testing.T) {
+	srv := newTestServerForRegression(t)
+
+	// Use a region NOT in the previous hard-coded slice
+	// {us-east-1, us-east-2, us-west-1, us-west-2,
+	//  eu-west-1, eu-west-2, eu-central-1, ap-southeast-1}.
+	const oddRegion = "ap-northeast-1"
+
+	// Key pair in odd region.
+	ec2PostRegression(t, srv, oddRegion, "ImportKeyPair", url.Values{
+		"KeyName":           {"odd-kp"},
+		"PublicKeyMaterial": {"c3NoLXJzYSBBQUFBQjN... AmZmFrZQ=="},
+	})
+
+	// Secret in odd region.
+	smReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/secretsmanager/region/"+oddRegion,
+		strings.NewReader(`{"Name":"odd-secret","SecretString":"hello"}`))
+	smReq.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	smReq.Header.Set("X-Amz-Target", "secretsmanager.CreateSecret")
+	resp, err := srv.Client().Do(smReq)
+	if err != nil {
+		t.Fatalf("CreateSecret %s: %v", oddRegion, err)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(srv.URL + "/mock/state")
+	if err != nil {
+		t.Fatalf("GET /mock/state: %v", err)
+	}
+	defer resp.Body.Close()
+	state := string(readResponseBody(t, resp))
+
+	if !strings.Contains(state, "odd-kp") {
+		t.Errorf("/mock/state.ec2.key_pairs missing odd-region key pair: %s", state)
+	}
+	if !strings.Contains(state, "odd-secret") {
+		t.Errorf("/mock/state.secretsmanager.secrets missing odd-region secret: %s", state)
+	}
+}
+
 // ----- test helpers (regression-suite local) -----
 
 const regressionVersion = "2010-05-08"

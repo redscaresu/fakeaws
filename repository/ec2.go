@@ -356,13 +356,22 @@ func (r *Repository) GetSubnet(account, region, id string) (*EC2Subnet, error) {
 	return &s, nil
 }
 
-func (r *Repository) ListSubnets(account, vpcID string) ([]*EC2Subnet, error) {
+// ListSubnets returns the account's subnets, optionally filtered by
+// region and/or VPC. Empty region = all regions (state-gather path);
+// non-empty region scopes results to a single region (Codex pass 8
+// BLOCKING #1 — DescribeSubnets must not leak across regions).
+func (r *Repository) ListSubnets(account, region, vpcID string) ([]*EC2Subnet, error) {
 	var rows *sql.Rows
 	var err error
-	if vpcID == "" {
+	switch {
+	case region == "" && vpcID == "":
 		rows, err = r.db.Query(`SELECT data FROM ec2_subnets WHERE account_id = ? ORDER BY id`, account)
-	} else {
+	case region == "" && vpcID != "":
 		rows, err = r.db.Query(`SELECT data FROM ec2_subnets WHERE account_id = ? AND vpc_id = ? ORDER BY id`, account, vpcID)
+	case region != "" && vpcID == "":
+		rows, err = r.db.Query(`SELECT data FROM ec2_subnets WHERE account_id = ? AND region = ? ORDER BY id`, account, region)
+	default:
+		rows, err = r.db.Query(`SELECT data FROM ec2_subnets WHERE account_id = ? AND region = ? AND vpc_id = ? ORDER BY id`, account, region, vpcID)
 	}
 	if err != nil {
 		return nil, err
@@ -493,29 +502,41 @@ func (r *Repository) GetInternetGateway(account, region, id string) (*EC2Interne
 	return &igw, nil
 }
 
-func (r *Repository) ListInternetGateways(account string) ([]*EC2InternetGateway, error) {
-	rows, err := r.db.Query(
-		`SELECT id FROM ec2_internet_gateways WHERE account_id = ? ORDER BY id`,
-		account,
-	)
+// ListInternetGateways returns IGWs for the account, optionally
+// scoped to a region (Codex pass 8 BLOCKING #1 — DescribeInternetGateways
+// must not leak across regions). Empty region = all regions for the
+// state-gather path.
+func (r *Repository) ListInternetGateways(account, region string) ([]*EC2InternetGateway, error) {
+	var rows *sql.Rows
+	var err error
+	if region == "" {
+		rows, err = r.db.Query(
+			`SELECT id, region FROM ec2_internet_gateways WHERE account_id = ? ORDER BY id`,
+			account,
+		)
+	} else {
+		rows, err = r.db.Query(
+			`SELECT id, region FROM ec2_internet_gateways WHERE account_id = ? AND region = ? ORDER BY id`,
+			account, region,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []string
+	type idReg struct{ id, reg string }
+	var pairs []idReg
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var p idReg
+		if err := rows.Scan(&p.id, &p.reg); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		pairs = append(pairs, p)
 	}
 	rows.Close()
-	out := make([]*EC2InternetGateway, 0, len(ids))
-	for _, id := range ids {
-		// Account-wide list — pass empty region so the lookup spans
-		// every region.
-		igw, err := r.GetInternetGateway(account, "", id)
+	out := make([]*EC2InternetGateway, 0, len(pairs))
+	for _, p := range pairs {
+		igw, err := r.GetInternetGateway(account, p.reg, p.id)
 		if err != nil {
 			return nil, err
 		}

@@ -61,7 +61,7 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "CreateInternetGateway":
 		app.ec2CreateInternetGateway(w, account, region, req)
 	case "DescribeInternetGateways":
-		app.ec2DescribeInternetGateways(w, account, req)
+		app.ec2DescribeInternetGateways(w, account, region, req)
 	case "AttachInternetGateway":
 		app.ec2AttachInternetGateway(w, account, region, req)
 	case "DetachInternetGateway":
@@ -246,7 +246,7 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 			}
 		}
 	}
-	subnets, err := app.repo.ListSubnets(account, vpcFilter)
+	subnets, err := app.repo.ListSubnets(account, region, vpcFilter)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
@@ -345,8 +345,8 @@ func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account,
 	awsproto.WriteQueryRPCResponse(w, "CreateInternetGateway", &ec2CreateIgwResult{InternetGateway: ec2IgwToXML(igw)})
 }
 
-func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	igws, err := app.repo.ListInternetGateways(account)
+func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	igws, err := app.repo.ListInternetGateways(account, region)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
@@ -1361,7 +1361,7 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 	}
 	out["vpcs"] = vOut
 
-	subnets, _ := app.repo.ListSubnets(account, "")
+	subnets, _ := app.repo.ListSubnets(account, "", "")
 	sOut := make([]map[string]any, 0, len(subnets))
 	for _, s := range subnets {
 		sOut = append(sOut, map[string]any{
@@ -1395,18 +1395,29 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 	}
 	out["security_groups"] = sgOut
 
-	// Key pairs — walk the canonical region set used by the AMI seed.
+	// Key pairs — account-wide list (Codex pass 8 BLOCKING #2 fix:
+	// previously walked a hard-coded region slice, so KPs created in
+	// any other region disappeared from /mock/state).
 	kpOut := []map[string]any{}
-	for _, region := range []string{"us-east-1", "us-east-2", "us-west-1", "us-west-2",
-		"eu-west-1", "eu-west-2", "eu-central-1", "ap-southeast-1"} {
-		kps, _ := app.repo.ListKeyPairs(account, region)
-		for _, kp := range kps {
-			kpOut = append(kpOut, map[string]any{
-				"name": kp.Name, "fingerprint": kp.Fingerprint, "region": kp.Region,
-			})
-		}
+	kps, _ := app.repo.ListKeyPairs(account, "")
+	for _, kp := range kps {
+		kpOut = append(kpOut, map[string]any{
+			"name": kp.Name, "fingerprint": kp.Fingerprint, "region": kp.Region,
+		})
 	}
 	out["key_pairs"] = kpOut
+
+	// Internet gateways — account-wide list. Used by topology
+	// derivation to detect public subnets.
+	igws, _ := app.repo.ListInternetGateways(account, "")
+	igwOut := make([]map[string]any, 0, len(igws))
+	for _, igw := range igws {
+		igwOut = append(igwOut, map[string]any{
+			"id": igw.ID, "vpc_id": igw.VPCID,
+			"region": igw.Region, "arn": igw.ARN,
+		})
+	}
+	out["internet_gateways"] = igwOut
 
 	return out
 }

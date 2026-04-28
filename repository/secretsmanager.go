@@ -150,28 +150,39 @@ func (r *Repository) GetSecretActiveOrPending(account, region, name string) (*Se
 // ListSecrets returns secrets that are NOT in the Destroyed state.
 // Per concepts.md "fully destroyed" contract — destroyed secrets
 // must behave as not-found across read/list paths (Codex pass 2
-// BLOCKING #2).
+// BLOCKING #2). Empty region = all regions (Codex pass 8
+// BLOCKING #2: /mock/state previously walked a hard-coded slice).
 func (r *Repository) ListSecrets(account, region string) ([]*SecretsManagerSecret, error) {
-	rows, err := r.db.Query(
-		`SELECT name FROM secretsmanager_secrets WHERE account_id = ? AND region = ? AND state != ? ORDER BY name`,
-		account, region, SecretStateDestroyed,
-	)
+	var rows *sql.Rows
+	var err error
+	if region == "" {
+		rows, err = r.db.Query(
+			`SELECT region, name FROM secretsmanager_secrets WHERE account_id = ? AND state != ? ORDER BY region, name`,
+			account, SecretStateDestroyed,
+		)
+	} else {
+		rows, err = r.db.Query(
+			`SELECT region, name FROM secretsmanager_secrets WHERE account_id = ? AND region = ? AND state != ? ORDER BY name`,
+			account, region, SecretStateDestroyed,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var names []string
+	type pair struct{ region, name string }
+	var pairs []pair
 	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
+		var p pair
+		if err := rows.Scan(&p.region, &p.name); err != nil {
 			return nil, err
 		}
-		names = append(names, n)
+		pairs = append(pairs, p)
 	}
 	rows.Close()
-	out := make([]*SecretsManagerSecret, 0, len(names))
-	for _, n := range names {
-		s, err := r.GetSecret(account, region, n)
+	out := make([]*SecretsManagerSecret, 0, len(pairs))
+	for _, p := range pairs {
+		s, err := r.GetSecret(account, p.region, p.name)
 		if err != nil {
 			return nil, err
 		}
