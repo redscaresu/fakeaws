@@ -36,6 +36,7 @@ import (
 var LandedServices = []string{
 	"ec2",
 	"iam",
+	"rds",
 	"s3",
 }
 

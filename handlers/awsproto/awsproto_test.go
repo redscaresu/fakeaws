@@ -242,6 +242,8 @@ func TestARNBuildersMatchAWSReferenceFormats(t *testing.T) {
 		{"rds-db", BuildRDSDBARN("us-east-1", "db-1"), "arn:aws:rds:us-east-1:000000000000:db:db-1"},
 		{"rds-cluster", BuildRDSClusterARN("us-east-1", "cluster-1"), "arn:aws:rds:us-east-1:000000000000:cluster:cluster-1"},
 		{"rds-subnet-group", BuildRDSSubnetGroupARN("us-east-1", "subg-1"), "arn:aws:rds:us-east-1:000000000000:subgrp:subg-1"},
+		{"rds-pg", BuildRDSParameterGroupARN("us-east-1", "pg15"), "arn:aws:rds:us-east-1:000000000000:pg:pg15"},
+		{"rds-cluster-pg", BuildRDSClusterParameterGroupARN("us-east-1", "aurora-pg"), "arn:aws:rds:us-east-1:000000000000:cluster-pg:aurora-pg"},
 		// EKS — region+account, '/' separator, nodegroup has trailing /<id>
 		{"eks-cluster", BuildEKSClusterARN("us-east-1", "demo"), "arn:aws:eks:us-east-1:000000000000:cluster/demo"},
 		{"eks-nodegroup", BuildEKSNodegroupARN("us-east-1", "demo", "ng1", "abc-123"), "arn:aws:eks:us-east-1:000000000000:nodegroup/demo/ng1/abc-123"},

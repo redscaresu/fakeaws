@@ -93,6 +93,16 @@ func BuildRDSSubnetGroupARN(region, name string) string {
 	return fmt.Sprintf("arn:aws:rds:%s:%s:subgrp:%s", region, FakeAccountID, name)
 }
 
+// BuildRDSParameterGroupARN: arn:aws:rds:<region>:<account>:pg:<name>
+func BuildRDSParameterGroupARN(region, name string) string {
+	return fmt.Sprintf("arn:aws:rds:%s:%s:pg:%s", region, FakeAccountID, name)
+}
+
+// BuildRDSClusterParameterGroupARN: arn:aws:rds:<region>:<account>:cluster-pg:<name>
+func BuildRDSClusterParameterGroupARN(region, name string) string {
+	return fmt.Sprintf("arn:aws:rds:%s:%s:cluster-pg:%s", region, FakeAccountID, name)
+}
+
 // BuildEKSClusterARN: arn:aws:eks:<region>:<account>:cluster/<name>
 func BuildEKSClusterARN(region, name string) string {
 	return fmt.Sprintf("arn:aws:eks:%s:%s:cluster/%s", region, FakeAccountID, name)
