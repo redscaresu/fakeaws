@@ -178,4 +178,101 @@ split because EC2's surface is too large for one file.
   S44-T12  gated TestE2E_AWS_VPC + TestE2E_AWS_Instance + TestE2E_AWS_SecurityGroup;
            same PR adds 8 EC2 entries to coverage_matrix.yaml.
 
-Phase 3+ design notes will be written as those phases land.
+## Phase 3 — Stateful data (S45)
+
+RDS and DynamoDB. Two services with very different wire formats:
+
+- RDS speaks Query-RPC with XML responses (same family as IAM/EC2,
+  Version=2014-10-31). Endpoint: per-region at `/rds/region/<region>`.
+  Reuses awsproto's QueryRPC helpers — no new wire-format work.
+- DynamoDB speaks JSON 1.0 with x-amz-target headers (Action via
+  `X-Amz-Target: DynamoDB_20120810.<Action>`). Endpoint:
+  per-region at `/dynamodb/region/<region>`. Reuses
+  awsproto.ParseXAmzTarget + WriteJSONResponse from S43-T2.
+
+### RDS schema (S45-T2)
+
+```sql
+rds_db_subnet_groups   (account_id, name)
+                       region, description, subnet_ids (JSON), vpc_id, arn
+                       NB: vpc_id is derived from subnet_ids at create
+                       (validated to be the SAME vpc for all subnets;
+                       PLAN.md S45-T0 pitfall — DBSubnetGroupNotFound
+                       and "subnets must be in the same VPC" both fire
+                       at this layer).
+                       FK: each subnet_id must exist in ec2_subnets;
+                       enforced at handler create time, not via
+                       SQLite FK (SQLite can't FK into a JSON column).
+rds_db_parameter_groups       (account_id, name)
+                              family, description, arn
+rds_db_cluster_parameter_groups (account_id, name)
+                                family, description, arn
+rds_db_clusters        (account_id, region, id)
+                       engine, engine_version, subnet_group_name (FK),
+                       cluster_parameter_group_name (FK, nullable),
+                       master_username, deletion_protection, arn,
+                       state ('available' v1)
+                       FK: subnet_group_name → rds_db_subnet_groups.name
+                       (SET NULL on subnet group delete is unsafe — RESTRICT)
+rds_db_instances       (account_id, region, id)
+                       engine, engine_version, instance_class,
+                       subnet_group_name (FK, nullable),
+                       cluster_id (FK, nullable for solo instances),
+                       parameter_group_name (FK, nullable),
+                       replicate_source_db (FK to rds_db_instances.id, nullable),
+                       deletion_protection, skip_final_snapshot, arn,
+                       state ('available' v1)
+                       FK: cluster_id → rds_db_clusters.id
+                       FK: replicate_source_db → rds_db_instances.id
+                       Source-with-replicas delete must RESTRICT until
+                       replicas are gone (S45-T0 pitfall).
+```
+
+### DynamoDB schema (S45-T4)
+
+```sql
+dynamodb_tables        (account_id, region, name)
+                       hash_key, range_key (nullable),
+                       attributes (JSON: [{name,type}]),
+                       billing_mode ('PAY_PER_REQUEST' default at v1),
+                       arn, status ('ACTIVE' v1)
+dynamodb_items         (account_id, table_name, hash_value, range_value)
+                       item (JSON blob — full item)
+                       PRIMARY KEY (account_id, table_name, hash_value, range_value)
+                       FOREIGN KEY (account_id, table_name) REFERENCES dynamodb_tables ON DELETE CASCADE
+                       NB: range_value is "" (empty string) when the
+                       table has no range key — keeps the PK shape
+                       uniform. GSI/LSI explicitly NOT modelled at v1.
+```
+
+### State machines (collapsed)
+
+- RDS instance / cluster: state defaults to "available" on create.
+  No "creating"/"backing-up" intermediate states at v1 — handlers
+  return success synchronously, mirror of fakegcp's collapsed Cloud
+  SQL state machine.
+- DynamoDB table: status defaults to "ACTIVE" on create.
+- DeleteDBInstance with `deletion_protection=true` rejects with
+  `InvalidParameterCombination` (concepts.md "Standing patterns"
+  item 9).
+
+### What lands when
+
+  S45-T0   pitfalls (DONE — infrafactory@732bc0e)
+  S45-T1   this design note (this commit)
+  S45-T2   repository/rds.go (5 tables + CRUD)
+  S45-T3   handlers/rds.go (Query-RPC dispatcher: instance + cluster +
+           subnet_group + parameter_group + cluster_parameter_group)
+  S45-T4   repository/dynamodb.go (2 tables + item PK index)
+  S45-T5   handlers/dynamodb.go (table CRUD + item PutItem/GetItem/
+           UpdateItem/DeleteItem/Query/Scan)
+  S45-T6   handlers_test.go for RDS + DynamoDB
+  S45-T7   regression coverage for RDS read-replica chain +
+           DynamoDB table-state transitions
+  S45-T8   scenarios/training/aws-rds.yaml + aws-dynamodb.yaml
+  S45-T9   examples/working/{rds_instance,dynamodb_table} + matching
+           misconfigured + updates dirs
+  S45-T10  gated TestE2E_AWS_RDS + TestE2E_AWS_DynamoDB; same PR adds
+           coverage_matrix.yaml entries.
+
+Phase 4+ design notes will be written as those phases land.
