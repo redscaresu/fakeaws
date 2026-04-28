@@ -356,3 +356,366 @@ func TestCoverage_SecretsManagerListAndDescribe(t *testing.T) {
 // silence unused-import in the few cases readBody isn't called.
 var _ = httptest.NewServer
 var _ = readBody
+
+// ----- Error-path coverage: exercise the 404 / ErrNotFound branches
+// that the success-path tests miss. Each Delete/Describe handler has
+// a "missing id" sub-test below.
+
+func TestCoverage_EC2ErrorPaths(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	// Most EC2 delete handlers wrap repo errors via WriteAWSError.
+	// Hit the ErrNotFound branches.
+	for _, op := range []string{
+		"DeleteSubnet",
+		"DeleteRouteTable",
+		"DeleteInternetGateway",
+		"DetachInternetGateway",
+		"DeleteSecurityGroup",
+		"DeleteVpc",
+	} {
+		params := url.Values{}
+		switch op {
+		case "DeleteSubnet":
+			params.Set("SubnetId", "subnet-x")
+		case "DeleteRouteTable":
+			params.Set("RouteTableId", "rtb-x")
+		case "DeleteInternetGateway", "DetachInternetGateway":
+			params.Set("InternetGatewayId", "igw-x")
+		case "DeleteSecurityGroup":
+			params.Set("GroupId", "sg-x")
+		case "DeleteVpc":
+			params.Set("VpcId", "vpc-x")
+		}
+		resp, _ := ec2Call(t, srv, region, op, params)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s missing id: got %d, want 404", op, resp.StatusCode)
+		}
+	}
+
+	// CreateRoute on missing route table → 404.
+	resp, _ := ec2Call(t, srv, region, "CreateRoute", url.Values{
+		"RouteTableId": {"rtb-missing"}, "DestinationCidrBlock": {"0.0.0.0/0"},
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("CreateRoute missing rt: %d", resp.StatusCode)
+	}
+
+	// DescribeKeyPairs on a missing name → 404.
+	resp, _ = ec2Call(t, srv, region, "DescribeKeyPairs", url.Values{"KeyName.1": {"missing"}})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DescribeKeyPairs missing: %d", resp.StatusCode)
+	}
+
+	// DeleteKeyPair on missing → 404.
+	resp, _ = ec2Call(t, srv, region, "DeleteKeyPair", url.Values{"KeyName": {"missing"}})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DeleteKeyPair missing: %d", resp.StatusCode)
+	}
+
+	// DescribeSecurityGroups missing GroupId.<n> filter → 409.
+	resp, _ = ec2Call(t, srv, region, "DescribeSecurityGroups", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("DescribeSecurityGroups no filter: %d", resp.StatusCode)
+	}
+
+	// Authorize on missing GroupId → 409 (no body).
+	resp, _ = ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("AuthorizeSecurityGroupIngress no GroupId: %d", resp.StatusCode)
+	}
+
+	// Authorize with no IpPermissions → 409.
+	resp, _ = ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{"GroupId": {"sg-x"}})
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("Authorize no rules: %d", resp.StatusCode)
+	}
+
+	// CreateRouteTable missing VpcId → 409.
+	resp, _ = ec2Call(t, srv, region, "CreateRouteTable", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateRouteTable no vpc: %d", resp.StatusCode)
+	}
+
+	// AssociateRouteTable missing args → 409.
+	resp, _ = ec2Call(t, srv, region, "AssociateRouteTable", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("AssociateRouteTable no args: %d", resp.StatusCode)
+	}
+
+	// DisassociateRouteTable missing → 404.
+	resp, _ = ec2Call(t, srv, region, "DisassociateRouteTable", url.Values{"AssociationId": {"missing"}})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DisassociateRouteTable missing: %d", resp.StatusCode)
+	}
+
+	// AllocateAddress with bad domain → 409.
+	resp, _ = ec2Call(t, srv, region, "AllocateAddress", url.Values{"Domain": {"standard"}})
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("AllocateAddress bad domain: %d", resp.StatusCode)
+	}
+
+	// ReleaseAddress missing → 404.
+	resp, _ = ec2Call(t, srv, region, "ReleaseAddress", url.Values{"AllocationId": {"missing"}})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("ReleaseAddress missing: %d", resp.StatusCode)
+	}
+
+	// RunInstances missing required fields → 409.
+	resp, _ = ec2Call(t, srv, region, "RunInstances", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("RunInstances no args: %d", resp.StatusCode)
+	}
+
+	// TerminateInstances missing InstanceId.<n> → 409.
+	resp, _ = ec2Call(t, srv, region, "TerminateInstances", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("TerminateInstances no ids: %d", resp.StatusCode)
+	}
+
+	// ImportKeyPair missing → 409.
+	resp, _ = ec2Call(t, srv, region, "ImportKeyPair", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("ImportKeyPair no args: %d", resp.StatusCode)
+	}
+
+	// DescribeImages with unknown ImageId → 404.
+	resp, _ = ec2Call(t, srv, region, "DescribeImages", url.Values{"ImageId.1": {"ami-not-real"}})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DescribeImages unknown: %d", resp.StatusCode)
+	}
+}
+
+func TestCoverage_DynamoDBErrorPaths(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+
+	// CreateTable missing args → 409.
+	resp, _ := ddbCall(t, srv, "us-east-1", "CreateTable", `{}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateTable no args: %d", resp.StatusCode)
+	}
+	// CreateTable missing HASH → 409.
+	resp, _ = ddbCall(t, srv, "us-east-1", "CreateTable", `{"TableName":"t","KeySchema":[]}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateTable no HASH: %d", resp.StatusCode)
+	}
+	// DeleteTable on missing → 404.
+	resp, _ = ddbCall(t, srv, "us-east-1", "DeleteTable", `{"TableName":"missing"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DeleteTable missing: %d", resp.StatusCode)
+	}
+	// DeleteItem on missing table → 404.
+	resp, _ = ddbCall(t, srv, "us-east-1", "DeleteItem", `{"TableName":"missing","Key":{"id":{"S":"x"}}}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DeleteItem missing table: %d", resp.StatusCode)
+	}
+	// UpdateItem on missing table → 404.
+	resp, _ = ddbCall(t, srv, "us-east-1", "UpdateItem", `{"TableName":"missing","Key":{"id":{"S":"x"}}}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("UpdateItem missing table: %d", resp.StatusCode)
+	}
+}
+
+func TestCoverage_RDSErrorPaths(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, _ := rdsCall(t, srv, "us-east-1", "CreateDBSubnetGroup", url.Values{"DBSubnetGroupName": {"x"}, "DBSubnetGroupDescription": {"d"}})
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateDBSubnetGroup <2 subnets: %d", resp.StatusCode)
+	}
+	resp, _ = rdsCall(t, srv, "us-east-1", "CreateDBSubnetGroup", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateDBSubnetGroup empty: %d", resp.StatusCode)
+	}
+	resp, _ = rdsCall(t, srv, "us-east-1", "DescribeDBSubnetGroups", url.Values{"DBSubnetGroupName": {"missing"}})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Describe missing subnet group: %d", resp.StatusCode)
+	}
+	resp, _ = rdsCall(t, srv, "us-east-1", "DescribeDBClusters", url.Values{"DBClusterIdentifier": {"missing"}})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Describe missing cluster: %d", resp.StatusCode)
+	}
+	resp, _ = rdsCall(t, srv, "us-east-1", "CreateDBCluster", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateDBCluster no args: %d", resp.StatusCode)
+	}
+	resp, _ = rdsCall(t, srv, "us-east-1", "CreateDBInstance", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateDBInstance no args: %d", resp.StatusCode)
+	}
+	resp, _ = rdsCall(t, srv, "us-east-1", "DescribeDBInstances", url.Values{"DBInstanceIdentifier": {"missing"}})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Describe missing instance: %d", resp.StatusCode)
+	}
+	resp, _ = rdsCall(t, srv, "us-east-1", "BogusOperation", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("RDS unknown op: %d", resp.StatusCode)
+	}
+}
+
+func TestCoverage_SQSErrorPaths(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, _ := sqsCall(t, srv, "CreateQueue", `{}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateQueue no name: %d", resp.StatusCode)
+	}
+	resp, _ = sqsCall(t, srv, "DeleteQueue", `{"QueueUrl":"http://x.fakeaws.local/000000000000/missing"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DeleteQueue missing: %d", resp.StatusCode)
+	}
+	resp, _ = sqsCall(t, srv, "GetQueueAttributes", `{"QueueUrl":"http://x.fakeaws.local/000000000000/missing"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GetQueueAttributes missing: %d", resp.StatusCode)
+	}
+	resp, _ = sqsCall(t, srv, "SendMessage", `{"QueueUrl":"http://x.fakeaws.local/000000000000/missing","MessageBody":"x"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("SendMessage missing: %d", resp.StatusCode)
+	}
+	resp, _ = sqsCall(t, srv, "ReceiveMessage", `{"QueueUrl":"http://x.fakeaws.local/000000000000/missing"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("ReceiveMessage missing: %d", resp.StatusCode)
+	}
+}
+
+func TestCoverage_EKSErrorPaths(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+	// CreateCluster missing required → 409.
+	resp, _ := eksRequest(t, srv, http.MethodPost, "/eks/region/"+region+"/clusters", `{"name":"x"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateCluster missing: %d", resp.StatusCode)
+	}
+	// Describe missing → 404.
+	resp, _ = eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters/missing", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DescribeCluster missing: %d", resp.StatusCode)
+	}
+	resp, _ = eksRequest(t, srv, http.MethodDelete, "/eks/region/"+region+"/clusters/missing", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DeleteCluster missing: %d", resp.StatusCode)
+	}
+	resp, _ = eksRequest(t, srv, http.MethodPost, "/eks/region/"+region+"/clusters/missing/node-groups", `{"nodegroupName":"x"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateNodeGroup missing args: %d", resp.StatusCode)
+	}
+	resp, _ = eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters/x/node-groups/missing", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DescribeNodeGroup missing: %d", resp.StatusCode)
+	}
+	resp, _ = eksRequest(t, srv, http.MethodDelete, "/eks/region/"+region+"/clusters/x/node-groups/missing", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DeleteNodeGroup missing: %d", resp.StatusCode)
+	}
+	resp, _ = eksRequest(t, srv, http.MethodPost, "/eks/region/"+region+"/clusters/missing/addons", `{}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateAddon empty: %d", resp.StatusCode)
+	}
+	resp, _ = eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters/x/addons/missing", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DescribeAddon missing: %d", resp.StatusCode)
+	}
+	resp, _ = eksRequest(t, srv, http.MethodDelete, "/eks/region/"+region+"/clusters/x/addons/missing", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DeleteAddon missing: %d", resp.StatusCode)
+	}
+}
+
+func TestCoverage_Route53ErrorPaths(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest></CreateHostedZoneRequest>`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateHostedZone empty: %d", resp.StatusCode)
+	}
+	resp, _ = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone/Zmissing", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GetHostedZone missing: %d", resp.StatusCode)
+	}
+	resp, _ = r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/Zmissing/rrset/",
+		`<ChangeResourceRecordSetsRequest><ChangeBatch><Changes></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("ChangeRRset on missing zone: %d", resp.StatusCode)
+	}
+	resp, _ = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/change/missing", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GetChange missing: %d", resp.StatusCode)
+	}
+}
+
+func TestCoverage_SecretsManagerErrorPaths(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, _ := smCall(t, srv, "CreateSecret", `{}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("CreateSecret empty: %d", resp.StatusCode)
+	}
+	resp, _ = smCall(t, srv, "GetSecretValue", `{"SecretId":"missing"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GetSecretValue missing: %d", resp.StatusCode)
+	}
+	resp, _ = smCall(t, srv, "BogusOp", `{}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Unknown SM op: %d", resp.StatusCode)
+	}
+}
+
+func TestCoverage_S3OwnershipAndEncryption(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	// PutBucket.
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/s3/test-cov-bucket/", nil)
+	req.Header.Set("Content-Type", "application/xml")
+	resp, _ := srv.Client().Do(req)
+	resp.Body.Close()
+
+	// PutOwnershipControls + GetOwnershipControls.
+	body := `<OwnershipControls><Rule><ObjectOwnership>BucketOwnerEnforced</ObjectOwnership></Rule></OwnershipControls>`
+	req, _ = http.NewRequest(http.MethodPut, srv.URL+"/s3/test-cov-bucket/?ownershipControls", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	resp, _ = srv.Client().Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("PutOwnershipControls: %d", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/s3/test-cov-bucket/?ownershipControls", nil)
+	resp, _ = srv.Client().Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GetOwnershipControls: %d", resp.StatusCode)
+	}
+
+	// PutEncryption + GetEncryption.
+	encBody := `<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>`
+	req, _ = http.NewRequest(http.MethodPut, srv.URL+"/s3/test-cov-bucket/?encryption", strings.NewReader(encBody))
+	req.Header.Set("Content-Type", "application/xml")
+	resp, _ = srv.Client().Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("PutEncryption: %d", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/s3/test-cov-bucket/?encryption", nil)
+	resp, _ = srv.Client().Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GetEncryption: %d", resp.StatusCode)
+	}
+}
+
+func TestCoverage_S3HeadObject(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/s3/cov-head-bucket/", nil)
+	resp, _ := srv.Client().Do(req)
+	resp.Body.Close()
+	// PutObject.
+	req, _ = http.NewRequest(http.MethodPut, srv.URL+"/s3/cov-head-bucket/key.txt", strings.NewReader("body"))
+	resp, _ = srv.Client().Do(req)
+	resp.Body.Close()
+	// HeadObject — v1 doesn't store object payloads, so always 404
+	// (handler comment: "v1: we don't store objects, so HEAD always 404s").
+	req, _ = http.NewRequest(http.MethodHead, srv.URL+"/s3/cov-head-bucket/key.txt", nil)
+	resp, _ = srv.Client().Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("HeadObject v1 contract: got %d, want 404", resp.StatusCode)
+	}
+}
