@@ -251,3 +251,40 @@ entries:
     misconfigured_exempt_reason: "FIFO suffix mismatch is asserted in TestSQS_FIFOSuffixContract; standalone misconfigured tofu example would duplicate."
     updates_dir_name: update_sqs_queue_visibility
     integration_test_func_name: "^TestSQS_QueueLifecycle$"
+
+  # Route53 (S47-T3 handlers, S47-T10 e2e + these matrix entries).
+  - aws_service: route53
+    aws_resource_type: aws_route53_zone
+    scenario_resource_type: dns
+    working_dir_name: route53
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Non-empty zone delete refusal is asserted in TestRoute53_ChangeBatchTransactional + TestRegressionHostedZoneDeleteRefusedIfNonEmpty; standalone misconfigured tofu example would duplicate."
+    updates_exempt: true
+    updates_exempt_reason: "Zone configuration is set-once at v1 (no UpdateHostedZoneComment in scope)."
+    integration_test_func_name: "^TestRoute53_HostedZoneLifecycle$"
+  - aws_service: route53
+    aws_resource_type: aws_route53_record
+    scenario_resource_type: dns
+    working_dir_name: route53
+    misconfigured_dir_name: route53_apex_cname
+    updates_exempt: true
+    updates_exempt_reason: "Record updates round-trip through ChangeResourceRecordSets's UPSERT action — exercised inline in working/route53's apply path; transactional batch contract covered by TestRoute53_BatchAtomicityOnInvalidChange."
+    integration_test_func_name: "^TestRoute53_ChangeBatchTransactional$"
+
+  # Secrets Manager (S47-T5 handlers, S47-T10 e2e + these matrix entries).
+  - aws_service: secretsmanager
+    aws_resource_type: aws_secretsmanager_secret
+    scenario_resource_type: secret_manager
+    working_dir_name: secrets_manager
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Terminal-state contract (RestoreSecret on Destroyed → 409) is asserted in TestSecretsManager_TerminalStateRefusesRestore + TestRegressionTerminalStateRefusesTransitions; recovery_window default isn't a misconfigure."
+    updates_dir_name: update_secret_value
+    integration_test_func_name: "^TestSecretsManager_CreateGetSecret$"
+  - aws_service: secretsmanager
+    aws_resource_type: aws_secretsmanager_secret_version
+    scenario_resource_type: secret_manager
+    working_dir_name: secrets_manager
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Versions on a missing secret 404 — covered in TestSecretsManager_PutSecretValue (handler test). Version-stage rotation is the load-bearing contract, asserted in TestSecretsManager_VersionStages."
+    updates_dir_name: update_secret_value
+    integration_test_func_name: "^TestSecretsManager_VersionStages$"
