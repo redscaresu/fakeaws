@@ -242,8 +242,14 @@ func (r *Repository) RestoreSecret(account, region, name string) (*SecretsManage
 
 // PutSecretValue creates a new version. AWSCURRENT moves to the new
 // version, the prior version becomes AWSPREVIOUS.
+//
+// Codex pass 14 BLOCKING #1: the parent must be in Active or
+// PendingDeletion state. Plain GetSecret returns destroyed rows
+// too, which let writes silently land under a force-deleted secret
+// that DescribeSecret/GetSecretValue/ListSecrets all treat as gone.
+// Use the terminal-state-aware helper instead.
 func (r *Repository) PutSecretValue(account, region, name string, v *SecretsManagerVersion) error {
-	if _, err := r.GetSecret(account, region, name); err != nil {
+	if _, err := r.GetSecretActiveOrPending(account, region, name); err != nil {
 		return err
 	}
 	// Demote any existing AWSCURRENT to AWSPREVIOUS.

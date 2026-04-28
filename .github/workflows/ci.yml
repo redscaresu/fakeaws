@@ -63,14 +63,28 @@ jobs:
   # coverage-audit runs TestFullCoverageAudit shipped by S43-T10.
   # In S43-T1 it's a stub; T10 fills in the real assertion that walks
   # coverage_matrix.yaml.
+  #
+  # Codex pass 14 BLOCKING #2: the scenario-anchor half of the audit
+  # (invariant `e`) reads ../infrafactory/scenarios/training. Without
+  # checking out infrafactory alongside fakeaws, that branch silently
+  # logs-and-returns and anchor drift can ship without failing this
+  # required job. We now check both repos out so the audit runs the
+  # full enforcement against scenario YAML.
   coverage-audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: fakeaws
+      - uses: actions/checkout@v4
+        with:
+          repository: redscaresu/infrafactory
+          path: infrafactory
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-      - run: go test ./internal/audit/ -run TestFullCoverageAudit
+      - working-directory: fakeaws
+        run: go test ./internal/audit/ -run TestFullCoverageAudit
 
   # Aggregate handlers/... line coverage. Emits the metric on every push.
   # The strict >= 80% threshold is a PHASE-EXIT gate enforced by S48-T7's

@@ -979,6 +979,39 @@ func TestRegressionStateGatherRoute53AliasTarget(t *testing.T) {
 	}
 }
 
+// TestRegressionPutSecretValueRefusedAfterForceDelete pins Codex
+// pass 14 BLOCKING #1: PutSecretValue on a force-deleted secret
+// previously returned 200 and persisted a hidden version row that
+// every read path treated as gone. Now PutSecretValue uses the
+// terminal-state-aware lookup and rejects with NotFound, matching
+// real Secrets Manager semantics.
+func TestRegressionPutSecretValueRefusedAfterForceDelete(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+
+	post := func(target, body string) (*http.Response, []byte) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/secretsmanager/region/"+region,
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+		req.Header.Set("X-Amz-Target", "secretsmanager."+target)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", target, err)
+		}
+		defer resp.Body.Close()
+		return resp, readResponseBody(t, resp)
+	}
+
+	post("CreateSecret", `{"Name":"db/password","SecretString":"first"}`)
+	post("DeleteSecret", `{"SecretId":"db/password","ForceDeleteWithoutRecovery":true}`)
+
+	resp, body := post("PutSecretValue", `{"SecretId":"db/password","SecretString":"sneak"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("PutSecretValue after force-delete: got %d, want 404 body=%s", resp.StatusCode, body)
+	}
+}
+
 // ----- test helpers (regression-suite local) -----
 
 const regressionVersion = "2010-05-08"
