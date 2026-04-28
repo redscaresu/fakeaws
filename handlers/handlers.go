@@ -50,6 +50,14 @@ func NewApplication(dbPath string, echo bool) (*Application, error) {
 		app.router.Use(echoMiddleware)
 	}
 	app.RegisterRoutes(app.router)
+	// AMI fixture set lives in every "common" region by default. This
+	// is safe to run on every boot — repository.SeedAMI is idempotent.
+	if err := app.SeedEC2AMIFixtures("000000000000", []string{
+		"us-east-1", "us-east-2", "us-west-1", "us-west-2",
+		"eu-west-1", "eu-west-2", "eu-central-1", "ap-southeast-1",
+	}); err != nil {
+		return nil, err
+	}
 	return app, nil
 }
 

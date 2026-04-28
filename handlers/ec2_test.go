@@ -427,6 +427,160 @@ func TestEC2_SecurityGroupCRUDPlusRules(t *testing.T) {
 	}
 }
 
+func TestEC2_RunInstancesAndTerminate(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	_, body := ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	vpcID := extractEC2Tag(body, "vpcId")
+	_, body = ec2Call(t, srv, region, "CreateSubnet", url.Values{
+		"VpcId": {vpcID}, "CidrBlock": {"10.0.1.0/24"},
+	})
+	subnetID := extractEC2Tag(body, "subnetId")
+	_, body = ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
+		"GroupName": {"app"}, "GroupDescription": {"app sg"}, "VpcId": {vpcID},
+	})
+	sgID := extractEC2Tag(body, "groupId")
+
+	// RunInstances.
+	resp, body := ec2Call(t, srv, region, "RunInstances", url.Values{
+		"SubnetId":          {subnetID},
+		"ImageId":           {"ami-0abcd1234"},
+		"InstanceType":      {"t3.micro"},
+		"SecurityGroupId.1": {sgID},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("RunInstances: %d %s", resp.StatusCode, body)
+	}
+	instID := extractEC2Tag(body, "instanceId")
+	if !strings.HasPrefix(instID, "i-") {
+		t.Fatalf("RunInstances missing instanceId: %s", body)
+	}
+
+	// DescribeInstances by id.
+	params := url.Values{}
+	params.Set("InstanceId.1", instID)
+	resp, body = ec2Call(t, srv, region, "DescribeInstances", params)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "<name>running</name>") {
+		t.Errorf("DescribeInstances: %d %s", resp.StatusCode, body)
+	}
+
+	// TerminateInstances. The wire format wraps state-transitions in
+	// <currentState> + <previousState>; assert each marker is present
+	// (indented XML defeats single-line substring checks).
+	resp, body = ec2Call(t, srv, region, "TerminateInstances", url.Values{
+		"InstanceId.1": {instID},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("TerminateInstances: %d %s", resp.StatusCode, body)
+	}
+	for _, want := range []string{"<previousState>", "<currentState>", "<code>16</code>", "<name>running</name>", "<code>48</code>", "<name>terminated</name>"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("TerminateInstances missing %q in body: %s", want, body)
+		}
+	}
+
+	// Already-terminated → echoes terminated/terminated, no error.
+	resp, body = ec2Call(t, srv, region, "TerminateInstances", url.Values{"InstanceId.1": {instID}})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("TerminateInstances on terminated: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestEC2_RunInstances_SubnetVPCPairing(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	// Two VPCs: SG in vpc-A, subnet in vpc-B → mismatched pair → 404.
+	_, body := ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	vpcA := extractEC2Tag(body, "vpcId")
+	_, body = ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.1.0.0/16"}})
+	vpcB := extractEC2Tag(body, "vpcId")
+
+	_, body = ec2Call(t, srv, region, "CreateSubnet", url.Values{
+		"VpcId": {vpcB}, "CidrBlock": {"10.1.1.0/24"},
+	})
+	subnetB := extractEC2Tag(body, "subnetId")
+
+	_, body = ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
+		"GroupName": {"x"}, "GroupDescription": {"x"}, "VpcId": {vpcA},
+	})
+	sgA := extractEC2Tag(body, "groupId")
+
+	resp, body := ec2Call(t, srv, region, "RunInstances", url.Values{
+		"SubnetId":          {subnetB},
+		"ImageId":           {"ami-0abcd1234"},
+		"InstanceType":      {"t3.micro"},
+		"SecurityGroupId.1": {sgA},
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("subnet/SG VPC mismatch: got %d, want 404; body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestEC2_KeyPairImportDescribeDelete(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	resp, body := ec2Call(t, srv, region, "ImportKeyPair", url.Values{
+		"KeyName":           {"deploy"},
+		"PublicKeyMaterial": {"ssh-rsa AAAAB3NzaC1yc2E"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ImportKeyPair: %d %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "<keyName>deploy</keyName>") {
+		t.Errorf("ImportKeyPair: %s", body)
+	}
+
+	resp, body = ec2Call(t, srv, region, "DescribeKeyPairs", url.Values{"KeyName.1": {"deploy"}})
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "<keyName>deploy</keyName>") {
+		t.Errorf("DescribeKeyPairs: %d %s", resp.StatusCode, body)
+	}
+
+	resp, _ = ec2Call(t, srv, region, "DeleteKeyPair", url.Values{"KeyName": {"deploy"}})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("DeleteKeyPair: %d", resp.StatusCode)
+	}
+}
+
+func TestEC2_DescribeImagesFixtures(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	// Without a filter, the canonical fixture set is returned.
+	resp, body := ec2Call(t, srv, region, "DescribeImages", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeImages: %d %s", resp.StatusCode, body)
+	}
+	for _, ami := range []string{"ami-0abcd1234", "ami-0ubuntu2004", "ami-0ubuntu2204"} {
+		if !strings.Contains(string(body), ami) {
+			t.Errorf("DescribeImages missing fixture %s: %s", ami, body)
+		}
+	}
+
+	// With ImageId.1 filter → just that one.
+	params := url.Values{}
+	params.Set("ImageId.1", "ami-0abcd1234")
+	resp, body = ec2Call(t, srv, region, "DescribeImages", params)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeImages filtered: %d %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "ami-0abcd1234") {
+		t.Errorf("DescribeImages filtered missing target: %s", body)
+	}
+	if strings.Contains(string(body), "ami-0ubuntu2004") {
+		t.Errorf("DescribeImages filtered should NOT include other AMIs: %s", body)
+	}
+
+	// Unknown AMI → 404.
+	params.Set("ImageId.1", "ami-nope")
+	resp, _ = ec2Call(t, srv, region, "DescribeImages", params)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DescribeImages unknown AMI: got %d, want 404", resp.StatusCode)
+	}
+}
+
 func TestEC2_EIPLifecycle(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	const region = "us-east-1"

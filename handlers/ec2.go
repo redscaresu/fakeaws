@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strings"
@@ -92,6 +91,28 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "ReleaseAddress":
 		app.ec2ReleaseAddress(w, account, req)
 
+	// ----- Instance -----
+	case "RunInstances":
+		app.ec2RunInstances(w, account, region, req)
+	case "DescribeInstances":
+		app.ec2DescribeInstances(w, account, req)
+	case "ModifyInstanceAttribute":
+		app.ec2ModifyInstanceAttribute(w, account, req)
+	case "TerminateInstances":
+		app.ec2TerminateInstances(w, account, req)
+
+	// ----- KeyPair -----
+	case "ImportKeyPair":
+		app.ec2ImportKeyPair(w, account, region, req)
+	case "DescribeKeyPairs":
+		app.ec2DescribeKeyPairs(w, account, region, req)
+	case "DeleteKeyPair":
+		app.ec2DeleteKeyPair(w, account, region, req)
+
+	// ----- AMI (read-only fixture) -----
+	case "DescribeImages":
+		app.ec2DescribeImages(w, account, region, req)
+
 	// ----- SecurityGroup -----
 	case "CreateSecurityGroup":
 		app.ec2CreateSecurityGroup(w, account, region, req)
@@ -108,9 +129,9 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "RevokeSecurityGroupEgress":
 		app.ec2RevokeSecurityGroupRules(w, account, "egress", req)
 
-	// Remaining actions (Instance / KeyPair / AMI in S44-T7) hit the
-	// default arm and surface as 404 with a log line — per concepts.md
-	// "Anti-patterns explicitly forbidden", no silent 200.
+	// Any other Action hits the default arm and surfaces as 404 with
+	// a log line — per concepts.md "Anti-patterns explicitly forbidden",
+	// no silent 200.
 	default:
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
 			fmt.Errorf("EC2 action %q not yet implemented in fakeaws v1: %w", req.Action, models.ErrNotFound))
@@ -120,7 +141,6 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 // ----- VPC handlers -----
 
 type ec2VpcXML struct {
-	XMLName   xml.Name `xml:"vpc"`
 	VpcId     string   `xml:"vpcId"`
 	State     string   `xml:"state"`
 	CidrBlock string   `xml:"cidrBlock"`
@@ -128,12 +148,10 @@ type ec2VpcXML struct {
 }
 
 type ec2DescribeVpcsResult struct {
-	XMLName xml.Name    `xml:"DescribeVpcsResult"`
 	VpcSet  []ec2VpcXML `xml:"vpcSet>item"`
 }
 
 type ec2CreateVpcResult struct {
-	XMLName xml.Name  `xml:"CreateVpcResult"`
 	Vpc     ec2VpcXML `xml:"vpc"`
 }
 
@@ -178,7 +196,6 @@ func (app *Application) ec2DeleteVpc(w http.ResponseWriter, account string, req 
 // ----- Subnet handlers -----
 
 type ec2SubnetXML struct {
-	XMLName          xml.Name `xml:"subnet"`
 	SubnetId         string   `xml:"subnetId"`
 	VpcId            string   `xml:"vpcId"`
 	State            string   `xml:"state"`
@@ -187,12 +204,10 @@ type ec2SubnetXML struct {
 }
 
 type ec2DescribeSubnetsResult struct {
-	XMLName   xml.Name       `xml:"DescribeSubnetsResult"`
 	SubnetSet []ec2SubnetXML `xml:"subnetSet>item"`
 }
 
 type ec2CreateSubnetResult struct {
-	XMLName xml.Name     `xml:"CreateSubnetResult"`
 	Subnet  ec2SubnetXML `xml:"subnet"`
 }
 
@@ -291,24 +306,20 @@ func ec2SubnetToXML(s *repository.EC2Subnet) ec2SubnetXML {
 // ----- InternetGateway handlers -----
 
 type ec2IgwAttachmentXML struct {
-	XMLName xml.Name `xml:"item"`
 	VpcId   string   `xml:"vpcId"`
 	State   string   `xml:"state"`
 }
 
 type ec2IgwXML struct {
-	XMLName           xml.Name              `xml:"internetGateway"`
 	InternetGatewayId string                `xml:"internetGatewayId"`
 	Attachments       []ec2IgwAttachmentXML `xml:"attachmentSet>item,omitempty"`
 }
 
 type ec2CreateIgwResult struct {
-	XMLName         xml.Name  `xml:"CreateInternetGatewayResult"`
 	InternetGateway ec2IgwXML `xml:"internetGateway"`
 }
 
 type ec2DescribeIgwsResult struct {
-	XMLName            xml.Name    `xml:"DescribeInternetGatewaysResult"`
 	InternetGatewaySet []ec2IgwXML `xml:"internetGatewaySet>item"`
 }
 
@@ -381,23 +392,19 @@ func (app *Application) ec2DeleteInternetGateway(w http.ResponseWriter, account 
 // ----- RouteTable + Route handlers -----
 
 type ec2RouteTableXML struct {
-	XMLName      xml.Name `xml:"routeTable"`
 	RouteTableId string   `xml:"routeTableId"`
 	VpcId        string   `xml:"vpcId"`
 }
 
 type ec2CreateRouteTableResult struct {
-	XMLName    xml.Name         `xml:"CreateRouteTableResult"`
 	RouteTable ec2RouteTableXML `xml:"routeTable"`
 }
 
 type ec2AssociateRouteTableResult struct {
-	XMLName       xml.Name `xml:"AssociateRouteTableResult"`
 	AssociationId string   `xml:"associationId"`
 }
 
 type ec2CreateRouteResult struct {
-	XMLName xml.Name `xml:"CreateRouteResult"`
 	Return  bool     `xml:"return"`
 }
 
@@ -490,21 +497,18 @@ func (app *Application) ec2DeleteRoute(w http.ResponseWriter, account string, re
 // ----- EIP handlers -----
 
 type ec2AddressXML struct {
-	XMLName      xml.Name `xml:"item"`
 	AllocationId string   `xml:"allocationId"`
 	PublicIp     string   `xml:"publicIp"`
 	Domain       string   `xml:"domain"`
 }
 
 type ec2AllocateAddressResult struct {
-	XMLName      xml.Name `xml:"AllocateAddressResult"`
 	AllocationId string   `xml:"allocationId"`
 	PublicIp     string   `xml:"publicIp"`
 	Domain       string   `xml:"domain"`
 }
 
 type ec2DescribeAddressesResult struct {
-	XMLName    xml.Name        `xml:"DescribeAddressesResult"`
 	AddressSet []ec2AddressXML `xml:"addressesSet>item"`
 }
 
@@ -607,12 +611,10 @@ type ec2IpPermission struct {
 }
 
 type ec2SgIpRangeXML struct {
-	XMLName xml.Name `xml:"item"`
 	CidrIp  string   `xml:"cidrIp"`
 }
 
 type ec2SgIpPermissionXML struct {
-	XMLName    xml.Name          `xml:"item"`
 	IpProtocol string            `xml:"ipProtocol"`
 	FromPort   int               `xml:"fromPort"`
 	ToPort     int               `xml:"toPort"`
@@ -620,7 +622,6 @@ type ec2SgIpPermissionXML struct {
 }
 
 type ec2SecurityGroupXML struct {
-	XMLName       xml.Name               `xml:"item"`
 	GroupId       string                 `xml:"groupId"`
 	GroupName     string                 `xml:"groupName"`
 	GroupDesc     string                 `xml:"groupDescription"`
@@ -630,12 +631,10 @@ type ec2SecurityGroupXML struct {
 }
 
 type ec2CreateSecurityGroupResult struct {
-	XMLName xml.Name `xml:"CreateSecurityGroupResult"`
 	GroupId string   `xml:"groupId"`
 }
 
 type ec2DescribeSecurityGroupsResult struct {
-	XMLName          xml.Name              `xml:"DescribeSecurityGroupsResult"`
 	SecurityGroupSet []ec2SecurityGroupXML `xml:"securityGroupInfo>item"`
 }
 
@@ -913,4 +912,441 @@ func subtractIpPermissions(existing, rm []ec2IpPermission) []ec2IpPermission {
 		out = append(out, p)
 	}
 	return out
+}
+
+// ----- Instance handlers -----
+
+type ec2InstanceXML struct {
+	InstanceId           string             `xml:"instanceId"`
+	ImageId              string             `xml:"imageId"`
+	InstanceType         string             `xml:"instanceType"`
+	SubnetId             string             `xml:"subnetId"`
+	IamProfile           *ec2IamProfileXML  `xml:"iamInstanceProfile,omitempty"`
+	InstanceState        ec2InstanceStateXML `xml:"instanceState"`
+	GroupSet             []ec2InstanceSGXML `xml:"groupSet>item,omitempty"`
+}
+
+type ec2IamProfileXML struct {
+	Arn     string   `xml:"arn"`
+	Id      string   `xml:"id"`
+}
+
+// ec2InstanceStateXML is rendered through three distinct field
+// positions (instanceState, currentState, previousState) — so it
+// intentionally has no XMLName: encoding/xml treats the field tag
+// as the element name, which is what we need.
+type ec2InstanceStateXML struct {
+	Code int    `xml:"code"`
+	Name string `xml:"name"`
+}
+
+type ec2InstanceSGXML struct {
+	GroupId string   `xml:"groupId"`
+}
+
+type ec2RunInstancesResult struct {
+	Reservation  string           `xml:"reservationId"`
+	OwnerId      string           `xml:"ownerId"`
+	InstancesSet []ec2InstanceXML `xml:"instancesSet>item"`
+}
+
+type ec2DescribeInstancesResult struct {
+	ReservationSet []ec2ReservationXML   `xml:"reservationSet>item"`
+}
+
+type ec2ReservationXML struct {
+	ReservationId string           `xml:"reservationId"`
+	OwnerId       string           `xml:"ownerId"`
+	InstancesSet  []ec2InstanceXML `xml:"instancesSet>item"`
+}
+
+type ec2TerminateInstancesResult struct {
+	InstancesSet   []ec2InstanceStateChangeXML `xml:"instancesSet>item"`
+}
+
+type ec2InstanceStateChangeXML struct {
+	InstanceId    string             `xml:"instanceId"`
+	CurrentState  ec2InstanceStateXML `xml:"currentState"`
+	PreviousState ec2InstanceStateXML `xml:"previousState"`
+}
+
+var ec2InstanceStateCodes = map[string]int{
+	"pending":       0,
+	"running":       16,
+	"shutting-down": 32,
+	"terminated":    48,
+	"stopping":      64,
+	"stopped":       80,
+}
+
+func ec2InstanceStateForName(name string) ec2InstanceStateXML {
+	return ec2InstanceStateXML{Code: ec2InstanceStateCodes[name], Name: name}
+}
+
+func (app *Application) ec2InstanceToXML(account string, inst *repository.EC2Instance) ec2InstanceXML {
+	x := ec2InstanceXML{
+		InstanceId:    inst.ID,
+		ImageId:        inst.AMIID,
+		InstanceType:  inst.InstanceType,
+		SubnetId:      inst.SubnetID,
+		InstanceState: ec2InstanceStateForName(inst.State),
+	}
+	if inst.IAMInstanceProfileName != "" {
+		x.IamProfile = &ec2IamProfileXML{
+			Arn: awsproto.BuildIAMInstanceProfileARN(inst.IAMInstanceProfileName),
+			Id:  inst.IAMInstanceProfileName,
+		}
+	}
+	for _, sgID := range inst.VPCSecurityGroupIDs {
+		x.GroupSet = append(x.GroupSet, ec2InstanceSGXML{GroupId: sgID})
+	}
+	return x
+}
+
+// parseSecurityGroupIDs reads SecurityGroupId.<n> params (the AWS
+// Query-RPC shape for vpc_security_group_ids).
+func parseSecurityGroupIDs(req awsproto.QueryRPCRequest) []string {
+	var ids []string
+	for k, vs := range req.Params {
+		if strings.HasPrefix(k, "SecurityGroupId.") && len(vs) > 0 {
+			ids = append(ids, vs[0])
+		}
+	}
+	return ids
+}
+
+// parseInstanceIDs reads InstanceId.<n> params.
+func parseInstanceIDs(req awsproto.QueryRPCRequest) []string {
+	var ids []string
+	for k, vs := range req.Params {
+		if strings.HasPrefix(k, "InstanceId.") && len(vs) > 0 {
+			ids = append(ids, vs[0])
+		}
+	}
+	return ids
+}
+
+func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	subnetID := req.Params.Get("SubnetId")
+	imageID := req.Params.Get("ImageId")
+	instanceType := req.Params.Get("InstanceType")
+	if subnetID == "" || imageID == "" || instanceType == "" {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+			fmt.Errorf("SubnetId, ImageId, InstanceType required: %w", models.ErrConflict))
+		return
+	}
+	// Subnet/VPC pairing — if SecurityGroupId.<n> is given, the SGs'
+	// VPC must match the subnet's VPC (S44-T8 regression pattern; the
+	// load-bearing fakegcp pass-27 finding ported to AWS).
+	subnet, err := app.repo.GetSubnet(account, subnetID)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	sgIDs := parseSecurityGroupIDs(req)
+	for _, sgID := range sgIDs {
+		sg, err := app.repo.GetSecurityGroup(account, sgID)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			return
+		}
+		if sg.VPCID != subnet.VPCID {
+			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+				fmt.Errorf("security group %q lives in vpc %q but subnet %q is in vpc %q: %w",
+					sgID, sg.VPCID, subnetID, subnet.VPCID, models.ErrNotFound))
+			return
+		}
+	}
+	profileName := req.Params.Get("IamInstanceProfile.Name")
+	id := "i-" + ec2RandID()
+	inst := &repository.EC2Instance{
+		ID: id, SubnetID: subnetID, AMIID: imageID, InstanceType: instanceType,
+		IAMInstanceProfileName: profileName,
+		VPCSecurityGroupIDs:    sgIDs,
+		State:                  "running",
+		Region:                 region,
+		ARN:                    awsproto.BuildEC2InstanceARN(region, id),
+		CreatedAt:              time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := app.repo.CreateInstance(account, inst); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "RunInstances", &ec2RunInstancesResult{
+		Reservation: "r-" + ec2RandID(),
+		OwnerId:     awsproto.FakeAccountID,
+		InstancesSet: []ec2InstanceXML{app.ec2InstanceToXML(account, inst)},
+	})
+}
+
+func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	wanted := parseInstanceIDs(req)
+	var instances []*repository.EC2Instance
+	if len(wanted) > 0 {
+		for _, id := range wanted {
+			inst, err := app.repo.GetInstance(account, id)
+			if err != nil {
+				awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+				return
+			}
+			instances = append(instances, inst)
+		}
+	} else {
+		var err error
+		instances, err = app.repo.ListInstances(account, "")
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			return
+		}
+	}
+	out := ec2DescribeInstancesResult{
+		ReservationSet: make([]ec2ReservationXML, 0, len(instances)),
+	}
+	for _, inst := range instances {
+		out.ReservationSet = append(out.ReservationSet, ec2ReservationXML{
+			ReservationId: "r-" + ec2RandID(),
+			OwnerId:       awsproto.FakeAccountID,
+			InstancesSet:  []ec2InstanceXML{app.ec2InstanceToXML(account, inst)},
+		})
+	}
+	awsproto.WriteQueryRPCResponse(w, "DescribeInstances", &out)
+}
+
+// ec2ModifyInstanceAttribute is intentionally minimal at v1 — the
+// terraform-provider-aws update path mostly uses it to adjust
+// `disable_api_termination` and SG membership; the latter is the
+// only thing we round-trip. State changes go through the dedicated
+// state-machine handlers (Start / Stop / Terminate).
+func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	id := req.Params.Get("InstanceId")
+	if id == "" {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+			fmt.Errorf("InstanceId required: %w", models.ErrConflict))
+		return
+	}
+	if _, err := app.repo.GetInstance(account, id); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	// Existence check is enough at v1 — the fixture state suffices for
+	// terraform-provider-aws's expected refresh pattern.
+	awsproto.WriteQueryRPCResponse(w, "ModifyInstanceAttribute", nil)
+}
+
+func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	ids := parseInstanceIDs(req)
+	if len(ids) == 0 {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+			fmt.Errorf("InstanceId.<n> required: %w", models.ErrConflict))
+		return
+	}
+	out := ec2TerminateInstancesResult{}
+	for _, id := range ids {
+		inst, err := app.repo.GetInstance(account, id)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			return
+		}
+		previous := inst.State
+		if previous == "terminated" {
+			// Already terminated — AWS surfaces this as state-stays-terminated,
+			// not as a 409. Concepts.md "Standing patterns" item 9 — terminal
+			// state refuses transitions; the wire response just echoes
+			// terminated/terminated.
+			out.InstancesSet = append(out.InstancesSet, ec2InstanceStateChangeXML{
+				InstanceId:    id,
+				CurrentState:  ec2InstanceStateForName("terminated"),
+				PreviousState: ec2InstanceStateForName("terminated"),
+			})
+			continue
+		}
+		if err := app.repo.SetInstanceState(account, id, "terminated"); err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			return
+		}
+		out.InstancesSet = append(out.InstancesSet, ec2InstanceStateChangeXML{
+			InstanceId:    id,
+			CurrentState:  ec2InstanceStateForName("terminated"),
+			PreviousState: ec2InstanceStateForName(previous),
+		})
+	}
+	awsproto.WriteQueryRPCResponse(w, "TerminateInstances", &out)
+}
+
+// ----- KeyPair handlers -----
+
+type ec2KeyPairXML struct {
+	KeyName        string   `xml:"keyName"`
+	KeyFingerprint string   `xml:"keyFingerprint"`
+}
+
+type ec2ImportKeyPairResult struct {
+	KeyName        string   `xml:"keyName"`
+	KeyFingerprint string   `xml:"keyFingerprint"`
+}
+
+type ec2DescribeKeyPairsResult struct {
+	KeySet     []ec2KeyPairXML `xml:"keySet>item"`
+}
+
+func ec2KeyFingerprint(publicKey string) string {
+	// AWS ImportKeyPair returns an MD5 fingerprint of the public key
+	// per the docs; we don't import md5 here (reasonable cryptographic
+	// hygiene at the wire-mock layer) — produce a deterministic
+	// hex-from-content fingerprint instead. The provider treats it as
+	// opaque, so the shape is what matters.
+	sum := byte(0)
+	for _, b := range []byte(publicKey) {
+		sum = (sum*31 + b)
+	}
+	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
+		sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum)
+}
+
+func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	name := req.Params.Get("KeyName")
+	publicKey := req.Params.Get("PublicKeyMaterial")
+	if name == "" || publicKey == "" {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+			fmt.Errorf("KeyName and PublicKeyMaterial required: %w", models.ErrConflict))
+		return
+	}
+	fp := ec2KeyFingerprint(publicKey)
+	kp := &repository.EC2KeyPair{
+		Name: name, PublicKey: publicKey, Fingerprint: fp, Region: region,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := app.repo.CreateKeyPair(account, kp); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "ImportKeyPair",
+		&ec2ImportKeyPairResult{KeyName: name, KeyFingerprint: fp})
+}
+
+func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	// KeyName.<n> filter — terraform-provider-aws's read path.
+	var wanted []string
+	for k, vs := range req.Params {
+		if strings.HasPrefix(k, "KeyName.") && len(vs) > 0 {
+			wanted = append(wanted, vs[0])
+		}
+	}
+	out := ec2DescribeKeyPairsResult{KeySet: []ec2KeyPairXML{}}
+	if len(wanted) == 0 {
+		// no filter — list all in region
+		kps, err := app.repo.ListKeyPairs(account, region)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			return
+		}
+		for _, kp := range kps {
+			out.KeySet = append(out.KeySet, ec2KeyPairXML{KeyName: kp.Name, KeyFingerprint: kp.Fingerprint})
+		}
+	} else {
+		for _, name := range wanted {
+			kp, err := app.repo.GetKeyPair(account, region, name)
+			if err != nil {
+				awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+				return
+			}
+			out.KeySet = append(out.KeySet, ec2KeyPairXML{KeyName: kp.Name, KeyFingerprint: kp.Fingerprint})
+		}
+	}
+	awsproto.WriteQueryRPCResponse(w, "DescribeKeyPairs", &out)
+}
+
+func (app *Application) ec2DeleteKeyPair(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if err := app.repo.DeleteKeyPair(account, region, req.Params.Get("KeyName")); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "DeleteKeyPair", nil)
+}
+
+// ----- AMI (read-only fixture) handlers -----
+
+type ec2ImageXML struct {
+	ImageId            string   `xml:"imageId"`
+	Name               string   `xml:"name"`
+	OwnerId            string   `xml:"imageOwnerId"`
+	VirtualizationType string   `xml:"virtualizationType"`
+	RootDeviceName     string   `xml:"rootDeviceName"`
+	State              string   `xml:"imageState"`
+}
+
+type ec2DescribeImagesResult struct {
+	ImagesSet []ec2ImageXML `xml:"imagesSet>item"`
+}
+
+func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	// ImageId.<n> filter — most common from terraform-provider-aws
+	// where users pass a literal AMI id. data.aws_ami is NOT supported
+	// per the S44-T0 pitfall.
+	var wanted []string
+	for k, vs := range req.Params {
+		if strings.HasPrefix(k, "ImageId.") && len(vs) > 0 {
+			wanted = append(wanted, vs[0])
+		}
+	}
+	out := ec2DescribeImagesResult{ImagesSet: []ec2ImageXML{}}
+	if len(wanted) == 0 {
+		amis, err := app.repo.ListAMIs(account, region)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			return
+		}
+		for _, a := range amis {
+			out.ImagesSet = append(out.ImagesSet, ec2AMIToXML(a))
+		}
+	} else {
+		for _, id := range wanted {
+			a, err := app.repo.GetAMI(account, region, id)
+			if err != nil {
+				awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+				return
+			}
+			out.ImagesSet = append(out.ImagesSet, ec2AMIToXML(a))
+		}
+	}
+	awsproto.WriteQueryRPCResponse(w, "DescribeImages", &out)
+}
+
+func ec2AMIToXML(a *repository.EC2AMI) ec2ImageXML {
+	return ec2ImageXML{
+		ImageId: a.ID, Name: a.Name, OwnerId: a.OwnerID,
+		VirtualizationType: a.VirtualizationType, RootDeviceName: a.RootDeviceName,
+		State: "available",
+	}
+}
+
+// ec2AMIFixtures is the canonical fixture list seeded at startup. The
+// AWS provider's documentation examples reference Amazon Linux 2 and
+// Ubuntu LTS images by canonical name; we cover both so scenarios can
+// pass in either. Per concepts.md "Standing patterns" item 8 — fixture
+// state, never derived from real AWS.
+var ec2AMIFixtures = []repository.EC2AMI{
+	{ID: "ami-0abcd1234", Name: "amzn2-ami-hvm-2.0", OwnerID: "amazon", VirtualizationType: "hvm", RootDeviceName: "/dev/xvda"},
+	{ID: "ami-0ubuntu2004", Name: "ubuntu/images/hvm-ssd/ubuntu-focal-20.04", OwnerID: "099720109477", VirtualizationType: "hvm", RootDeviceName: "/dev/sda1"},
+	{ID: "ami-0ubuntu2204", Name: "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04", OwnerID: "099720109477", VirtualizationType: "hvm", RootDeviceName: "/dev/sda1"},
+}
+
+// SeedEC2AMIFixtures writes the canonical AMI set into every region
+// referenced by /mock/state. It's idempotent (INSERT OR IGNORE in the
+// repo) so calling it on every boot is safe.
+//
+// Called from NewApplication after the repo is open; tests that hit
+// DescribeImages get a populated fixture set without any explicit
+// admin call.
+func (app *Application) SeedEC2AMIFixtures(account string, regions []string) error {
+	for _, region := range regions {
+		for _, a := range ec2AMIFixtures {
+			cp := a
+			cp.Region = region
+			if err := app.repo.SeedAMI(account, &cp); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
