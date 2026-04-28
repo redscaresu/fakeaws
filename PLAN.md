@@ -347,4 +347,85 @@ sqs_messages (account_id, queue_arn, message_id)
            misconfigured + updates dirs
   S46-T10  gated TestE2E_AWS_EKS + TestE2E_AWS_SQS; coverage matrix entries.
 
-Phase 5+ design notes will be written as those phases land.
+## Phase 5 — DNS + secrets (S47)
+
+Route53 and Secrets Manager.
+
+- **Route53** speaks XML REST. Global service (no region segment in
+  ARNs). Endpoint: `/route53/hostedzone/...`,
+  `/route53/change/...`. Uses awsproto.WriteXMLResponse from S43-T2.
+- **Secrets Manager** speaks JSON 1.1 with X-Amz-Target. Endpoint:
+  per-region at `/secretsmanager/region/<region>` with
+  `X-Amz-Target: secretsmanager.<Operation>`.
+
+### Route53 schema (S47-T2)
+
+```sql
+route53_hosted_zones (account_id, id)        -- id is "Z<8 hex chars>"
+                     name, comment, private (bool), arn
+                     — non-empty-zone delete refusal: count records
+                       (excluding default NS + SOA) and reject if > 0.
+route53_record_sets  (account_id, zone_id, name, type)
+                     ttl, records (JSON array of values), alias_target (JSON, nullable),
+                     set_identifier (nullable, for weighted/latency routing)
+                     PRIMARY KEY (account_id, zone_id, name, type, set_identifier)
+                     ON DELETE CASCADE on zone_id
+route53_changes      (account_id, change_id) -- batch tracking
+                     status ('INSYNC' v1 — no PENDING intermediate),
+                     submitted_at
+```
+
+### Secrets Manager schema (S47-T4)
+
+```sql
+secretsmanager_secrets (account_id, region, name)
+                       arn (with 6-char random suffix per S43-T2),
+                       description, kms_key_id, recovery_window_in_days,
+                       deleted_date (NULL if active; non-NULL = scheduled deletion),
+                       state ('Active'|'PendingDeletion'|'Destroyed' v1),
+                       tags (JSON map)
+secretsmanager_versions (account_id, secret_name, version_id)
+                        secret_string (or secret_binary), stages (JSON array),
+                        created_at
+                        ON DELETE CASCADE on secret_name
+```
+
+### Standing patterns
+
+- Route53 ChangeResourceRecordSets is TRANSACTIONAL: validate ALL
+  changes before applying any (concepts.md "Standing patterns" item 7
+  — transactional batched changes). One bad change rejects the whole
+  batch.
+- Hosted-zone delete refusal: count non-default records, return 409
+  `HostedZoneNotEmpty` if > 0 (concepts.md "Standing patterns" item 11).
+- Apex CNAME forbidden: if a `name=<zone-root>` change has type `CNAME`,
+  reject with InvalidChangeBatch (S47-T0 pitfall).
+- Secrets Manager DeleteSecret with `recovery_window_in_days > 0`
+  schedules deletion; secret remains in `PendingDeletion` state until
+  the window elapses or RestoreSecret reverses. RestoreSecret on a
+  fully-destroyed secret returns 409 `InvalidRequestException`
+  (concepts.md "Standing patterns" item 9 — terminal-state refusal).
+- Secret version stages: AWSCURRENT moves to the new version on each
+  PutSecretValue; the prior version becomes AWSPREVIOUS.
+
+### What lands when
+
+  S47-T0   pitfalls (DONE — infrafactory@a0925ee)
+  S47-T1   this design note (this commit)
+  S47-T2   repository/route53.go (zones + record sets + changes)
+  S47-T3   handlers/route53.go (XML REST dispatcher)
+  S47-T4   repository/secretsmanager.go (secrets + versions, state machine)
+  S47-T5   handlers/secretsmanager.go (JSON 1.1 + X-Amz-Target dispatcher)
+  S47-T6   handlers_test.go for Route53 + Secrets Manager
+  S47-T7   regression coverage for Route53 batch atomicity + Secrets terminal state
+  S47-T8   scenarios/training/aws-route53.yaml + aws-secrets-manager.yaml
+  S47-T9   examples/working/{route53,secrets_manager} + matching
+           misconfigured + updates dirs
+  S47-T10  gated TestE2E_AWS_Route53 + TestE2E_AWS_SecretsManager;
+           coverage matrix entries.
+
+## Phase 6 — Polish + codex review iteration loop (S48)
+
+Per kickoff prompt rule 3 + concepts.md S48 spec: codex review passes
+under fakeaws/docs/review-passes/passN.md until 2 consecutive
+NOTHING_TO_IMPROVE passes. Budget 20-35 passes.
