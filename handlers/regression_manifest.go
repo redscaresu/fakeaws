@@ -40,6 +40,7 @@ var LandedServices = []string{
 	"iam",
 	"rds",
 	"s3",
+	"sqs",
 }
 
 // requireHandlerImplemented is the manifest-gated skip helper. Tests
