@@ -353,6 +353,42 @@ func TestIAM_MockStateReflectsCreatedResources(t *testing.T) {
 	}
 }
 
+// TestIAM_MockStateAccessKeysSurfaced pins Codex pass 10 BLOCKING #1:
+// /mock/state.iam.access_keys must list every access key for the
+// account so terraform-provider-aws's aws_iam_access_key drift checks
+// are visible to topology_derive_aws.
+func TestIAM_MockStateAccessKeysSurfaced(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	if resp, body := iamCall(t, srv, "CreateUser", url.Values{"UserName": {"alice"}}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateUser: %d %s", resp.StatusCode, body)
+	}
+	resp, body := iamCall(t, srv, "CreateAccessKey", url.Values{"UserName": {"alice"}})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateAccessKey: %d %s", resp.StatusCode, body)
+	}
+	// Pull the AccessKeyId out of the XML so we can assert on it.
+	keyID := xmlExtract(body, "AccessKeyId")
+	if keyID == "" {
+		t.Fatalf("could not extract AccessKeyId from response: %s", body)
+	}
+
+	resp, body = doGet(t, srv, "/mock/state/iam")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /mock/state/iam: %d", resp.StatusCode)
+	}
+	state := string(body)
+	if !strings.Contains(state, `"access_keys"`) {
+		t.Errorf("/mock/state/iam missing access_keys collection: %s", state)
+	}
+	if !strings.Contains(state, keyID) {
+		t.Errorf("/mock/state/iam.access_keys missing %s: %s", keyID, state)
+	}
+	if !strings.Contains(state, `"alice"`) {
+		t.Errorf("/mock/state/iam.access_keys missing user_name=alice: %s", state)
+	}
+}
+
+
 // ----- Wire-shape sanity: response decodes as XML -----
 
 func TestIAM_CreateRoleResponseIsValidXML(t *testing.T) {

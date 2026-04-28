@@ -869,6 +869,120 @@ func (r *Repository) DeleteEIP(account, region, allocationID string) error {
 	return nil
 }
 
+// ListRouteTables returns every route table for the account, optionally
+// scoped to a region. Empty region == account-wide. Used by /mock/state
+// (Codex pass 10 BLOCKING #2 fix).
+func (r *Repository) ListRouteTables(account, region string) ([]*EC2RouteTable, error) {
+	var rows *sql.Rows
+	var err error
+	if region == "" {
+		rows, err = r.db.Query(`SELECT data FROM ec2_route_tables WHERE account_id = ? ORDER BY id`, account)
+	} else {
+		rows, err = r.db.Query(`SELECT data FROM ec2_route_tables WHERE account_id = ? AND region = ? ORDER BY id`, account, region)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*EC2RouteTable
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var rt EC2RouteTable
+		if err := json.Unmarshal([]byte(data), &rt); err != nil {
+			return nil, err
+		}
+		out = append(out, &rt)
+	}
+	return out, rows.Err()
+}
+
+// ListRoutes returns every route for the account, ordered by route
+// table id. Used by /mock/state (Codex pass 10 BLOCKING #2 fix).
+// Account-wide; routes are not region-scoped at this layer (the parent
+// route_table is, and the FK propagates).
+func (r *Repository) ListRoutes(account string) ([]*EC2Route, error) {
+	rows, err := r.db.Query(
+		`SELECT route_table_id, destination_cidr_block, gateway_id, nat_gateway_id, instance_id, network_interface_id
+		   FROM ec2_routes WHERE account_id = ?
+		   ORDER BY route_table_id, destination_cidr_block`,
+		account,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*EC2Route
+	for rows.Next() {
+		var rt EC2Route
+		var gw, nat, inst, eni sql.NullString
+		if err := rows.Scan(&rt.RouteTableID, &rt.DestinationCidrBlock, &gw, &nat, &inst, &eni); err != nil {
+			return nil, err
+		}
+		rt.GatewayID = gw.String
+		rt.NatGatewayID = nat.String
+		rt.InstanceID = inst.String
+		rt.NetworkInterfaceID = eni.String
+		out = append(out, &rt)
+	}
+	return out, rows.Err()
+}
+
+// ListRouteTableAssociations returns every route-table association for
+// the account. Used by /mock/state (Codex pass 10 BLOCKING #2 fix).
+func (r *Repository) ListRouteTableAssociations(account string) ([]*EC2RouteTableAssociation, error) {
+	rows, err := r.db.Query(
+		`SELECT id, route_table_id, subnet_id FROM ec2_route_table_associations
+		   WHERE account_id = ? ORDER BY id`,
+		account,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*EC2RouteTableAssociation
+	for rows.Next() {
+		var a EC2RouteTableAssociation
+		if err := rows.Scan(&a.ID, &a.RouteTableID, &a.SubnetID); err != nil {
+			return nil, err
+		}
+		out = append(out, &a)
+	}
+	return out, rows.Err()
+}
+
+// ListEIPs returns every EIP for the account, optionally scoped to a
+// region. Empty region == account-wide. Used by /mock/state
+// (Codex pass 10 BLOCKING #2 fix).
+func (r *Repository) ListEIPs(account, region string) ([]*EC2EIP, error) {
+	var rows *sql.Rows
+	var err error
+	if region == "" {
+		rows, err = r.db.Query(`SELECT data FROM ec2_eips WHERE account_id = ? ORDER BY allocation_id`, account)
+	} else {
+		rows, err = r.db.Query(`SELECT data FROM ec2_eips WHERE account_id = ? AND region = ? ORDER BY allocation_id`, account, region)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*EC2EIP
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var eip EC2EIP
+		if err := json.Unmarshal([]byte(data), &eip); err != nil {
+			return nil, err
+		}
+		out = append(out, &eip)
+	}
+	return out, rows.Err()
+}
+
 // ----- helpers -----
 
 func nullIfEmpty(s string) any {

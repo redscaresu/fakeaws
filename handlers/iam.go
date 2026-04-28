@@ -120,6 +120,7 @@ func (app *Application) gatherIAMStateReal() map[string]any {
 		"policies":          []any{},
 		"instance_profiles": []any{},
 		"users":             []any{},
+		"access_keys":       []any{},
 	}
 
 	roles, _ := app.repo.ListRoles(account)
@@ -171,6 +172,22 @@ func (app *Application) gatherIAMStateReal() map[string]any {
 		})
 	}
 	out["users"] = uOut
+
+	// Access keys — account-wide enumeration (Codex pass 10 BLOCKING
+	// #1 fix: previously absent, so terraform-provider-aws's
+	// aws_iam_access_key drift checks were invisible to topology
+	// derivation). ListAccessKeys with empty userName lists all users.
+	keys, _ := app.repo.ListAccessKeys(account, "")
+	kOut := make([]map[string]any, 0, len(keys))
+	for _, k := range keys {
+		kOut = append(kOut, map[string]any{
+			"user_name":     k.UserName,
+			"access_key_id": k.ID,
+			"status":        k.Status,
+			"created_at":    k.CreatedAt,
+		})
+	}
+	out["access_keys"] = kOut
 
 	return out
 }

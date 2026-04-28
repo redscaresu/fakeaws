@@ -827,6 +827,103 @@ func TestRegressionRunInstancesAvailableInAnyRegion(t *testing.T) {
 	}
 }
 
+// TestRegressionStateGatherEC2Collections pins Codex pass 10 BLOCKING
+// #2: /mock/state.ec2 must surface route_tables, routes,
+// route_table_associations, and eips so topology_derive_aws can see
+// public-subnet wiring and EIP allocations. Previously these
+// collections were absent entirely.
+func TestRegressionStateGatherEC2Collections(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+
+	// VPC + subnet to anchor the route table + association.
+	_, body := ec2PostRegression(t, srv, region, "CreateVpc", url.Values{
+		"CidrBlock": {"10.0.0.0/16"},
+	})
+	vpcID := xmlExtract(body, "vpcId")
+	if vpcID == "" {
+		t.Fatalf("CreateVpc: missing vpcId in %s", body)
+	}
+	_, body = ec2PostRegression(t, srv, region, "CreateSubnet", url.Values{
+		"VpcId":            {vpcID},
+		"CidrBlock":        {"10.0.1.0/24"},
+		"AvailabilityZone": {"us-east-1a"},
+	})
+	subnetID := xmlExtract(body, "subnetId")
+	if subnetID == "" {
+		t.Fatalf("CreateSubnet: missing subnetId in %s", body)
+	}
+
+	// Internet gateway — provides a target for the default route.
+	_, body = ec2PostRegression(t, srv, region, "CreateInternetGateway", url.Values{})
+	igwID := xmlExtract(body, "internetGatewayId")
+	if igwID == "" {
+		t.Fatalf("CreateInternetGateway: missing internetGatewayId in %s", body)
+	}
+
+	// Route table.
+	_, body = ec2PostRegression(t, srv, region, "CreateRouteTable", url.Values{
+		"VpcId": {vpcID},
+	})
+	rtID := xmlExtract(body, "routeTableId")
+	if rtID == "" {
+		t.Fatalf("CreateRouteTable: missing routeTableId in %s", body)
+	}
+
+	// Route on the table — 0.0.0.0/0 → IGW.
+	if resp, body := ec2PostRegression(t, srv, region, "CreateRoute", url.Values{
+		"RouteTableId":         {rtID},
+		"DestinationCidrBlock": {"0.0.0.0/0"},
+		"GatewayId":            {igwID},
+	}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateRoute: %d body=%s", resp.StatusCode, body)
+	}
+
+	// Subnet association.
+	_, body = ec2PostRegression(t, srv, region, "AssociateRouteTable", url.Values{
+		"RouteTableId": {rtID},
+		"SubnetId":     {subnetID},
+	})
+	assocID := xmlExtract(body, "associationId")
+	if assocID == "" {
+		t.Fatalf("AssociateRouteTable: missing associationId in %s", body)
+	}
+
+	// EIP allocation.
+	_, body = ec2PostRegression(t, srv, region, "AllocateAddress", url.Values{
+		"Domain": {"vpc"},
+	})
+	allocID := xmlExtract(body, "allocationId")
+	if allocID == "" {
+		t.Fatalf("AllocateAddress: missing allocationId in %s", body)
+	}
+
+	resp, err := http.Get(srv.URL + "/mock/state")
+	if err != nil {
+		t.Fatalf("GET /mock/state: %v", err)
+	}
+	defer resp.Body.Close()
+	state := string(readResponseBody(t, resp))
+
+	// Each collection key must appear (non-nil empty list contract).
+	for _, want := range []string{
+		`"route_tables"`,
+		`"routes"`,
+		`"route_table_associations"`,
+		`"eips"`,
+	} {
+		if !strings.Contains(state, want) {
+			t.Errorf("/mock/state.ec2 missing collection %s: %s", want, state)
+		}
+	}
+	// Each created id must surface in the corresponding collection.
+	for _, want := range []string{rtID, assocID, allocID, "0.0.0.0/0", igwID} {
+		if !strings.Contains(state, want) {
+			t.Errorf("/mock/state.ec2 missing %q: %s", want, state)
+		}
+	}
+}
+
 // ----- test helpers (regression-suite local) -----
 
 const regressionVersion = "2010-05-08"

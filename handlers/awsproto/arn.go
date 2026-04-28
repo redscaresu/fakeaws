@@ -75,6 +75,14 @@ func BuildEC2RouteTableARN(region, id string) string {
 	return fmt.Sprintf("arn:aws:ec2:%s:%s:route-table/%s", region, FakeAccountID, id)
 }
 
+// BuildEC2EIPARN: arn:aws:ec2:<region>:<account>:elastic-ip/<allocation-id>
+// Used by /mock/state's EC2 gather (Codex pass 10 BLOCKING #2 fix). Real
+// AWS doesn't surface EIP ARNs on the wire, but topology_derive_aws keys
+// off the canonical resource shape.
+func BuildEC2EIPARN(region, allocationID string) string {
+	return fmt.Sprintf("arn:aws:ec2:%s:%s:elastic-ip/%s", region, FakeAccountID, allocationID)
+}
+
 // BuildRDSDBARN: arn:aws:rds:<region>:<account>:db:<id>
 // Note: RDS uses ':' as the separator between resource-type and id,
 // not '/' like most other services. Caught a real provider parse error

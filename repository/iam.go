@@ -557,19 +557,32 @@ func (r *Repository) CreateAccessKey(account string, k *IAMAccessKey) error {
 	return nil
 }
 
+// ListAccessKeys returns access keys for an account. Pass userName == ""
+// to enumerate every user's keys (account-wide; used by /mock/state's
+// IAM gather — Codex pass 10 BLOCKING #1 fix); pass a concrete userName
+// to scope to that user (the existing IAM ListAccessKeys handler).
 func (r *Repository) ListAccessKeys(account, userName string) ([]*IAMAccessKey, error) {
-	rows, err := r.db.Query(
-		`SELECT id, status, created_at FROM iam_access_keys WHERE account_id = ? AND user_name = ? ORDER BY id`,
-		account, userName,
-	)
+	var rows *sql.Rows
+	var err error
+	if userName == "" {
+		rows, err = r.db.Query(
+			`SELECT user_name, id, status, created_at FROM iam_access_keys WHERE account_id = ? ORDER BY user_name, id`,
+			account,
+		)
+	} else {
+		rows, err = r.db.Query(
+			`SELECT user_name, id, status, created_at FROM iam_access_keys WHERE account_id = ? AND user_name = ? ORDER BY id`,
+			account, userName,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []*IAMAccessKey
 	for rows.Next() {
-		k := &IAMAccessKey{UserName: userName}
-		if err := rows.Scan(&k.ID, &k.Status, &k.CreatedAt); err != nil {
+		k := &IAMAccessKey{}
+		if err := rows.Scan(&k.UserName, &k.ID, &k.Status, &k.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, k)

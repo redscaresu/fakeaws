@@ -1353,11 +1353,16 @@ var ec2AMIFixtures = []repository.EC2AMI{
 func (app *Application) gatherEC2StateReal() map[string]any {
 	const account = awsproto.FakeAccountID
 	out := map[string]any{
-		"vpcs":            []any{},
-		"subnets":         []any{},
-		"security_groups": []any{},
-		"instances":       []any{},
-		"key_pairs":       []any{},
+		"vpcs":                     []any{},
+		"subnets":                  []any{},
+		"security_groups":          []any{},
+		"instances":                []any{},
+		"key_pairs":                []any{},
+		"internet_gateways":        []any{},
+		"route_tables":             []any{},
+		"routes":                   []any{},
+		"route_table_associations": []any{},
+		"eips":                     []any{},
 	}
 
 	vpcs, _ := app.repo.ListVPCs(account, "")
@@ -1426,6 +1431,61 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 		})
 	}
 	out["internet_gateways"] = igwOut
+
+	// Route tables, routes, associations, and EIPs — Codex pass 10
+	// BLOCKING #2 fix: previously absent from /mock/state, so
+	// topology_derive_aws couldn't see public-subnet wiring or
+	// allocated EIPs.
+	rts, _ := app.repo.ListRouteTables(account, "")
+	rtOut := make([]map[string]any, 0, len(rts))
+	for _, rt := range rts {
+		rtOut = append(rtOut, map[string]any{
+			"id": rt.ID, "vpc_id": rt.VPCID,
+			"region": rt.Region, "arn": rt.ARN,
+		})
+	}
+	out["route_tables"] = rtOut
+
+	routes, _ := app.repo.ListRoutes(account)
+	routeOut := make([]map[string]any, 0, len(routes))
+	for _, rr := range routes {
+		routeOut = append(routeOut, map[string]any{
+			"route_table_id":         rr.RouteTableID,
+			"destination_cidr_block": rr.DestinationCidrBlock,
+			"gateway_id":             rr.GatewayID,
+			"nat_gateway_id":         rr.NatGatewayID,
+			"instance_id":            rr.InstanceID,
+			"network_interface_id":   rr.NetworkInterfaceID,
+		})
+	}
+	out["routes"] = routeOut
+
+	assocs, _ := app.repo.ListRouteTableAssociations(account)
+	assocOut := make([]map[string]any, 0, len(assocs))
+	for _, a := range assocs {
+		assocOut = append(assocOut, map[string]any{
+			"id":             a.ID,
+			"route_table_id": a.RouteTableID,
+			"subnet_id":      a.SubnetID,
+		})
+	}
+	out["route_table_associations"] = assocOut
+
+	eips, _ := app.repo.ListEIPs(account, "")
+	eipOut := make([]map[string]any, 0, len(eips))
+	for _, eip := range eips {
+		eipOut = append(eipOut, map[string]any{
+			"allocation_id":        eip.AllocationID,
+			"public_ip":            eip.PublicIP,
+			"domain":               eip.Domain,
+			"network_interface_id": eip.NetworkInterfaceID,
+			"instance_id":          eip.InstanceID,
+			"association_id":       eip.AssociationID,
+			"region":               eip.Region,
+			"arn":                  awsproto.BuildEC2EIPARN(eip.Region, eip.AllocationID),
+		})
+	}
+	out["eips"] = eipOut
 
 	return out
 }
