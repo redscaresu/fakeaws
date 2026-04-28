@@ -100,7 +100,29 @@ func TestRegressionRelativePathWrongCollectionRejection(t *testing.T) {
 // subnet's stored parent VPC MUST match the requested VPC. Mismatched
 // pair → 404. Mirror of fakegcp pass-27's biggest finding.
 func TestRegressionSubnetVPCPairing(t *testing.T) {
-	requireHandlerImplemented(t, "ec2", "S44", "subnet-vpc-pairing")
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+	// Two VPCs; SG in vpc-A, subnet in vpc-B.
+	_, body := ec2PostRegression(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	vpcA := xmlExtract(body, "vpcId")
+	_, body = ec2PostRegression(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.1.0.0/16"}})
+	vpcB := xmlExtract(body, "vpcId")
+	_, body = ec2PostRegression(t, srv, region, "CreateSubnet", url.Values{
+		"VpcId": {vpcB}, "CidrBlock": {"10.1.1.0/24"},
+	})
+	subnetB := xmlExtract(body, "subnetId")
+	_, body = ec2PostRegression(t, srv, region, "CreateSecurityGroup", url.Values{
+		"GroupName": {"app"}, "GroupDescription": {"app"}, "VpcId": {vpcA},
+	})
+	sgA := xmlExtract(body, "groupId")
+
+	resp, body := ec2PostRegression(t, srv, region, "RunInstances", url.Values{
+		"SubnetId": {subnetB}, "ImageId": {"ami-0abcd1234"},
+		"InstanceType": {"t3.micro"}, "SecurityGroupId.1": {sgA},
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("subnet/SG VPC mismatch must 404, got %d body=%s", resp.StatusCode, body)
+	}
 }
 
 // 5. Post-merge PATCH validation.
@@ -109,8 +131,26 @@ func TestRegressionSubnetVPCPairing(t *testing.T) {
 // patch. A partial PATCH that flips only `subnetwork` (not `network`)
 // can otherwise smuggle in a mismatched VPC/subnet pair. Mirror of
 // fakegcp pass-28.
+//
+// EC2 expression at v1: AuthorizeSecurityGroupIngress is the closest
+// PATCH-shaped flow today. The merge-validation surface here is that
+// authorising a rule against a non-existent SG must 404 (the merged
+// state — pre-existing rules + new — is invalid because the SG
+// doesn't exist). Without the existence gate, a 200 silently writes
+// orphan rules.
 func TestRegressionPostMergePATCHValidation(t *testing.T) {
-	requireHandlerImplemented(t, "ec2", "S44", "post-merge-patch-validation")
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+	resp, body := ec2PostRegression(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{
+		"GroupId":                          {"sg-missing"},
+		"IpPermissions.1.IpProtocol":       {"tcp"},
+		"IpPermissions.1.FromPort":         {"443"},
+		"IpPermissions.1.ToPort":           {"443"},
+		"IpPermissions.1.IpRanges.1.CidrIp": {"0.0.0.0/0"},
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Authorize on missing SG must 404 (merged state invalid), got %d body=%s", resp.StatusCode, body)
+	}
 }
 
 // 6. Bare-name region scoping.
@@ -119,8 +159,27 @@ func TestRegressionPostMergePATCHValidation(t *testing.T) {
 // resolved against the request's zone-derived region (or cluster's
 // location). Pre-fix code rejected bare names; post-fix code derives
 // region from context. Mirror of fakegcp pass-30.
+//
+// EC2 expression: bare ids like "subnet-abc" are the AWS norm — every
+// EC2 endpoint is per-region by URL path, and ids resolve against the
+// caller's account regardless of the AZ a subnet belongs to. Test
+// confirms an id created in region us-east-1 is reachable when the
+// caller posts to /ec2/region/us-east-1 with no zone disambiguation.
 func TestRegressionBareNameRegionScoping(t *testing.T) {
-	requireHandlerImplemented(t, "ec2", "S44", "bare-name-region-scoping")
+	srv := newTestServerForRegression(t)
+	_, body := ec2PostRegression(t, srv, "us-east-1", "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	vpcID := xmlExtract(body, "vpcId")
+	_, body = ec2PostRegression(t, srv, "us-east-1", "CreateSubnet", url.Values{
+		"VpcId": {vpcID}, "CidrBlock": {"10.0.1.0/24"},
+	})
+	subnetID := xmlExtract(body, "subnetId")
+
+	// DescribeSubnets in same region resolves the bare id without an
+	// AZ-derived disambiguator.
+	_, body = ec2PostRegression(t, srv, "us-east-1", "DescribeSubnets", nil)
+	if !strings.Contains(string(body), subnetID) {
+		t.Errorf("bare-name subnet id must resolve in same region; body=%s", body)
+	}
 }
 
 // 7. Region-vs-zone heuristic.
@@ -129,8 +188,23 @@ func TestRegressionBareNameRegionScoping(t *testing.T) {
 // (us-east-1a) by suffix shape. Don't strip a region's trailing
 // segment as if it were a zone letter. Mirror of fakegcp pass-31
 // regionFromZone fix.
+//
+// EC2 expression: subnet AvailabilityZone is the place this surfaces.
+// The handler defaults the AZ to <region>+"a" when callers omit it,
+// and the stored value is region-suffixed. The bug we guard against
+// is treating the URL-path region as if it were already an AZ
+// (us-east-1 → strip → us-east, wrong). Asserted by checking the
+// subnet AZ is exactly us-east-1a, not "us-east"+"a".
 func TestRegressionRegionVsZoneHeuristic(t *testing.T) {
-	requireHandlerImplemented(t, "ec2", "S44", "region-vs-zone-heuristic")
+	srv := newTestServerForRegression(t)
+	_, body := ec2PostRegression(t, srv, "us-east-1", "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	vpcID := xmlExtract(body, "vpcId")
+	_, body = ec2PostRegression(t, srv, "us-east-1", "CreateSubnet", url.Values{
+		"VpcId": {vpcID}, "CidrBlock": {"10.0.1.0/24"},
+	})
+	if got := xmlExtract(body, "availabilityZone"); got != "us-east-1a" {
+		t.Errorf("region us-east-1 must produce AZ us-east-1a (not us-easta or us-east-a); got %q", got)
+	}
 }
 
 // 8. Cache-baseline lifecycle on /mock/reset.
@@ -269,8 +343,43 @@ func TestRegressionServerStampedFieldsNeverTrusted(t *testing.T) {
 //
 // IAM doesn't have indexed FK columns at v1 (no cross-resource SQL
 // joins on IAM tables); the test flips active when EC2 lands (S44).
+//
+// EC2 expression: the strongest test target is SecurityGroup rules.
+// CreateSecurityGroup writes the JSON `data` blob (containing rule
+// arrays) AND extracted indexed columns (vpc_id, group_name).
+// AuthorizeSecurityGroupIngress mutates the ingress JSON column.
+// The bug we guard against is "JSON updated, indexed scalar lookups
+// stale". Asserted by round-tripping a rule via Authorize then
+// reading it back via DescribeSecurityGroups (which queries via
+// indexed column AND parses the JSON) and confirming the rule is
+// present.
 func TestRegressionSQLColumnJSONBlobSyncOnUpdate(t *testing.T) {
-	requireHandlerImplemented(t, "ec2", "S44", "sql-column-json-blob-sync-on-update")
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+	_, body := ec2PostRegression(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	vpcID := xmlExtract(body, "vpcId")
+	_, body = ec2PostRegression(t, srv, region, "CreateSecurityGroup", url.Values{
+		"GroupName": {"app"}, "GroupDescription": {"app"}, "VpcId": {vpcID},
+	})
+	sgID := xmlExtract(body, "groupId")
+
+	resp, _ := ec2PostRegression(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{
+		"GroupId":                          {sgID},
+		"IpPermissions.1.IpProtocol":       {"tcp"},
+		"IpPermissions.1.FromPort":         {"22"},
+		"IpPermissions.1.ToPort":           {"22"},
+		"IpPermissions.1.IpRanges.1.CidrIp": {"10.0.0.0/8"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Authorize: %d", resp.StatusCode)
+	}
+
+	params := url.Values{}
+	params.Set("GroupId.1", sgID)
+	_, body = ec2PostRegression(t, srv, region, "DescribeSecurityGroups", params)
+	if !strings.Contains(string(body), "<cidrIp>10.0.0.0/8</cidrIp>") {
+		t.Errorf("rule JSON column must round-trip through indexed lookup; body=%s", body)
+	}
 }
 
 // 16. Transactional batched changes.
@@ -302,6 +411,39 @@ func newTestServerForRegression(t *testing.T) *httptest.Server {
 		_ = app.Close()
 	})
 	return srv
+}
+
+func ec2PostRegression(t *testing.T, srv *httptest.Server, region, action string, params url.Values) (*http.Response, []byte) {
+	t.Helper()
+	if params == nil {
+		params = url.Values{}
+	}
+	params.Set("Action", action)
+	params.Set("Version", "2016-11-15")
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/ec2/region/"+region, strings.NewReader(params.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST /ec2/region/%s %s: %v", region, action, err)
+	}
+	defer resp.Body.Close()
+	body := readResponseBody(t, resp)
+	return resp, body
+}
+
+func xmlExtract(body []byte, tag string) string {
+	start := "<" + tag + ">"
+	end := "</" + tag + ">"
+	s := strings.Index(string(body), start)
+	if s < 0 {
+		return ""
+	}
+	s += len(start)
+	e := strings.Index(string(body)[s:], end)
+	if e < 0 {
+		return ""
+	}
+	return string(body)[s : s+e]
 }
 
 func iamPost(t *testing.T, srv *httptest.Server, action string, params url.Values) (*http.Response, []byte) {
