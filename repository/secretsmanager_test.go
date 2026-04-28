@@ -57,14 +57,16 @@ func TestSecretStateMachine(t *testing.T) {
 		t.Errorf("window=0 destination: %q want Destroyed", s.State)
 	}
 
-	// Restore on Destroyed → 409 (terminal-state refusal).
-	if _, err := r.RestoreSecret(testAccount, testRegion, "x"); !errors.Is(err, models.ErrConflict) {
-		t.Errorf("RestoreSecret on Destroyed: want ErrConflict, got %v", err)
+	// Restore on Destroyed → terminal-state refusal (Codex pass 15
+	// BLOCKING #1: distinct 409 sentinel — InvalidRequestException,
+	// not ConflictException).
+	if _, err := r.RestoreSecret(testAccount, testRegion, "x"); !errors.Is(err, models.ErrTerminalState) {
+		t.Errorf("RestoreSecret on Destroyed: want ErrTerminalState, got %v", err)
 	}
 
-	// Re-schedule on Destroyed → 409.
-	if _, err := r.ScheduleSecretDeletion(testAccount, testRegion, "x", 0, "now"); !errors.Is(err, models.ErrConflict) {
-		t.Errorf("ScheduleSecretDeletion on Destroyed: want ErrConflict, got %v", err)
+	// Re-schedule on Destroyed → terminal-state refusal.
+	if _, err := r.ScheduleSecretDeletion(testAccount, testRegion, "x", 0, "now"); !errors.Is(err, models.ErrTerminalState) {
+		t.Errorf("ScheduleSecretDeletion on Destroyed: want ErrTerminalState, got %v", err)
 	}
 }
 

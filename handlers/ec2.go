@@ -1387,9 +1387,16 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 	instances, _ := app.repo.ListInstances(account, "")
 	iOut := make([]map[string]any, 0, len(instances))
 	for _, inst := range instances {
+		// Codex pass 15 BLOCKING #2: include iam_instance_profile_name
+		// and vpc_security_group_ids — both are FK-bearing modeled
+		// fields. Previously /mock/state stripped them so an instance
+		// re-bound to a different IAM profile or SG set was invisible.
 		iOut = append(iOut, map[string]any{
 			"id": inst.ID, "subnet_id": inst.SubnetID, "ami_id": inst.AMIID,
-			"instance_type": inst.InstanceType, "state": inst.State,
+			"instance_type":              inst.InstanceType,
+			"iam_instance_profile_name":  inst.IAMInstanceProfileName,
+			"vpc_security_group_ids":     inst.VPCSecurityGroupIDs,
+			"state":  inst.State,
 			"region": inst.Region, "arn": inst.ARN,
 		})
 	}

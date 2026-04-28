@@ -1012,6 +1012,41 @@ func TestRegressionPutSecretValueRefusedAfterForceDelete(t *testing.T) {
 	}
 }
 
+// TestRegressionSecretsManagerTerminalStateWireShape pins Codex
+// pass 15 BLOCKING #1: terminal-state refusal on Secrets Manager
+// must surface as InvalidRequestException on the wire, not the
+// generic ConflictException. The "distinct 409 sentinels" rule
+// matters because update flows branch on the body.
+func TestRegressionSecretsManagerTerminalStateWireShape(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+
+	post := func(target, body string) (*http.Response, []byte) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/secretsmanager/region/"+region,
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+		req.Header.Set("X-Amz-Target", "secretsmanager."+target)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", target, err)
+		}
+		defer resp.Body.Close()
+		return resp, readResponseBody(t, resp)
+	}
+
+	post("CreateSecret", `{"Name":"db/pwd","SecretString":"v1"}`)
+	post("DeleteSecret", `{"SecretId":"db/pwd","ForceDeleteWithoutRecovery":true}`)
+
+	resp, body := post("RestoreSecret", `{"SecretId":"db/pwd"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("RestoreSecret on destroyed: got %d, want 409", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "InvalidRequestException") {
+		t.Errorf("RestoreSecret terminal-state body: must carry InvalidRequestException, got: %s", body)
+	}
+}
+
 // ----- test helpers (regression-suite local) -----
 
 const regressionVersion = "2010-05-08"

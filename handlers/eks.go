@@ -350,9 +350,14 @@ func (app *Application) gatherEKSStateReal() map[string]any {
 	clusters, _ := app.repo.ListEKSClusters(account, "")
 	cOut := make([]map[string]any, 0, len(clusters))
 	for _, c := range clusters {
+		// Codex pass 15 BLOCKING #2: include security_group_ids and
+		// kubernetes_version so cluster modifications surface in
+		// /mock/state. Both are modeled persistent fields.
 		cOut = append(cOut, map[string]any{
 			"name": c.Name, "role_arn": c.RoleARN, "status": c.Status,
 			"region": c.Region, "arn": c.ARN, "subnet_ids": c.SubnetIDs,
+			"security_group_ids": c.SecurityGroupIDs,
+			"kubernetes_version": c.KubernetesVersion,
 		})
 	}
 	out["clusters"] = cOut
@@ -363,11 +368,27 @@ func (app *Application) gatherEKSStateReal() map[string]any {
 	ngs, _ := app.repo.ListEKSNodeGroups(account, "", "")
 	ngOut := make([]map[string]any, 0, len(ngs))
 	for _, ng := range ngs {
-		ngOut = append(ngOut, map[string]any{
+		// Codex pass 15 BLOCKING #2: include instance_types and
+		// scaling_config — both define the nodegroup's operational
+		// shape and were silently dropped from /mock/state.
+		entry := map[string]any{
 			"cluster_name": ng.ClusterName, "name": ng.Name,
-			"node_role_arn": ng.NodeRoleARN, "subnet_ids": ng.SubnetIDs,
-			"status": ng.Status, "region": ng.Region, "arn": ng.ARN,
-		})
+			"node_role_arn":  ng.NodeRoleARN,
+			"subnet_ids":     ng.SubnetIDs,
+			"instance_types": ng.InstanceTypes,
+			"status":         ng.Status,
+			"region":         ng.Region,
+			"arn":            ng.ARN,
+		}
+		if ng.ScalingConfig != "" {
+			var sc any
+			if err := json.Unmarshal([]byte(ng.ScalingConfig), &sc); err == nil {
+				entry["scaling_config"] = sc
+			} else {
+				entry["scaling_config"] = ng.ScalingConfig
+			}
+		}
+		ngOut = append(ngOut, entry)
 	}
 	addons, _ := app.repo.ListEKSAddons(account, "", "")
 	addOut := make([]map[string]any, 0, len(addons))

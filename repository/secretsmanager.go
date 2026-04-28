@@ -201,7 +201,10 @@ func (r *Repository) ScheduleSecretDeletion(account, region, name string, recove
 		return nil, err
 	}
 	if s.State == SecretStateDestroyed {
-		return nil, fmt.Errorf("secret %q already destroyed: %w", name, models.ErrConflict)
+		// Codex pass 15 BLOCKING #1: terminal-state refusal must
+		// surface as InvalidRequestException, not ConflictException.
+		// Distinct 409 sentinels matter on the wire.
+		return nil, fmt.Errorf("secret %q already destroyed: %w", name, models.ErrTerminalState)
 	}
 	newState := SecretStatePendingDeletion
 	if recoveryWindowInDays == 0 {
@@ -224,7 +227,8 @@ func (r *Repository) RestoreSecret(account, region, name string) (*SecretsManage
 		return nil, err
 	}
 	if s.State == SecretStateDestroyed {
-		return nil, fmt.Errorf("secret %q is destroyed and cannot be restored: %w", name, models.ErrConflict)
+		// Codex pass 15 BLOCKING #1: see ScheduleSecretDeletion.
+		return nil, fmt.Errorf("secret %q is destroyed and cannot be restored: %w", name, models.ErrTerminalState)
 	}
 	if s.State == SecretStateActive {
 		return s, nil
