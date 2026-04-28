@@ -236,6 +236,8 @@ func TestARNBuildersMatchAWSReferenceFormats(t *testing.T) {
 		{"ec2-vpc", BuildEC2VPCARN("us-east-1", "vpc-1"), "arn:aws:ec2:us-east-1:000000000000:vpc/vpc-1"},
 		{"ec2-subnet", BuildEC2SubnetARN("us-east-1", "subnet-1"), "arn:aws:ec2:us-east-1:000000000000:subnet/subnet-1"},
 		{"ec2-sg", BuildEC2SecurityGroupARN("us-east-1", "sg-1"), "arn:aws:ec2:us-east-1:000000000000:security-group/sg-1"},
+		{"ec2-igw", BuildEC2InternetGatewayARN("us-east-1", "igw-1"), "arn:aws:ec2:us-east-1:000000000000:internet-gateway/igw-1"},
+		{"ec2-rtb", BuildEC2RouteTableARN("us-east-1", "rtb-1"), "arn:aws:ec2:us-east-1:000000000000:route-table/rtb-1"},
 		// RDS — region+account, ':' separator (NOT '/')
 		{"rds-db", BuildRDSDBARN("us-east-1", "db-1"), "arn:aws:rds:us-east-1:000000000000:db:db-1"},
 		{"rds-cluster", BuildRDSClusterARN("us-east-1", "cluster-1"), "arn:aws:rds:us-east-1:000000000000:cluster:cluster-1"},

@@ -184,3 +184,175 @@ func TestEC2_UnknownAction(t *testing.T) {
 		t.Errorf("Unknown EC2 action: got %d, want 404; body=%s", resp.StatusCode, body)
 	}
 }
+
+func TestEC2_InternetGatewayLifecycle(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	// Need a VPC to attach to.
+	_, body := ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	vpcID := extractEC2Tag(body, "vpcId")
+	if vpcID == "" {
+		t.Fatalf("setup CreateVpc failed: %s", body)
+	}
+
+	// Create — comes back unattached.
+	resp, body := ec2Call(t, srv, region, "CreateInternetGateway", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateInternetGateway: %d %s", resp.StatusCode, body)
+	}
+	igwID := extractEC2Tag(body, "internetGatewayId")
+	if !strings.HasPrefix(igwID, "igw-") {
+		t.Fatalf("CreateInternetGateway missing igw id: %s", body)
+	}
+
+	// Attach.
+	resp, body = ec2Call(t, srv, region, "AttachInternetGateway", url.Values{
+		"InternetGatewayId": {igwID}, "VpcId": {vpcID},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("AttachInternetGateway: %d %s", resp.StatusCode, body)
+	}
+
+	// Describe shows the attachment.
+	_, body = ec2Call(t, srv, region, "DescribeInternetGateways", nil)
+	if !strings.Contains(string(body), "<vpcId>"+vpcID+"</vpcId>") {
+		t.Errorf("DescribeInternetGateways missing attachment to %s: %s", vpcID, body)
+	}
+
+	// Attach to a missing VPC → 404.
+	resp, _ = ec2Call(t, srv, region, "AttachInternetGateway", url.Values{
+		"InternetGatewayId": {igwID}, "VpcId": {"vpc-missing"},
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("AttachInternetGateway missing vpc: got %d, want 404", resp.StatusCode)
+	}
+
+	// VPC delete detaches, doesn't cascade IGW (PLAN.md S44 contract).
+	if resp, body := ec2Call(t, srv, region, "DeleteVpc", url.Values{"VpcId": {vpcID}}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("DeleteVpc: %d %s", resp.StatusCode, body)
+	}
+	_, body = ec2Call(t, srv, region, "DescribeInternetGateways", nil)
+	if !strings.Contains(string(body), igwID) {
+		t.Errorf("IGW should survive VPC delete (detach, not cascade): %s", body)
+	}
+	if strings.Contains(string(body), "<vpcId>"+vpcID+"</vpcId>") {
+		t.Errorf("IGW should be detached after VPC delete: %s", body)
+	}
+
+	// Delete IGW.
+	if resp, body := ec2Call(t, srv, region, "DeleteInternetGateway", url.Values{"InternetGatewayId": {igwID}}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("DeleteInternetGateway: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestEC2_RouteTableAndAssociation(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	_, body := ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	vpcID := extractEC2Tag(body, "vpcId")
+	_, body = ec2Call(t, srv, region, "CreateSubnet", url.Values{
+		"VpcId": {vpcID}, "CidrBlock": {"10.0.1.0/24"},
+	})
+	subnetID := extractEC2Tag(body, "subnetId")
+
+	// CreateRouteTable.
+	resp, body := ec2Call(t, srv, region, "CreateRouteTable", url.Values{"VpcId": {vpcID}})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateRouteTable: %d %s", resp.StatusCode, body)
+	}
+	rtbID := extractEC2Tag(body, "routeTableId")
+	if !strings.HasPrefix(rtbID, "rtb-") {
+		t.Fatalf("CreateRouteTable missing rtb id: %s", body)
+	}
+
+	// CreateRouteTable on missing VPC → 404.
+	resp, _ = ec2Call(t, srv, region, "CreateRouteTable", url.Values{"VpcId": {"vpc-missing"}})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("CreateRouteTable missing vpc: got %d, want 404", resp.StatusCode)
+	}
+
+	// Associate.
+	resp, body = ec2Call(t, srv, region, "AssociateRouteTable", url.Values{
+		"RouteTableId": {rtbID}, "SubnetId": {subnetID},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("AssociateRouteTable: %d %s", resp.StatusCode, body)
+	}
+	assocID := extractEC2Tag(body, "associationId")
+	if !strings.HasPrefix(assocID, "rtbassoc-") {
+		t.Fatalf("AssociateRouteTable missing associationId: %s", body)
+	}
+
+	// Second route table associated to same subnet → ErrConflict (UNIQUE).
+	_, body = ec2Call(t, srv, region, "CreateRouteTable", url.Values{"VpcId": {vpcID}})
+	rtb2 := extractEC2Tag(body, "routeTableId")
+	resp, _ = ec2Call(t, srv, region, "AssociateRouteTable", url.Values{
+		"RouteTableId": {rtb2}, "SubnetId": {subnetID},
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("AssociateRouteTable second-on-subnet: got %d, want 409", resp.StatusCode)
+	}
+
+	// CreateRoute on the associated table.
+	resp, _ = ec2Call(t, srv, region, "CreateRoute", url.Values{
+		"RouteTableId":         {rtbID},
+		"DestinationCidrBlock": {"0.0.0.0/0"},
+		"GatewayId":            {"igw-stub"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("CreateRoute: got %d", resp.StatusCode)
+	}
+
+	// Disassociate.
+	resp, _ = ec2Call(t, srv, region, "DisassociateRouteTable", url.Values{"AssociationId": {assocID}})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("DisassociateRouteTable: %d", resp.StatusCode)
+	}
+}
+
+func TestEC2_EIPLifecycle(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	resp, body := ec2Call(t, srv, region, "AllocateAddress", url.Values{"Domain": {"vpc"}})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("AllocateAddress: %d %s", resp.StatusCode, body)
+	}
+	allocID := extractEC2Tag(body, "allocationId")
+	if !strings.HasPrefix(allocID, "eipalloc-") {
+		t.Fatalf("AllocateAddress missing allocationId: %s", body)
+	}
+	publicIP := extractEC2Tag(body, "publicIp")
+	if !strings.HasPrefix(publicIP, "203.0.113.") {
+		t.Errorf("public IP must be in TEST-NET-3 range; got %q", publicIP)
+	}
+
+	// Domain=standard rejected (v1 supports vpc only).
+	resp, _ = ec2Call(t, srv, region, "AllocateAddress", url.Values{"Domain": {"standard"}})
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("AllocateAddress Domain=standard: got %d, want 409", resp.StatusCode)
+	}
+
+	// DescribeAddresses with allocationId filter.
+	params := url.Values{}
+	params.Set("AllocationId.1", allocID)
+	resp, body = ec2Call(t, srv, region, "DescribeAddresses", params)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeAddresses: %d %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), allocID) {
+		t.Errorf("DescribeAddresses missing %s: %s", allocID, body)
+	}
+
+	// ReleaseAddress.
+	resp, _ = ec2Call(t, srv, region, "ReleaseAddress", url.Values{"AllocationId": {allocID}})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("ReleaseAddress: %d", resp.StatusCode)
+	}
+	resp, _ = ec2Call(t, srv, region, "ReleaseAddress", url.Values{"AllocationId": {allocID}})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("ReleaseAddress on already-released: got %d, want 404", resp.StatusCode)
+	}
+}

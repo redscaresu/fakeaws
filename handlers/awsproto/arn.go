@@ -65,6 +65,16 @@ func BuildEC2SecurityGroupARN(region, id string) string {
 	return fmt.Sprintf("arn:aws:ec2:%s:%s:security-group/%s", region, FakeAccountID, id)
 }
 
+// BuildEC2InternetGatewayARN: arn:aws:ec2:<region>:<account>:internet-gateway/<id>
+func BuildEC2InternetGatewayARN(region, id string) string {
+	return fmt.Sprintf("arn:aws:ec2:%s:%s:internet-gateway/%s", region, FakeAccountID, id)
+}
+
+// BuildEC2RouteTableARN: arn:aws:ec2:<region>:<account>:route-table/<id>
+func BuildEC2RouteTableARN(region, id string) string {
+	return fmt.Sprintf("arn:aws:ec2:%s:%s:route-table/%s", region, FakeAccountID, id)
+}
+
 // BuildRDSDBARN: arn:aws:rds:<region>:<account>:db:<id>
 // Note: RDS uses ':' as the separator between resource-type and id,
 // not '/' like most other services. Caught a real provider parse error
