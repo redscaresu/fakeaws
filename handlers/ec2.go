@@ -1331,6 +1331,53 @@ var ec2AMIFixtures = []repository.EC2AMI{
 	{ID: "ami-0ubuntu2204", Name: "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04", OwnerID: "099720109477", VirtualizationType: "hvm", RootDeviceName: "/dev/sda1"},
 }
 
+// gatherEC2StateReal emits the EC2 block of /mock/state. Per
+// concepts.md "Required surface" item 4 — topology_derive_aws keys
+// off this shape; lists are non-nil so countOrphans assertions
+// distinguish "no resources" from "service not yet shipped".
+func (app *Application) gatherEC2StateReal() map[string]any {
+	const account = awsproto.FakeAccountID
+	out := map[string]any{
+		"vpcs":            []any{},
+		"subnets":         []any{},
+		"security_groups": []any{},
+		"instances":       []any{},
+		"key_pairs":       []any{},
+	}
+
+	vpcs, _ := app.repo.ListVPCs(account, "")
+	vOut := make([]map[string]any, 0, len(vpcs))
+	for _, v := range vpcs {
+		vOut = append(vOut, map[string]any{
+			"id": v.ID, "cidr_block": v.CidrBlock, "region": v.Region, "arn": v.ARN,
+		})
+	}
+	out["vpcs"] = vOut
+
+	subnets, _ := app.repo.ListSubnets(account, "")
+	sOut := make([]map[string]any, 0, len(subnets))
+	for _, s := range subnets {
+		sOut = append(sOut, map[string]any{
+			"id": s.ID, "vpc_id": s.VPCID, "cidr_block": s.CidrBlock,
+			"availability_zone": s.AvailabilityZone, "region": s.Region, "arn": s.ARN,
+		})
+	}
+	out["subnets"] = sOut
+
+	instances, _ := app.repo.ListInstances(account, "")
+	iOut := make([]map[string]any, 0, len(instances))
+	for _, inst := range instances {
+		iOut = append(iOut, map[string]any{
+			"id": inst.ID, "subnet_id": inst.SubnetID, "ami_id": inst.AMIID,
+			"instance_type": inst.InstanceType, "state": inst.State,
+			"region": inst.Region, "arn": inst.ARN,
+		})
+	}
+	out["instances"] = iOut
+
+	return out
+}
+
 // SeedEC2AMIFixtures writes the canonical AMI set into every region
 // referenced by /mock/state. It's idempotent (INSERT OR IGNORE in the
 // repo) so calling it on every boot is safe.

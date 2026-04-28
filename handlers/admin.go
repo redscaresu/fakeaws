@@ -129,7 +129,8 @@ func (app *Application) collectState(service string) map[string]any {
 	// line here.
 	state["iam"] = app.gatherIAMState()
 	state["s3"] = app.gatherS3State()
-	// ec2/rds/dynamodb/eks/sqs/secretsmanager/route53 land per phase.
+	state["ec2"] = app.gatherEC2State()
+	// rds/dynamodb/eks/sqs/secretsmanager/route53 land per phase.
 
 	if service == "" {
 		return state
@@ -157,6 +158,12 @@ func (app *Application) gatherIAMState() map[string]any {
 // implementation in handlers/s3.go.
 func (app *Application) gatherS3State() map[string]any {
 	return app.gatherS3StateReal()
+}
+
+// gatherEC2State returns the EC2 block, populated by S44-T7's real
+// implementation in handlers/ec2.go.
+func (app *Application) gatherEC2State() map[string]any {
+	return app.gatherEC2StateReal()
 }
 
 // writeJSONStatus is a small helper for the admin handlers; the

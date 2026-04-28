@@ -92,3 +92,78 @@ entries:
     updates_exempt_reason: "SSE config is set-once for v1 fixtures; v2 update is exercised in update_s3_bucket_versioning's broader bundle."
     integration_test_func_name: "^TestS3_PublicAccessBlockRoundTrip$"
 
+  # EC2 (S44 handlers in fakeaws@485391b/cd1e76c/1987703/1713ba3,
+  # S44-T12 e2e + these matrix entries). VPC, Subnet, IGW, RouteTable,
+  # Route, RouteTableAssociation, SecurityGroup, Instance — 8 entries
+  # mirroring the resource set in scenarios/training/aws-vpc-network.yaml +
+  # aws-instance.yaml.
+  - aws_service: ec2
+    aws_resource_type: aws_vpc
+    scenario_resource_type: networking
+    working_dir_name: vpc_network
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "VPC has no inbound FK refs (children FK on VPC; the misconfigured target is on the children, e.g., instance_missing_subnet)."
+    updates_exempt: true
+    updates_exempt_reason: "VPC at v1 is immutable (CIDR is set on create, no UpdateVpc endpoint exists in fakeaws v1)."
+    integration_test_func_name: "^TestEC2_CreateDescribeDeleteVPC$"
+  - aws_service: ec2
+    aws_resource_type: aws_subnet
+    scenario_resource_type: networking
+    working_dir_name: vpc_network
+    misconfigured_dir_name: instance_missing_subnet
+    updates_exempt: true
+    updates_exempt_reason: "Subnet immutable at v1 (CIDR + AZ set on create); update flows are exercised on dependent resources (route_table_association, instance)."
+    integration_test_func_name: "^TestEC2_SubnetCRUDAndFK$"
+  - aws_service: ec2
+    aws_resource_type: aws_internet_gateway
+    scenario_resource_type: networking
+    working_dir_name: vpc_network
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "IGW lifecycle (attach-to-missing-vpc 404, detach-on-vpc-delete) is asserted in TestEC2_InternetGatewayLifecycle; standalone misconfigured dir would duplicate."
+    updates_exempt: true
+    updates_exempt_reason: "IGW state is detach/attach (binary) — exercised in working/vpc_network's apply path."
+    integration_test_func_name: "^TestEC2_InternetGatewayLifecycle$"
+  - aws_service: ec2
+    aws_resource_type: aws_route_table
+    scenario_resource_type: networking
+    working_dir_name: vpc_network
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Route table FK violations (missing VPC, second association on subnet) covered in TestEC2_RouteTableAndAssociation."
+    updates_exempt: true
+    updates_exempt_reason: "Route tables are append-only at v1 — route additions exercised inline in working/vpc_network."
+    integration_test_func_name: "^TestEC2_RouteTableAndAssociation$"
+  - aws_service: ec2
+    aws_resource_type: aws_route
+    scenario_resource_type: networking
+    working_dir_name: vpc_network
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Route requires existing route_table; FK rejection exercised at the route_table layer."
+    updates_exempt: true
+    updates_exempt_reason: "Routes immutable at v1 (delete + recreate, not modify)."
+    integration_test_func_name: "^TestEC2_RouteTableAndAssociation$"
+  - aws_service: ec2
+    aws_resource_type: aws_route_table_association
+    scenario_resource_type: networking
+    working_dir_name: vpc_network
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "UNIQUE-per-subnet violation asserted in TestEC2_RouteTableAndAssociation; duplicating to a misconfigured tofu example would be redundant."
+    updates_exempt: true
+    updates_exempt_reason: "Association is delete + recreate at v1."
+    integration_test_func_name: "^TestEC2_RouteTableAndAssociation$"
+  - aws_service: ec2
+    aws_resource_type: aws_security_group
+    scenario_resource_type: networking
+    working_dir_name: vpc_network
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Duplicate-name and missing-VPC failures asserted in TestEC2_SecurityGroupCRUDPlusRules + the post-merge regression test."
+    updates_dir_name: update_security_group_rules
+    integration_test_func_name: "^TestEC2_SecurityGroupCRUDPlusRules$"
+  - aws_service: ec2
+    aws_resource_type: aws_instance
+    scenario_resource_type: compute
+    working_dir_name: basic_instance
+    misconfigured_dir_name: instance_missing_subnet
+    updates_exempt: true
+    updates_exempt_reason: "Instance attribute updates are no-ops at v1 (state machine handles lifecycle); update_security_group_rules covers the SG-membership update flow that AWS provider applies to instances."
+    integration_test_func_name: "^TestEC2_RunInstancesAndTerminate$"
+
