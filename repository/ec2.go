@@ -610,6 +610,38 @@ func (r *Repository) GetSecurityGroup(account, id string) (*EC2SecurityGroup, er
 	return &sg, nil
 }
 
+// ListSecurityGroups returns every SG for the account, optionally
+// scoped to a region. Used by /mock/state's EC2 gather (Codex pass 4
+// BLOCKING #1 fix — was previously inferring SGs only from instance
+// VPCSecurityGroupIDs which missed standalone SGs and duplicated
+// shared ones).
+func (r *Repository) ListSecurityGroups(account, region string) ([]*EC2SecurityGroup, error) {
+	var rows *sql.Rows
+	var err error
+	if region == "" {
+		rows, err = r.db.Query(`SELECT data FROM ec2_security_groups WHERE account_id = ? ORDER BY id`, account)
+	} else {
+		rows, err = r.db.Query(`SELECT data FROM ec2_security_groups WHERE account_id = ? AND region = ? ORDER BY id`, account, region)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*EC2SecurityGroup
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var sg EC2SecurityGroup
+		if err := json.Unmarshal([]byte(data), &sg); err != nil {
+			return nil, err
+		}
+		out = append(out, &sg)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) GetSecurityGroupRules(account, id string) (ingress, egress []byte, err error) {
 	row := r.db.QueryRow(
 		`SELECT ingress, egress FROM ec2_security_groups WHERE account_id = ? AND id = ?`,

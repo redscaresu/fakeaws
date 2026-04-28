@@ -1379,36 +1379,16 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 	}
 	out["instances"] = iOut
 
-	// Security groups — emit per-VPC since SGs are scoped to a VPC.
-	sgOut := []map[string]any{}
-	for _, v := range vpcs {
-		// Probe one canonical filter shape: every SG whose vpc_id
-		// matches a known VPC. The repo doesn't expose a list-by-
-		// account today, so we walk via DescribeSecurityGroups
-		// equivalent — fetch via direct DB query path.
-		_ = v
-	}
-	// Walk all SGs by reaching into the repo's underlying state.
-	// Since there's no ListSecurityGroups, we rely on per-VPC fetches.
-	for _, vpc := range vpcs {
-		// Querying the repo for SGs requires a per-VPC list path
-		// which doesn't exist; fall back to walking every SG via
-		// raw SQL would couple the handler to repo internals.
-		// Surface SGs through the existing GetSecurityGroup probe
-		// for known SG ids gathered from instance VPCSecurityGroupIDs.
-		_ = vpc
-	}
-	for _, inst := range instances {
-		for _, sgid := range inst.VPCSecurityGroupIDs {
-			sg, err := app.repo.GetSecurityGroup(account, sgid)
-			if err != nil {
-				continue
-			}
-			sgOut = append(sgOut, map[string]any{
-				"id": sg.ID, "vpc_id": sg.VPCID, "group_name": sg.GroupName,
-				"description": sg.Description, "region": sg.Region, "arn": sg.ARN,
-			})
-		}
+	// Security groups — every SG, exactly once. Codex pass 4 BLOCKING
+	// #1 fix: previous version inferred from instance.VPCSecurityGroupIDs
+	// which missed standalone SGs and duplicated shared ones.
+	sgs, _ := app.repo.ListSecurityGroups(account, "")
+	sgOut := make([]map[string]any, 0, len(sgs))
+	for _, sg := range sgs {
+		sgOut = append(sgOut, map[string]any{
+			"id": sg.ID, "vpc_id": sg.VPCID, "group_name": sg.GroupName,
+			"description": sg.Description, "region": sg.Region, "arn": sg.ARN,
+		})
 	}
 	out["security_groups"] = sgOut
 

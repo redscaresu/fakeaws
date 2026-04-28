@@ -231,6 +231,101 @@ func (r *Repository) DeleteDBSubnetGroup(account, name string) error {
 	return nil
 }
 
+// ListDBSubnetGroups returns every DB subnet group for the account.
+// Codex pass 4 BLOCKING #2 fix.
+func (r *Repository) ListDBSubnetGroups(account string) ([]*RDSSubnetGroup, error) {
+	rows, err := r.db.Query(`SELECT data FROM rds_db_subnet_groups WHERE account_id = ? ORDER BY name`, account)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*RDSSubnetGroup
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var sg RDSSubnetGroup
+		if err := json.Unmarshal([]byte(data), &sg); err != nil {
+			return nil, err
+		}
+		out = append(out, &sg)
+	}
+	return out, rows.Err()
+}
+
+// ListDBParameterGroups returns every instance parameter group.
+func (r *Repository) ListDBParameterGroups(account string) ([]*RDSParameterGroup, error) {
+	rows, err := r.db.Query(`SELECT data FROM rds_db_parameter_groups WHERE account_id = ? ORDER BY name`, account)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*RDSParameterGroup
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var pg RDSParameterGroup
+		if err := json.Unmarshal([]byte(data), &pg); err != nil {
+			return nil, err
+		}
+		out = append(out, &pg)
+	}
+	return out, rows.Err()
+}
+
+// ListDBClusterParameterGroups returns every cluster parameter group.
+func (r *Repository) ListDBClusterParameterGroups(account string) ([]*RDSClusterParameterGroup, error) {
+	rows, err := r.db.Query(`SELECT data FROM rds_db_cluster_parameter_groups WHERE account_id = ? ORDER BY name`, account)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*RDSClusterParameterGroup
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var pg RDSClusterParameterGroup
+		if err := json.Unmarshal([]byte(data), &pg); err != nil {
+			return nil, err
+		}
+		out = append(out, &pg)
+	}
+	return out, rows.Err()
+}
+
+// ListDBClusters returns every DB cluster for the account.
+func (r *Repository) ListDBClusters(account, region string) ([]*RDSCluster, error) {
+	var rows *sql.Rows
+	var err error
+	if region == "" {
+		rows, err = r.db.Query(`SELECT data FROM rds_db_clusters WHERE account_id = ? ORDER BY id`, account)
+	} else {
+		rows, err = r.db.Query(`SELECT data FROM rds_db_clusters WHERE account_id = ? AND region = ? ORDER BY id`, account, region)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*RDSCluster
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var c RDSCluster
+		if err := json.Unmarshal([]byte(data), &c); err != nil {
+			return nil, err
+		}
+		out = append(out, &c)
+	}
+	return out, rows.Err()
+}
+
 // ----- DB Parameter Group + Cluster Parameter Group -----
 
 func (r *Repository) CreateDBParameterGroup(account string, pg *RDSParameterGroup) error {

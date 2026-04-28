@@ -331,6 +331,34 @@ func (r *Repository) GetSecretValue(account, region, name, versionStage, version
 	return nil, models.ErrNotFound
 }
 
+// ListSecretVersions returns every version row for a given secret,
+// regardless of stage. /mock/state uses this so historical versions
+// remain visible after multiple PutSecretValue rotations (Codex
+// pass 4 BLOCKING #3 fix).
+func (r *Repository) ListSecretVersions(account, region, name string) ([]*SecretsManagerVersion, error) {
+	rows, err := r.db.Query(
+		`SELECT version_id, secret_string, stages, created_at FROM secretsmanager_versions WHERE account_id = ? AND region = ? AND secret_name = ? ORDER BY created_at`,
+		account, region, name,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*SecretsManagerVersion
+	for rows.Next() {
+		var v SecretsManagerVersion
+		var stagesJSON string
+		v.SecretName = name
+		v.Region = region
+		if err := rows.Scan(&v.VersionID, &v.SecretString, &stagesJSON, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(stagesJSON), &v.Stages)
+		out = append(out, &v)
+	}
+	return out, rows.Err()
+}
+
 // DeleteSecretImmediately is a maintenance hook for tests + the
 // state-machine harness; production code goes through
 // ScheduleSecretDeletion. Bypasses the recovery window.

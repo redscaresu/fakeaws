@@ -262,19 +262,15 @@ func (app *Application) gatherSecretsManagerStateReal() map[string]any {
 				"recovery_window_in_days": s.RecoveryWindowInDays,
 				"region":                  s.Region,
 			})
-			// Surface AWSCURRENT and AWSPREVIOUS versions per secret
-			// so identity-preservation checks can verify the rotation
-			// contract round-tripped.
-			if cur, err := app.repo.GetSecretValue(account, region, s.Name, "AWSCURRENT", ""); err == nil {
+			// Surface every persisted version (Codex pass 4 BLOCKING
+			// #3 fix). Older versions remain in the DB after stage
+			// rotation but were previously invisible because the
+			// gather only fetched AWSCURRENT + AWSPREVIOUS.
+			versions, _ := app.repo.ListSecretVersions(account, region, s.Name)
+			for _, v := range versions {
 				allVersions = append(allVersions, map[string]any{
-					"secret_name": s.Name, "version_id": cur.VersionID,
-					"stages": cur.Stages, "region": region,
-				})
-			}
-			if prev, err := app.repo.GetSecretValue(account, region, s.Name, "AWSPREVIOUS", ""); err == nil {
-				allVersions = append(allVersions, map[string]any{
-					"secret_name": s.Name, "version_id": prev.VersionID,
-					"stages": prev.Stages, "region": region,
+					"secret_name": s.Name, "version_id": v.VersionID,
+					"stages": v.Stages, "region": region, "created_at": v.CreatedAt,
 				})
 			}
 		}

@@ -540,23 +540,20 @@ func parseSubnetIds(req awsproto.QueryRPCRequest) []string {
 
 // gatherRDSStateReal emits the RDS block of /mock/state.
 //
-// Codex pass 3 BLOCKING #2 fix: every modeled collection populates
-// from the repo. The gatherer probes the canonical ARN-derived
-// values from each instance's metadata since the repository doesn't
-// surface unfiltered list paths for subnet/parameter groups.
+// Codex pass 4 BLOCKING #2 fix: every modeled collection is populated
+// directly from a list path on the repo (was previously inferred
+// from instance metadata, missing standalone groups).
 func (app *Application) gatherRDSStateReal() map[string]any {
 	const account = awsproto.FakeAccountID
 	out := map[string]any{
-		"db_instances":     []any{},
-		"db_clusters":      []any{},
-		"db_subnet_groups": []any{},
-		"db_parameter_groups": []any{},
+		"db_instances":                []any{},
+		"db_clusters":                 []any{},
+		"db_subnet_groups":            []any{},
+		"db_parameter_groups":         []any{},
+		"db_cluster_parameter_groups": []any{},
 	}
 	instances, _ := app.repo.ListDBInstances(account, "")
 	iOut := make([]map[string]any, 0, len(instances))
-	subnetGroupNames := map[string]bool{}
-	paramGroupNames := map[string]bool{}
-	clusterIDs := map[string]bool{}
 	for _, inst := range instances {
 		iOut = append(iOut, map[string]any{
 			"id": inst.ID, "engine": inst.Engine,
@@ -565,24 +562,12 @@ func (app *Application) gatherRDSStateReal() map[string]any {
 			"replicate_source_db": inst.ReplicateSourceDB,
 			"state":               inst.State, "region": inst.Region, "arn": inst.ARN,
 		})
-		if inst.SubnetGroupName != "" {
-			subnetGroupNames[inst.SubnetGroupName] = true
-		}
-		if inst.ParameterGroupName != "" {
-			paramGroupNames[inst.ParameterGroupName] = true
-		}
-		if inst.ClusterID != "" {
-			clusterIDs[inst.ClusterID] = true
-		}
 	}
 	out["db_instances"] = iOut
 
-	sgOut := []map[string]any{}
-	for name := range subnetGroupNames {
-		sg, err := app.repo.GetDBSubnetGroup(account, name)
-		if err != nil {
-			continue
-		}
+	sgs, _ := app.repo.ListDBSubnetGroups(account)
+	sgOut := make([]map[string]any, 0, len(sgs))
+	for _, sg := range sgs {
 		sgOut = append(sgOut, map[string]any{
 			"name": sg.Name, "vpc_id": sg.VPCID, "subnet_ids": sg.SubnetIDs,
 			"region": sg.Region, "arn": sg.ARN,
@@ -590,24 +575,27 @@ func (app *Application) gatherRDSStateReal() map[string]any {
 	}
 	out["db_subnet_groups"] = sgOut
 
-	pgOut := []map[string]any{}
-	for name := range paramGroupNames {
-		pg, err := app.repo.GetDBParameterGroup(account, name)
-		if err != nil {
-			continue
-		}
+	pgs, _ := app.repo.ListDBParameterGroups(account)
+	pgOut := make([]map[string]any, 0, len(pgs))
+	for _, pg := range pgs {
 		pgOut = append(pgOut, map[string]any{
 			"name": pg.Name, "family": pg.Family, "region": pg.Region, "arn": pg.ARN,
 		})
 	}
 	out["db_parameter_groups"] = pgOut
 
-	cOut := []map[string]any{}
-	for id := range clusterIDs {
-		c, err := app.repo.GetDBCluster(account, id)
-		if err != nil {
-			continue
-		}
+	cpgs, _ := app.repo.ListDBClusterParameterGroups(account)
+	cpgOut := make([]map[string]any, 0, len(cpgs))
+	for _, pg := range cpgs {
+		cpgOut = append(cpgOut, map[string]any{
+			"name": pg.Name, "family": pg.Family, "region": pg.Region, "arn": pg.ARN,
+		})
+	}
+	out["db_cluster_parameter_groups"] = cpgOut
+
+	clusters, _ := app.repo.ListDBClusters(account, "")
+	cOut := make([]map[string]any, 0, len(clusters))
+	for _, c := range clusters {
 		cOut = append(cOut, map[string]any{
 			"id": c.ID, "engine": c.Engine, "engine_version": c.EngineVersion,
 			"state": c.State, "region": c.Region, "arn": c.ARN,
