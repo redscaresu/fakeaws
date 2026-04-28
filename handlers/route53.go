@@ -404,11 +404,25 @@ func (app *Application) gatherRoute53StateReal() map[string]any {
 			if (rs.Type == "NS" || rs.Type == "SOA") && rs.Name == z.Name {
 				continue
 			}
-			rsOut = append(rsOut, map[string]any{
+			entry := map[string]any{
 				"zone_id": rs.ZoneID, "name": rs.Name, "type": rs.Type,
 				"ttl": rs.TTL, "records": rs.Records,
 				"set_identifier": rs.SetIdentifier,
-			})
+			}
+			// Codex pass 13 BLOCKING #2: ALIAS records persist an
+			// alias_target JSON blob that was previously dropped from
+			// /mock/state, leaving them indistinguishable from
+			// no-record entries. Decode and surface it so update/
+			// identity checks can see the alias contract.
+			if rs.AliasTarget != "" {
+				var alias any
+				if err := json.Unmarshal([]byte(rs.AliasTarget), &alias); err == nil {
+					entry["alias_target"] = alias
+				} else {
+					entry["alias_target"] = rs.AliasTarget
+				}
+			}
+			rsOut = append(rsOut, entry)
 		}
 	}
 	out["hosted_zones"] = zOut

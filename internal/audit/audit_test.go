@@ -252,13 +252,33 @@ func assertScenarioCoversResource(t *testing.T, e CoverageMatrixEntry) {
 	}
 }
 
-// scenarioMentionsResource is a lightweight YAML probe: does the
-// scenario YAML contain BOTH a `resources:` block with the named
-// scenario_resource_type AND an `aws_resource_anchors:` list naming
-// the aws_resource_type? The check is regex-shaped because we don't
-// want to import infrafactory/internal/scenario from fakeaws.
+// scenarioMentionsResource verifies BOTH halves of the scenario
+// contract by parsing the YAML structurally:
+//   (i)  resources.<scenario_resource_type> exists as a top-level
+//        sub-key under "resources:".
+//   (ii) aws_resource_anchors contains aws_resource_type as a list
+//        element.
+//
+// Codex pass 13 BLOCKING #1: the previous implementation used naked
+// substring probes ("\n  X:" anywhere, "- Y" anywhere), so anchors
+// embedded in unrelated lists or comments would false-green. The
+// audit is the enforcement hook for coverage_matrix.yaml; the probe
+// must not be structurally weak.
 func scenarioMentionsResource(body []byte, scenarioType, awsResourceType string) bool {
-	s := string(body)
-	return strings.Contains(s, "\n  "+scenarioType+":") &&
-		strings.Contains(s, "- "+awsResourceType)
+	var doc struct {
+		Resources           map[string]any `yaml:"resources"`
+		AwsResourceAnchors  []string       `yaml:"aws_resource_anchors"`
+	}
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		return false
+	}
+	if _, ok := doc.Resources[scenarioType]; !ok {
+		return false
+	}
+	for _, a := range doc.AwsResourceAnchors {
+		if a == awsResourceType {
+			return true
+		}
+	}
+	return false
 }

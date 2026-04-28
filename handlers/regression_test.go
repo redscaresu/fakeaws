@@ -919,6 +919,66 @@ func TestRegressionStateGatherEC2Collections(t *testing.T) {
 	}
 }
 
+// TestRegressionStateGatherRoute53AliasTarget pins Codex pass 13
+// BLOCKING #2: ALIAS records persist an alias_target JSON blob, but
+// gatherRoute53StateReal previously dropped that field, leaving
+// alias records indistinguishable from no-record entries. Now the
+// /mock/state projection includes alias_target.
+func TestRegressionStateGatherRoute53AliasTarget(t *testing.T) {
+	srv := newTestServerForRegression(t)
+
+	// Create hosted zone.
+	r53Post := func(method, path, body string) (*http.Response, []byte) {
+		t.Helper()
+		var req *http.Request
+		if body != "" {
+			req, _ = http.NewRequest(method, srv.URL+path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/xml")
+		} else {
+			req, _ = http.NewRequest(method, srv.URL+path, nil)
+		}
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		return resp, readResponseBody(t, resp)
+	}
+
+	_, body := r53Post(http.MethodPost, "/route53/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest><Name>example.com.</Name><CallerReference>x</CallerReference></CreateHostedZoneRequest>`)
+	idStart := strings.Index(string(body), "<Id>/hostedzone/") + len("<Id>/hostedzone/")
+	idEnd := strings.Index(string(body)[idStart:], "</Id>") + idStart
+	zoneID := string(body)[idStart:idEnd]
+
+	// Create an ALIAS record with AliasTarget.
+	alias := `<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>
+		<Change><Action>CREATE</Action><ResourceRecordSet>
+			<Name>www.example.com.</Name><Type>A</Type>
+			<AliasTarget>
+				<HostedZoneId>Z2FDTNDATAQYW2</HostedZoneId>
+				<DNSName>d111111abcdef8.cloudfront.net.</DNSName>
+				<EvaluateTargetHealth>false</EvaluateTargetHealth>
+			</AliasTarget>
+		</ResourceRecordSet></Change>
+	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
+	r53Post(http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", alias)
+
+	// /mock/state.route53.record_sets must include alias_target.
+	resp, err := http.Get(srv.URL + "/mock/state")
+	if err != nil {
+		t.Fatalf("GET /mock/state: %v", err)
+	}
+	defer resp.Body.Close()
+	state := string(readResponseBody(t, resp))
+	if !strings.Contains(state, "alias_target") {
+		t.Errorf("alias_target field missing from /mock/state.route53.record_sets: %s", state)
+	}
+	if !strings.Contains(state, "d111111abcdef8.cloudfront.net.") {
+		t.Errorf("AliasTarget DNSName not surfaced in /mock/state: %s", state)
+	}
+}
+
 // ----- test helpers (regression-suite local) -----
 
 const regressionVersion = "2010-05-08"
