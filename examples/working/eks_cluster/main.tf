@@ -1,0 +1,93 @@
+# Working: EKS cluster + nodegroup + vpc-cni addon. Exercises the
+# full cross-service chain: cluster + nodegroup IAM roles, VPC + 2
+# subnets, addon attachment.
+
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.70"
+    }
+  }
+}
+
+provider "aws" {
+  region                      = "us-east-1"
+  access_key                  = "fake"
+  secret_key                  = "fake"
+  skip_credentials_validation = true
+  skip_metadata_api_check     = true
+  skip_requesting_account_id  = true
+  endpoints {
+    iam = "http://127.0.0.1:8082/iam"
+    ec2 = "http://127.0.0.1:8082/ec2/region/us-east-1"
+    eks = "http://127.0.0.1:8082/eks/region/us-east-1"
+  }
+}
+
+resource "aws_iam_role" "cluster" {
+  name = "fakeaws-eks-cluster"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "eks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role" "node" {
+  name = "fakeaws-eks-node"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_vpc" "main" { cidr_block = "10.0.0.0/16" }
+
+resource "aws_subnet" "a" {
+  vpc_id = aws_vpc.main.id; cidr_block = "10.0.1.0/24"; availability_zone = "us-east-1a"
+}
+
+resource "aws_subnet" "b" {
+  vpc_id = aws_vpc.main.id; cidr_block = "10.0.2.0/24"; availability_zone = "us-east-1b"
+}
+
+resource "aws_eks_cluster" "demo" {
+  name     = "fakeaws-demo"
+  role_arn = aws_iam_role.cluster.arn
+  version  = "1.29"
+  vpc_config {
+    subnet_ids = [aws_subnet.a.id, aws_subnet.b.id]
+  }
+}
+
+resource "aws_eks_node_group" "default" {
+  cluster_name    = aws_eks_cluster.demo.name
+  node_group_name = "default"
+  node_role_arn   = aws_iam_role.node.arn
+  subnet_ids      = [aws_subnet.a.id, aws_subnet.b.id]
+  scaling_config {
+    desired_size = 1
+    min_size     = 1
+    max_size     = 2
+  }
+  depends_on = [aws_eks_cluster.demo]
+}
+
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name  = aws_eks_cluster.demo.name
+  addon_name    = "vpc-cni"
+  addon_version = "v1.18.0"
+  depends_on    = [aws_eks_node_group.default]
+}
+
+output "cluster_arn" {
+  value = aws_eks_cluster.demo.arn
+}

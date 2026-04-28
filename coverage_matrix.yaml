@@ -214,3 +214,40 @@ entries:
     updates_exempt: true
     updates_exempt_reason: "Table mutation (billing_mode flip, GSI addition) is out of scope at v1; the table itself is set-once. S48-T6 reconsiders if scenarios require it."
     integration_test_func_name: "^TestDynamoDB_TableLifecycle$"
+
+  # EKS (S46-T3 handlers, S46-T10 e2e + these matrix entries).
+  - aws_service: eks
+    aws_resource_type: aws_eks_cluster
+    scenario_resource_type: kubernetes
+    working_dir_name: eks_cluster
+    misconfigured_dir_name: eks_node_group_subnet_outside_cluster
+    updates_exempt: true
+    updates_exempt_reason: "Cluster updates (version bumps, vpc_config changes) are no-ops at v1; lifecycle is exercised on the addon + nodegroup which both depend on the cluster."
+    integration_test_func_name: "^TestEKS_ClusterLifecycle$"
+  - aws_service: eks
+    aws_resource_type: aws_eks_node_group
+    scenario_resource_type: kubernetes
+    working_dir_name: eks_cluster
+    misconfigured_dir_name: eks_node_group_subnet_outside_cluster
+    updates_exempt: true
+    updates_exempt_reason: "Nodegroup scaling_config / instance_types updates are no-ops at v1."
+    integration_test_func_name: "^TestEKS_NodeGroupSubnetMustBeInCluster$"
+  - aws_service: eks
+    aws_resource_type: aws_eks_addon
+    scenario_resource_type: kubernetes
+    working_dir_name: eks_cluster
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Addon under a missing cluster surfaces as 404 — covered by the cluster-deletion CASCADES test in TestEKSCluster_DeleteCASCADESChildren."
+    updates_exempt: true
+    updates_exempt_reason: "Addon version bumps are no-ops at v1."
+    integration_test_func_name: "^TestEKS_AddonLifecycle$"
+
+  # SQS (S46-T5 handlers, S46-T10 e2e + this matrix entry).
+  - aws_service: sqs
+    aws_resource_type: aws_sqs_queue
+    scenario_resource_type: messaging
+    working_dir_name: sqs_queue
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "FIFO suffix mismatch is asserted in TestSQS_FIFOSuffixContract; standalone misconfigured tofu example would duplicate."
+    updates_dir_name: update_sqs_queue_visibility
+    integration_test_func_name: "^TestSQS_QueueLifecycle$"
