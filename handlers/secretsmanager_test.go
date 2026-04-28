@@ -89,6 +89,33 @@ func TestSecretsManager_PendingDeletionRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSecretsManager_DestroyedNotFoundContract pins the Codex pass 2
+// BLOCKING #2 fix: a force-deleted (Destroyed) secret must behave as
+// not-found across all read paths, not just RestoreSecret.
+func TestSecretsManager_DestroyedNotFoundContract(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	smCall(t, srv, "CreateSecret", `{"Name":"d","SecretString":"s"}`)
+	smCall(t, srv, "DeleteSecret", `{"SecretId":"d","ForceDeleteWithoutRecovery":true}`)
+
+	// DescribeSecret on Destroyed → 404.
+	resp, _ := smCall(t, srv, "DescribeSecret", `{"SecretId":"d"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DescribeSecret on Destroyed: got %d, want 404", resp.StatusCode)
+	}
+
+	// GetSecretValue on Destroyed → 404.
+	resp, _ = smCall(t, srv, "GetSecretValue", `{"SecretId":"d"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GetSecretValue on Destroyed: got %d, want 404", resp.StatusCode)
+	}
+
+	// ListSecrets does NOT include the destroyed secret.
+	_, body := smCall(t, srv, "ListSecrets", `{}`)
+	if strings.Contains(string(body), `"d"`) {
+		t.Errorf("ListSecrets must skip Destroyed secrets; body=%s", body)
+	}
+}
+
 func TestSecretsManager_VersionStages(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	smCall(t, srv, "CreateSecret", `{"Name":"x","SecretString":"v1"}`)

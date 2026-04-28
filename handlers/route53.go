@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -277,9 +278,17 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 		}
 		switch ch.Action {
 		case "CREATE", "UPSERT":
+			alias := ""
+			if rs.AliasTarget != nil {
+				// Persist alias target as JSON; round-trip in
+				// ListResourceRecordSets (Codex pass 2 BLOCKING #1).
+				if b, err := json.Marshal(rs.AliasTarget); err == nil {
+					alias = string(b)
+				}
+			}
 			if err := app.repo.PutRecordSet(account, &repository.Route53RecordSet{
 				ZoneID: zoneID, Name: rs.Name, Type: rs.Type, TTL: rs.TTL,
-				Records: records, SetIdentifier: rs.SetIdentifier,
+				Records: records, AliasTarget: alias, SetIdentifier: rs.SetIdentifier,
 			}); err != nil {
 				awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
 				return
@@ -321,6 +330,14 @@ func (app *Application) r53ListResourceRecordSets(w http.ResponseWriter, r *http
 		x := r53RecordSetXML{Name: rs.Name, Type: rs.Type, TTL: rs.TTL, SetIdentifier: rs.SetIdentifier}
 		for _, v := range rs.Records {
 			x.ResourceRecords = append(x.ResourceRecords, r53ResourceRecord{Value: v})
+		}
+		// Emit AliasTarget when stored — Codex pass 2 BLOCKING #1
+		// fix. Apex ALIAS records round-trip through this path.
+		if rs.AliasTarget != "" {
+			var alias r53AliasTarget
+			if err := json.Unmarshal([]byte(rs.AliasTarget), &alias); err == nil {
+				x.AliasTarget = &alias
+			}
 		}
 		out.ResourceRecordSets = append(out.ResourceRecordSets, x)
 	}

@@ -408,6 +408,23 @@ secretsmanager_versions (account_id, secret_name, version_id)
 - Secret version stages: AWSCURRENT moves to the new version on each
   PutSecretValue; the prior version becomes AWSPREVIOUS.
 
+### Out of scope at v1
+
+Per Codex pass 2 SUGGEST resolution: the following Secrets Manager
+operations are explicitly deferred from v1 surface. terraform-provider-aws
+handles their absence by skipping (no provider error). If a scenario
+requires one of these, S48-T6 (gap-fill) reconsiders.
+
+- UpdateSecret (description / KMS-key changes are no-ops in scope).
+- TagResource / UntagResource (tags are accepted via CreateSecret's
+  Tags field but not mutated post-create at v1).
+- ListSecretVersionIds (callers use GetSecretValue with VersionStage
+  to fetch AWSCURRENT/AWSPREVIOUS; full version history is out).
+- ReplicaRegions (cross-region replication is out — single-region only).
+- BatchGetSecretValue / RotateSecret (rotation infrastructure is out
+  of v1 scope; concepts.md "Resource coverage matrix § Secrets Manager"
+  pins minimal CRUD + version stages only).
+
 ### What lands when
 
   S47-T0   pitfalls (DONE — infrafactory@a0925ee)

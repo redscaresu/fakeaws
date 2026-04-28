@@ -110,6 +110,42 @@ func TestRoute53_ChangeBatchTransactional(t *testing.T) {
 	}
 }
 
+// TestRoute53_AliasTargetRoundTrip pins Codex pass 2 BLOCKING #1:
+// AliasTarget must persist on write and re-emit on read.
+func TestRoute53_AliasTargetRoundTrip(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	_, body := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest><Name>example.com.</Name><CallerReference>a</CallerReference></CreateHostedZoneRequest>`)
+	idStart := strings.Index(string(body), "<Id>/hostedzone/") + len("<Id>/hostedzone/")
+	idEnd := strings.Index(string(body)[idStart:], "</Id>") + idStart
+	zoneID := string(body)[idStart:idEnd]
+
+	// Apex ALIAS — type=A with AliasTarget instead of ResourceRecords.
+	alias := `<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>
+		<Change><Action>CREATE</Action><ResourceRecordSet>
+			<Name>example.com.</Name><Type>A</Type>
+			<AliasTarget>
+				<HostedZoneId>Z2FDTNDATAQYW2</HostedZoneId>
+				<DNSName>d111111abcdef8.cloudfront.net.</DNSName>
+				<EvaluateTargetHealth>false</EvaluateTargetHealth>
+			</AliasTarget>
+		</ResourceRecordSet></Change>
+	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
+	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", alias)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("apex ALIAS: %d", resp.StatusCode)
+	}
+
+	// List must round-trip the AliasTarget.
+	_, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset", "")
+	if !strings.Contains(string(body), "d111111abcdef8.cloudfront.net.") {
+		t.Errorf("AliasTarget DNSName not round-tripped: %s", body)
+	}
+	if !strings.Contains(string(body), "Z2FDTNDATAQYW2") {
+		t.Errorf("AliasTarget HostedZoneId not round-tripped: %s", body)
+	}
+}
+
 func TestRoute53_BatchAtomicityOnInvalidChange(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 

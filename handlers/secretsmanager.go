@@ -116,7 +116,9 @@ func (app *Application) smDescribeSecret(w http.ResponseWriter, account, region 
 		SecretId string `json:"SecretId"`
 	}
 	json.Unmarshal(req.Body, &in)
-	s, err := app.repo.GetSecret(account, region, in.SecretId)
+	// Destroyed secrets behave as not-found (concepts.md "fully
+	// destroyed" contract; Codex pass 2 BLOCKING #2).
+	s, err := app.repo.GetSecretActiveOrPending(account, region, in.SecretId)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
 		return

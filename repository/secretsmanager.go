@@ -110,6 +110,9 @@ func (r *Repository) CreateSecret(account string, s *SecretsManagerSecret) error
 	return mapInsertError(err)
 }
 
+// GetSecret returns the secret row regardless of state. Callers that
+// must enforce the "Destroyed = not found" contract use
+// GetSecretActiveOrPending which gates the read.
 func (r *Repository) GetSecret(account, region, name string) (*SecretsManagerSecret, error) {
 	var s SecretsManagerSecret
 	var tagsJSON string
@@ -129,10 +132,29 @@ func (r *Repository) GetSecret(account, region, name string) (*SecretsManagerSec
 	return &s, nil
 }
 
+// GetSecretActiveOrPending returns the secret only if its state is
+// not Destroyed. DescribeSecret + GetSecretValue use this — the
+// "fully destroyed" contract from concepts.md (Codex pass 2
+// BLOCKING #2 fix).
+func (r *Repository) GetSecretActiveOrPending(account, region, name string) (*SecretsManagerSecret, error) {
+	s, err := r.GetSecret(account, region, name)
+	if err != nil {
+		return nil, err
+	}
+	if s.State == SecretStateDestroyed {
+		return nil, models.ErrNotFound
+	}
+	return s, nil
+}
+
+// ListSecrets returns secrets that are NOT in the Destroyed state.
+// Per concepts.md "fully destroyed" contract — destroyed secrets
+// must behave as not-found across read/list paths (Codex pass 2
+// BLOCKING #2).
 func (r *Repository) ListSecrets(account, region string) ([]*SecretsManagerSecret, error) {
 	rows, err := r.db.Query(
-		`SELECT name FROM secretsmanager_secrets WHERE account_id = ? AND region = ? ORDER BY name`,
-		account, region,
+		`SELECT name FROM secretsmanager_secrets WHERE account_id = ? AND region = ? AND state != ? ORDER BY name`,
+		account, region, SecretStateDestroyed,
 	)
 	if err != nil {
 		return nil, err
@@ -269,9 +291,10 @@ func (r *Repository) PutSecretValue(account, region, name string, v *SecretsMana
 }
 
 // GetSecretValue returns the version with the given stage, defaulting
-// to AWSCURRENT.
+// to AWSCURRENT. Destroyed secrets behave as not-found (Codex pass 2
+// BLOCKING #2 — "fully destroyed" contract).
 func (r *Repository) GetSecretValue(account, region, name, versionStage, versionID string) (*SecretsManagerVersion, error) {
-	if _, err := r.GetSecret(account, region, name); err != nil {
+	if _, err := r.GetSecretActiveOrPending(account, region, name); err != nil {
 		return nil, err
 	}
 	if versionStage == "" && versionID == "" {
