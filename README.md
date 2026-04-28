@@ -15,10 +15,26 @@ fork story alive — narrow in coverage, deep in the few services we ship.
 
 ## Status
 
-S43-T1 (scaffold + Day-1 gates) — landing now. Subsequent slices add the
-service surface incrementally; see `concepts.md` § "Service surface (v1)"
-for the full v1 plan and `infrafactory/BACKLOG.md` for the per-ticket
-breakdown.
+All v1 service surface (S43–S47) landed. Currently in S48 (polish +
+codex review iteration loop). Two passes archived under
+`docs/review-passes/passN.md`. Aggregate handlers coverage 82.4% on
+the `total:` line.
+
+Implemented services:
+
+| Service | Wire format | Endpoint |
+| ------- | ----------- | -------- |
+| IAM | Query-RPC + XML | `POST /iam` |
+| S3 | XML REST | `/s3/<bucket>/<key>?<sub-resource>` |
+| EC2 | Query-RPC + XML | `POST /ec2/region/<region>` |
+| RDS | Query-RPC + XML | `POST /rds/region/<region>` |
+| DynamoDB | JSON 1.1 + X-Amz-Target | `POST /dynamodb/region/<region>` |
+| EKS | JSON-REST | `/eks/region/<region>/clusters/...` |
+| SQS | JSON 1.0 + X-Amz-Target | `POST /sqs/region/<region>` |
+| Route53 | XML REST | `/route53/2013-04-01/...` |
+| Secrets Manager | JSON 1.1 + X-Amz-Target | `POST /secretsmanager/region/<region>` |
+
+Per-resource details + load-bearing FK contracts live in `PLAN.md`.
 
 ## Quickstart
 
