@@ -264,9 +264,33 @@ func TestRegressionCacheBaselineLifecycle(t *testing.T) {
 // Pattern: Secrets Manager `RestoreSecret` after the recovery window
 // has fully elapsed returns 409 InvalidRequestException. EC2
 // terminated-instance refusal of restart. RDS deleting-instance
-// refusal of modify. Mirror of fakegcp pass-18.
+// refusal of modify. Mirror of fakegcp pass-18. Lit up via the
+// Secrets Manager Destroyed state.
 func TestRegressionTerminalStateRefusesTransitions(t *testing.T) {
-	requireHandlerImplemented(t, "secretsmanager", "S47", "terminal-state-refuses-transitions")
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+	smURL := srv.URL + "/secretsmanager/region/" + region
+	post := func(target, body string) (*http.Response, []byte) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, smURL, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+		req.Header.Set("X-Amz-Target", target)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", target, err)
+		}
+		defer resp.Body.Close()
+		return resp, readResponseBody(t, resp)
+	}
+
+	post("secretsmanager.CreateSecret", `{"Name":"db","SecretString":"x"}`)
+	post("secretsmanager.DeleteSecret", `{"SecretId":"db","ForceDeleteWithoutRecovery":true}`)
+
+	// Restore after destroy → 409.
+	resp, body := post("secretsmanager.RestoreSecret", `{"SecretId":"db"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("RestoreSecret on Destroyed: got %d, want 409; body=%s", resp.StatusCode, body)
+	}
 }
 
 // 10. Distinct 409 sentinels.
@@ -305,9 +329,51 @@ func TestRegressionDistinct409Sentinels(t *testing.T) {
 //
 // Pattern: Route53 hosted-zone delete must check rrset count first
 // and refuse with 409 if records still exist. Mirror of fakegcp
-// pass-21 (DNS managed-zone delete).
+// pass-21 (DNS managed-zone delete). Lit up via Route53.
 func TestRegressionHostedZoneDeleteRefusedIfNonEmpty(t *testing.T) {
-	requireHandlerImplemented(t, "route53", "S47", "hosted-zone-delete-refused-if-non-empty")
+	srv := newTestServerForRegression(t)
+	r53Post := func(method, path, body string) (*http.Response, []byte) {
+		t.Helper()
+		var rd *strings.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		var req *http.Request
+		if rd != nil {
+			req, _ = http.NewRequest(method, srv.URL+path, rd)
+			req.Header.Set("Content-Type", "application/xml")
+		} else {
+			req, _ = http.NewRequest(method, srv.URL+path, nil)
+		}
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		return resp, readResponseBody(t, resp)
+	}
+
+	resp, body := r53Post(http.MethodPost, "/route53/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest><Name>example.com.</Name><CallerReference>r1</CallerReference></CreateHostedZoneRequest>`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("setup CreateHostedZone: %d %s", resp.StatusCode, body)
+	}
+	idStart := strings.Index(string(body), "<Id>/hostedzone/") + len("<Id>/hostedzone/")
+	idEnd := strings.Index(string(body)[idStart:], "</Id>") + idStart
+	zoneID := string(body)[idStart:idEnd]
+
+	// Add a record.
+	r53Post(http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/",
+		`<ChangeResourceRecordSetsRequest><ChangeBatch><Changes><Change><Action>CREATE</Action><ResourceRecordSet>
+		<Name>www.example.com.</Name><Type>A</Type><TTL>300</TTL>
+		<ResourceRecords><ResourceRecord><Value>192.0.2.1</Value></ResourceRecord></ResourceRecords>
+		</ResourceRecordSet></Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`)
+
+	// Delete must reject.
+	resp, _ = r53Post(http.MethodDelete, "/route53/2013-04-01/hostedzone/"+zoneID, "")
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("non-empty zone delete: got %d, want 409", resp.StatusCode)
+	}
 }
 
 // 12. Tombstone semantics on parent delete.
@@ -465,12 +531,54 @@ func TestRegressionSQLColumnJSONBlobSyncOnUpdate(t *testing.T) {
 // Pattern: Route53 ChangeResourceRecordSets is a batch primitive — a
 // batch with one bad change rejects the whole batch with no partial
 // state. v1 canonical example. Mirror of fakegcp pass-1 + cross-
-// pollination.
-//
-// DynamoDB BatchWriteItem and SQS SendMessageBatch follow the same
-// rule but are out of v1 scope; this test fires when Route53 lands.
+// pollination. Lit up via Route53.
 func TestRegressionTransactionalBatchedChanges(t *testing.T) {
-	requireHandlerImplemented(t, "route53", "S47", "transactional-batched-changes")
+	srv := newTestServerForRegression(t)
+	r53Post := func(method, path, body string) (*http.Response, []byte) {
+		t.Helper()
+		var req *http.Request
+		if body != "" {
+			req, _ = http.NewRequest(method, srv.URL+path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/xml")
+		} else {
+			req, _ = http.NewRequest(method, srv.URL+path, nil)
+		}
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		return resp, readResponseBody(t, resp)
+	}
+
+	_, body := r53Post(http.MethodPost, "/route53/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest><Name>example.com.</Name><CallerReference>x</CallerReference></CreateHostedZoneRequest>`)
+	idStart := strings.Index(string(body), "<Id>/hostedzone/") + len("<Id>/hostedzone/")
+	idEnd := strings.Index(string(body)[idStart:], "</Id>") + idStart
+	zoneID := string(body)[idStart:idEnd]
+
+	// Mixed batch: one good change, one apex CNAME (invalid). Whole
+	// batch must reject — neither change applies.
+	mixed := `<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>
+		<Change><Action>CREATE</Action><ResourceRecordSet>
+			<Name>www.example.com.</Name><Type>A</Type><TTL>300</TTL>
+			<ResourceRecords><ResourceRecord><Value>192.0.2.1</Value></ResourceRecord></ResourceRecords>
+		</ResourceRecordSet></Change>
+		<Change><Action>CREATE</Action><ResourceRecordSet>
+			<Name>example.com.</Name><Type>CNAME</Type><TTL>300</TTL>
+			<ResourceRecords><ResourceRecord><Value>bad</Value></ResourceRecord></ResourceRecords>
+		</ResourceRecordSet></Change>
+	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
+	resp, _ := r53Post(http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", mixed)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("mixed batch: %d, want 409", resp.StatusCode)
+	}
+
+	// Verify NEITHER change applied.
+	_, body = r53Post(http.MethodGet, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset", "")
+	if strings.Contains(string(body), "www.example.com.") {
+		t.Errorf("transactional violation — www applied despite batch failure: %s", body)
+	}
 }
 
 // ----- test helpers (regression-suite local) -----

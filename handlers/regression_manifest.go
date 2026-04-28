@@ -41,6 +41,7 @@ var LandedServices = []string{
 	"rds",
 	"route53",
 	"s3",
+	"secretsmanager",
 	"sqs",
 }
 

@@ -135,7 +135,7 @@ func (app *Application) collectState(service string) map[string]any {
 	state["eks"] = app.gatherEKSStateReal()
 	state["sqs"] = app.gatherSQSStateReal()
 	state["route53"] = app.gatherRoute53StateReal()
-	// secretsmanager lands per phase.
+	state["secretsmanager"] = app.gatherSecretsManagerStateReal()
 
 	if service == "" {
 		return state
