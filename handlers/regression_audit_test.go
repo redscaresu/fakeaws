@@ -113,6 +113,18 @@ func TestRegressionSeedAuditNoVacuousPasses(t *testing.T) {
 					if pkg == "assert" || pkg == "require" {
 						hasAssert = true
 					}
+					// Codex pass 11 BLOCKING #2: real assertions on
+					// this suite go through plain testing.T methods
+					// (t.Error, t.Errorf, t.Fatal, t.Fatalf, t.Fail,
+					// t.FailNow), not testify. The original detector
+					// only counted assert./require., so landed tests
+					// keeping requireHandlerImplemented next to a
+					// plain t.Errorf stayed silently green.
+					if pkg == "t" && (sel == "Error" || sel == "Errorf" ||
+						sel == "Fatal" || sel == "Fatalf" ||
+						sel == "Fail" || sel == "FailNow") {
+						hasAssert = true
+					}
 					// Codex pass 3 BLOCKING #1: bare t.Skip /
 					// t.Skipf outside requireHandlerImplemented is
 					// the exact vacuous-pass pattern the audit was

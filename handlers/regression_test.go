@@ -48,7 +48,6 @@ func requireHandlerImplemented(t *testing.T, id, slice, pattern string) {
 // (IAM AttachRolePolicy → policy ARN, EC2 instance → security-group
 // ARN, etc.). IAM is in scope today.
 func TestRegressionCrossAccountFKRejection(t *testing.T) {
-	requireHandlerImplemented(t, "iam", "S43", "cross-account-fk-rejection")
 	srv := newTestServerForRegression(t)
 	// AttachRolePolicy with a foreign-account policy ARN must 404.
 	createRole(t, srv, "r")
@@ -68,7 +67,6 @@ func TestRegressionCrossAccountFKRejection(t *testing.T) {
 // `:role/` ARN where the API expects `:policy/` must 404. Closes the
 // trailing-name-collision escape hatch (fakegcp pass-28).
 func TestRegressionWrongCollectionFKRejection(t *testing.T) {
-	requireHandlerImplemented(t, "iam", "S43", "wrong-collection-fk-rejection")
 	srv := newTestServerForRegression(t)
 	createRole(t, srv, "r")
 	createPolicy(t, srv, "p")
@@ -343,7 +341,6 @@ func TestRegressionTerminalStateRefusesTransitions(t *testing.T) {
 // would return InvalidRequestException (409). The two must NOT
 // collapse.
 func TestRegressionDistinct409Sentinels(t *testing.T) {
-	requireHandlerImplemented(t, "iam", "S43", "distinct-409-sentinels")
 	srv := newTestServerForRegression(t)
 	createRole(t, srv, "r")
 	createPolicy(t, srv, "p")
@@ -473,7 +470,6 @@ func TestRegressionTombstoneSemanticsOnParentDelete(t *testing.T) {
 // (not 500). Asserted here for the IAM case; service tickets light
 // up additional sub-resources as they land.
 func TestRegressionResourceExistenceGateOnSubResource(t *testing.T) {
-	requireHandlerImplemented(t, "iam", "S43", "resource-existence-gate-on-sub-resource")
 	srv := newTestServerForRegression(t)
 	resp, body := iamPost(t, srv, "AttachRolePolicy", url.Values{
 		"RoleName":  {"missing"},
@@ -496,7 +492,6 @@ func TestRegressionResourceExistenceGateOnSubResource(t *testing.T) {
 // IAM CreateRole: even if the caller smuggles in an `Arn` value, the
 // stored ARN must be the synthetic awsproto.BuildIAMRoleARN result.
 func TestRegressionServerStampedFieldsNeverTrusted(t *testing.T) {
-	requireHandlerImplemented(t, "iam", "S43", "server-stamped-fields-never-trusted")
 	srv := newTestServerForRegression(t)
 	// CreateRole with a smuggled Arn — server must ignore it.
 	resp, body := iamPost(t, srv, "CreateRole", url.Values{

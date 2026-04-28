@@ -91,6 +91,38 @@ entries:
     updates_exempt: true
     updates_exempt_reason: "SSE config is set-once for v1 fixtures; v2 update is exercised in update_s3_bucket_versioning's broader bundle."
     integration_test_func_name: "^TestCoverage_S3OwnershipAndEncryption$"
+  # Codex pass 11 BLOCKING #1 fix — landed S3 sub-resources that ship
+  # real handlers + repo rows + tests but were undeclared in the
+  # matrix, leaving TestFullCoverageAudit blind to them.
+  # scenario_resource_type omitted: aws-s3.yaml at v1 doesn't pin
+  # these specifically; coverage is via inline tests.
+  - aws_service: s3
+    aws_resource_type: aws_s3_bucket_policy
+    working_exempt: true
+    working_exempt_reason: "Bucket policy round-trip is asserted in TestS3_PolicyRoundTripJSON; standalone working/s3_bucket_policy/ would duplicate."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "S3 v1 has no cross-resource FK refs (policy is an inert JSON document); see aws_s3_bucket exemption."
+    updates_exempt: true
+    updates_exempt_reason: "Bucket policy is a single-document Put; partial-update is exercised by replacing the document."
+    integration_test_func_name: "^TestS3_PolicyRoundTripJSON$"
+  - aws_service: s3
+    aws_resource_type: aws_s3_bucket_public_access_block
+    working_exempt: true
+    working_exempt_reason: "PAB Put/Get/Delete is asserted in TestS3_PublicAccessBlockRoundTrip; standalone working dir would duplicate."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "PAB is a single record per bucket with no cross-resource FK refs."
+    updates_exempt: true
+    updates_exempt_reason: "PAB toggles all four flags via Put; no separate Update endpoint."
+    integration_test_func_name: "^TestS3_PublicAccessBlockRoundTrip$"
+  - aws_service: s3
+    aws_resource_type: aws_s3_bucket_ownership_controls
+    working_exempt: true
+    working_exempt_reason: "Ownership controls Put/Get is asserted in TestCoverage_S3OwnershipAndEncryption; standalone working dir would duplicate."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "Ownership controls is a single-row config with no cross-resource FK refs."
+    updates_exempt: true
+    updates_exempt_reason: "Ownership rule is a single-document Put; partial-update is exercised by replacing the rule."
+    integration_test_func_name: "^TestCoverage_S3OwnershipAndEncryption$"
 
   # EC2 (S44 handlers in fakeaws@485391b/cd1e76c/1987703/1713ba3,
   # S44-T12 e2e + these matrix entries). VPC, Subnet, IGW, RouteTable,
