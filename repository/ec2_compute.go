@@ -122,6 +122,14 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance) error {
 	if _, err := r.GetSubnet(account, inst.Region, inst.SubnetID); err != nil {
 		return err
 	}
+	// AMI must exist in this region (Codex pass 9 BLOCKING #1: real
+	// EC2 rejects RunInstances with an unknown ImageId; we previously
+	// inserted whatever AMIID string was supplied).
+	if inst.AMIID != "" {
+		if _, err := r.GetAMI(account, inst.Region, inst.AMIID); err != nil {
+			return err
+		}
+	}
 	if inst.IAMInstanceProfileName != "" {
 		if _, err := r.GetInstanceProfile(account, inst.IAMInstanceProfileName); err != nil {
 			return err

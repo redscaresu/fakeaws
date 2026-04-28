@@ -767,6 +767,66 @@ func TestRegressionStateGatherAccountWide(t *testing.T) {
 	}
 }
 
+// TestRegressionRunInstancesRejectsUnknownAMI pins Codex pass 9
+// BLOCKING #1: RunInstances must reject a typoed/unsupported
+// ImageId rather than silently inserting an instance row that
+// references a nonexistent AMI. Mirrors real EC2 semantics for
+// invalid AMI references.
+func TestRegressionRunInstancesRejectsUnknownAMI(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+
+	_, body := ec2PostRegression(t, srv, region, "CreateVpc", url.Values{
+		"CidrBlock": {"10.0.0.0/16"},
+	})
+	vpcID := xmlExtract(body, "vpcId")
+	_, body = ec2PostRegression(t, srv, region, "CreateSubnet", url.Values{
+		"VpcId":            {vpcID},
+		"CidrBlock":        {"10.0.1.0/24"},
+		"AvailabilityZone": {"us-east-1a"},
+	})
+	subnetID := xmlExtract(body, "subnetId")
+
+	resp, body := ec2PostRegression(t, srv, region, "RunInstances", url.Values{
+		"SubnetId":     {subnetID},
+		"ImageId":      {"ami-does-not-exist"},
+		"InstanceType": {"t3.micro"},
+		"MinCount":     {"1"}, "MaxCount": {"1"},
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("RunInstances unknown AMI: got %d, want 404 body=%s", resp.StatusCode, body)
+	}
+}
+
+// TestRegressionRunInstancesAvailableInAnyRegion pins Codex pass 9
+// BLOCKING #1's lazy-seed contract: canonical AMI fixtures must be
+// reachable from any region, not just the boot-time slice.
+func TestRegressionRunInstancesAvailableInAnyRegion(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	const region = "ap-northeast-1" // outside the original 8-region slice
+
+	_, body := ec2PostRegression(t, srv, region, "CreateVpc", url.Values{
+		"CidrBlock": {"10.0.0.0/16"},
+	})
+	vpcID := xmlExtract(body, "vpcId")
+	_, body = ec2PostRegression(t, srv, region, "CreateSubnet", url.Values{
+		"VpcId":            {vpcID},
+		"CidrBlock":        {"10.0.1.0/24"},
+		"AvailabilityZone": {region + "a"},
+	})
+	subnetID := xmlExtract(body, "subnetId")
+
+	resp, body := ec2PostRegression(t, srv, region, "RunInstances", url.Values{
+		"SubnetId":     {subnetID},
+		"ImageId":      {"ami-0abcd1234"},
+		"InstanceType": {"t3.micro"},
+		"MinCount":     {"1"}, "MaxCount": {"1"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("RunInstances ap-northeast-1: got %d, want 200 body=%s", resp.StatusCode, body)
+	}
+}
+
 // ----- test helpers (regression-suite local) -----
 
 const regressionVersion = "2010-05-08"

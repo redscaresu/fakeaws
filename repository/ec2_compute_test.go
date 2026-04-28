@@ -19,6 +19,14 @@ func setupVPCSubnet(t *testing.T, r *Repository) (vpcID, subnetID string) {
 	if err := r.CreateSubnet(testAccount, s); err != nil {
 		t.Fatalf("seed Subnet: %v", err)
 	}
+	// Seed AMI fixture for tests that create instances. Codex pass 9
+	// BLOCKING #1: CreateInstance now requires the AMI to exist.
+	if err := r.SeedAMI(testAccount, &EC2AMI{
+		ID: "ami-1", Name: "test-ami", OwnerID: "amazon",
+		VirtualizationType: "hvm", RootDeviceName: "/dev/xvda", Region: testRegion,
+	}); err != nil {
+		t.Fatalf("seed AMI: %v", err)
+	}
 	return v.ID, s.ID
 }
 

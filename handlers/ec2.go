@@ -1035,6 +1035,10 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 			fmt.Errorf("SubnetId, ImageId, InstanceType required: %w", models.ErrConflict))
 		return
 	}
+	// Lazy-seed canonical AMI fixtures for this region (Codex pass 9
+	// BLOCKING #1) so RunInstances and DescribeImages stay consistent
+	// regardless of which region the caller picked.
+	app.ensureAMIFixturesForRegion(account, region)
 	// Subnet/VPC pairing — if SecurityGroupId.<n> is given, the SGs'
 	// VPC must match the subnet's VPC (S44-T8 regression pattern; the
 	// load-bearing fakegcp pass-27 finding ported to AWS).
@@ -1283,6 +1287,10 @@ type ec2DescribeImagesResult struct {
 }
 
 func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	// Lazy-seed canonical AMI fixtures for this region (Codex pass 9
+	// BLOCKING #1) so callers in any valid AWS region see the same
+	// fixture set as the boot-time slice.
+	app.ensureAMIFixturesForRegion(account, region)
 	// ImageId.<n> filter — most common from terraform-provider-aws
 	// where users pass a literal AMI id. data.aws_ami is NOT supported
 	// per the S44-T0 pitfall.
@@ -1420,6 +1428,21 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 	out["internet_gateways"] = igwOut
 
 	return out
+}
+
+// ensureAMIFixturesForRegion lazy-seeds the canonical AMI set into a
+// region the first time we observe a request scoped to it. Codex
+// pass 9 BLOCKING #1: previously fixtures were only seeded for an
+// 8-region slice at boot, so RunInstances/DescribeImages in any
+// other region got bogus 404s on the canonical AMIs. Now any region
+// the user touches becomes consistent on first contact. SeedAMI is
+// idempotent so re-entry is harmless.
+func (app *Application) ensureAMIFixturesForRegion(account, region string) {
+	for _, a := range ec2AMIFixtures {
+		cp := a
+		cp.Region = region
+		_ = app.repo.SeedAMI(account, &cp)
+	}
 }
 
 // SeedEC2AMIFixtures writes the canonical AMI set into every region
