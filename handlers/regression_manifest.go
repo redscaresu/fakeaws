@@ -36,6 +36,7 @@ import (
 var LandedServices = []string{
 	"dynamodb",
 	"ec2",
+	"eks",
 	"iam",
 	"rds",
 	"s3",

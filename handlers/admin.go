@@ -132,7 +132,8 @@ func (app *Application) collectState(service string) map[string]any {
 	state["ec2"] = app.gatherEC2State()
 	state["rds"] = app.gatherRDSStateReal()
 	state["dynamodb"] = app.gatherDynamoDBStateReal()
-	// eks/sqs/secretsmanager/route53 land per phase.
+	state["eks"] = app.gatherEKSStateReal()
+	// sqs/secretsmanager/route53 land per phase.
 
 	if service == "" {
 		return state
