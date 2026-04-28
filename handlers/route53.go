@@ -378,19 +378,40 @@ func r53IsApex(recordName, zoneName string) bool {
 
 // ----- /mock/state gather -----
 
+// gatherRoute53StateReal emits the Route53 block of /mock/state.
+//
+// Codex pass 3 BLOCKING #2 fix: hosted zones now also surface their
+// non-default record sets (was previously only emitting zones).
+// NS+SOA defaults are excluded so the count reflects user records only.
 func (app *Application) gatherRoute53StateReal() map[string]any {
 	const account = awsproto.FakeAccountID
 	out := map[string]any{
 		"hosted_zones": []any{},
+		"record_sets":  []any{},
 	}
 	zones, _ := app.repo.ListHostedZones(account)
 	zOut := make([]map[string]any, 0, len(zones))
+	rsOut := []map[string]any{}
 	for _, z := range zones {
 		zOut = append(zOut, map[string]any{
 			"id": z.ID, "name": z.Name, "comment": z.Comment, "private": z.Private,
 			"arn": z.ARN,
 		})
+		rsets, _ := app.repo.ListRecordSets(account, z.ID)
+		for _, rs := range rsets {
+			// Skip the auto-seeded NS + SOA at the apex — they
+			// inflate user-record counts that scenarios assert against.
+			if (rs.Type == "NS" || rs.Type == "SOA") && rs.Name == z.Name {
+				continue
+			}
+			rsOut = append(rsOut, map[string]any{
+				"zone_id": rs.ZoneID, "name": rs.Name, "type": rs.Type,
+				"ttl": rs.TTL, "records": rs.Records,
+				"set_identifier": rs.SetIdentifier,
+			})
+		}
 	}
 	out["hosted_zones"] = zOut
+	out["record_sets"] = rsOut
 	return out
 }

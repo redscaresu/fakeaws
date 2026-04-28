@@ -240,12 +240,19 @@ func (app *Application) smGetSecretValue(w http.ResponseWriter, account, region 
 
 // ----- /mock/state gather -----
 
+// gatherSecretsManagerStateReal emits the Secrets Manager block of
+// /mock/state.
+//
+// Codex pass 3 BLOCKING #2 fix: secrets now also surface their
+// version stage labels (was previously only emitting secrets).
 func (app *Application) gatherSecretsManagerStateReal() map[string]any {
 	const account = awsproto.FakeAccountID
 	out := map[string]any{
-		"secrets": []any{},
+		"secrets":  []any{},
+		"versions": []any{},
 	}
 	allSecrets := []map[string]any{}
+	allVersions := []map[string]any{}
 	for _, region := range []string{"us-east-1", "us-east-2", "us-west-1", "us-west-2",
 		"eu-west-1", "eu-west-2", "eu-central-1", "ap-southeast-1"} {
 		secrets, _ := app.repo.ListSecrets(account, region)
@@ -255,8 +262,24 @@ func (app *Application) gatherSecretsManagerStateReal() map[string]any {
 				"recovery_window_in_days": s.RecoveryWindowInDays,
 				"region":                  s.Region,
 			})
+			// Surface AWSCURRENT and AWSPREVIOUS versions per secret
+			// so identity-preservation checks can verify the rotation
+			// contract round-tripped.
+			if cur, err := app.repo.GetSecretValue(account, region, s.Name, "AWSCURRENT", ""); err == nil {
+				allVersions = append(allVersions, map[string]any{
+					"secret_name": s.Name, "version_id": cur.VersionID,
+					"stages": cur.Stages, "region": region,
+				})
+			}
+			if prev, err := app.repo.GetSecretValue(account, region, s.Name, "AWSPREVIOUS", ""); err == nil {
+				allVersions = append(allVersions, map[string]any{
+					"secret_name": s.Name, "version_id": prev.VersionID,
+					"stages": prev.Stages, "region": region,
+				})
+			}
 		}
 	}
 	out["secrets"] = allSecrets
+	out["versions"] = allVersions
 	return out
 }

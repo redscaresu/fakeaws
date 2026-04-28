@@ -89,9 +89,47 @@ func TestRegressionWrongCollectionFKRejection(t *testing.T) {
 // "regions/us-east-1/policies/foo"). The fix landed in fakegcp pass-29.
 // AWS rarely uses relative paths in HCL, but if a future scenario
 // generates them, the rejection must hold uniformly.
+// TestRegressionRelativePathWrongCollectionRejection — Codex pass 3
+// BLOCKING #1 fix. Lit up via EC2: the AWS provider sometimes
+// generates a security-group ARN-shaped reference where a bare id
+// is expected (or vice versa). Mismatched-shape refs must reject
+// rather than silently match by trailing name.
 func TestRegressionRelativePathWrongCollectionRejection(t *testing.T) {
-	requireHandlerImplemented(t, "iam", "S43", "relative-path-wrong-collection")
-	t.Skip("AWS HCL doesn't generate relative paths in S43 surface; this pattern is structurally guarded by ResolveSameAccountName but has no positive test target until a service ships that consumes relative refs (e.g., EC2 in S44 with subnet refs by ID-but-shaped-as-path).")
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+	// Setup VPC + subnet + SG.
+	_, body := ec2PostRegression(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	vpcID := xmlExtract(body, "vpcId")
+	_, body = ec2PostRegression(t, srv, region, "CreateSubnet", url.Values{
+		"VpcId": {vpcID}, "CidrBlock": {"10.0.1.0/24"},
+	})
+	subnetID := xmlExtract(body, "subnetId")
+	_, body = ec2PostRegression(t, srv, region, "CreateSecurityGroup", url.Values{
+		"GroupName": {"app"}, "GroupDescription": {"app"}, "VpcId": {vpcID},
+	})
+	sgID := xmlExtract(body, "groupId")
+
+	// Wrong collection: pass the SG's id where a SubnetId is expected.
+	// The trailing name is a 17-char hex string (sg-xxxxxxxxxxxxxxxxx),
+	// not a subnet id. Must reject — handler must validate via
+	// GetSubnet, not lazy trailing-name match.
+	resp, _ := ec2PostRegression(t, srv, region, "RunInstances", url.Values{
+		"SubnetId":          {sgID}, // wrong-collection ref
+		"ImageId":           {"ami-0abcd1234"},
+		"InstanceType":      {"t3.micro"},
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("wrong-collection ref (sg id where subnet id expected): got %d, want 404", resp.StatusCode)
+	}
+	// Confirm the right shape DOES succeed under same prereqs.
+	resp, _ = ec2PostRegression(t, srv, region, "RunInstances", url.Values{
+		"SubnetId":     {subnetID},
+		"ImageId":      {"ami-0abcd1234"},
+		"InstanceType": {"t3.micro"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("right-shape ref control: got %d, want 200", resp.StatusCode)
+	}
 }
 
 // 4. Subnet/VPC pairing on instance / cluster create.

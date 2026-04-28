@@ -333,10 +333,16 @@ func (app *Application) eksDeleteAddon(w http.ResponseWriter, r *http.Request) {
 
 // ----- /mock/state gather -----
 
+// gatherEKSStateReal emits the EKS block of /mock/state.
+//
+// Codex pass 3 BLOCKING #2 fix: clusters now also surface their
+// nodegroups + addons (was previously only emitting clusters).
 func (app *Application) gatherEKSStateReal() map[string]any {
 	const account = awsproto.FakeAccountID
 	out := map[string]any{
-		"clusters": []any{},
+		"clusters":    []any{},
+		"node_groups": []any{},
+		"addons":      []any{},
 	}
 	clusters, _ := app.repo.ListEKSClusters(account, "")
 	cOut := make([]map[string]any, 0, len(clusters))
@@ -347,6 +353,65 @@ func (app *Application) gatherEKSStateReal() map[string]any {
 		})
 	}
 	out["clusters"] = cOut
+	// The repo doesn't expose unfiltered nodegroup/addon list paths;
+	// the data lives keyed by (cluster, name). Probe via raw DB
+	// query for everything under each cluster.
+	ngOut := []map[string]any{}
+	addOut := []map[string]any{}
+	for _, c := range clusters {
+		// We don't have a per-cluster list either; per concepts.md
+		// /mock/state surfaces what the audit needs (cluster names
+		// and their child counts). We surface nodegroup/addon
+		// existence via the DB directly using raw queries we have:
+		// the gather helper extracts (cluster_name, name) tuples.
+		// Use a reflective probe via repository's underlying DB.
+		_ = c
+	}
+	// Walk every modeled service via the DB directly. The repo
+	// already exposes Get* per-tuple; gather just iterates.
+	if rows, err := app.repo.DB().Query(
+		`SELECT cluster_name, name FROM eks_node_groups WHERE account_id = ? ORDER BY cluster_name, name`,
+		account,
+	); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var cluster, name string
+			if rows.Scan(&cluster, &name) != nil {
+				continue
+			}
+			ng, err := app.repo.GetEKSNodeGroup(account, cluster, name)
+			if err != nil {
+				continue
+			}
+			ngOut = append(ngOut, map[string]any{
+				"cluster_name": ng.ClusterName, "name": ng.Name,
+				"node_role_arn": ng.NodeRoleARN, "subnet_ids": ng.SubnetIDs,
+				"status": ng.Status, "region": ng.Region, "arn": ng.ARN,
+			})
+		}
+	}
+	if rows, err := app.repo.DB().Query(
+		`SELECT cluster_name, name FROM eks_addons WHERE account_id = ? ORDER BY cluster_name, name`,
+		account,
+	); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var cluster, name string
+			if rows.Scan(&cluster, &name) != nil {
+				continue
+			}
+			a, err := app.repo.GetEKSAddon(account, cluster, name)
+			if err != nil {
+				continue
+			}
+			addOut = append(addOut, map[string]any{
+				"cluster_name": a.ClusterName, "name": a.Name, "version": a.Version,
+				"status": a.Status, "region": a.Region, "arn": a.ARN,
+			})
+		}
+	}
+	out["node_groups"] = ngOut
+	out["addons"] = addOut
 	return out
 }
 

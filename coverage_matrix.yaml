@@ -85,12 +85,12 @@ entries:
     aws_resource_type: aws_s3_bucket_server_side_encryption_configuration
     scenario_resource_type: storage
     working_exempt: true
-    working_exempt_reason: "Encryption is asserted via TestS3_PublicAccessBlockRoundTrip + the generic-config GET/PUT round-trip; standalone working dir would duplicate."
+    working_exempt_reason: "Encryption Put/Get round-trip is asserted in TestCoverage_S3OwnershipAndEncryption; standalone working dir would duplicate."
     misconfigured_exempt: true
     misconfigured_exempt_reason: "No FK refs on SSE config."
     updates_exempt: true
     updates_exempt_reason: "SSE config is set-once for v1 fixtures; v2 update is exercised in update_s3_bucket_versioning's broader bundle."
-    integration_test_func_name: "^TestS3_PublicAccessBlockRoundTrip$"
+    integration_test_func_name: "^TestCoverage_S3OwnershipAndEncryption$"
 
   # EC2 (S44 handlers in fakeaws@485391b/cd1e76c/1987703/1713ba3,
   # S44-T12 e2e + these matrix entries). VPC, Subnet, IGW, RouteTable,

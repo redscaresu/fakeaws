@@ -92,8 +92,13 @@ func TestRegressionSeedAuditNoVacuousPasses(t *testing.T) {
 			if !ok || fn.Body == nil {
 				return true
 			}
+			// Only audit functions that look like Test* funcs.
+			if fn.Name == nil || !strings.HasPrefix(fn.Name.Name, "Test") {
+				return true
+			}
 			hasRequire := false
 			hasAssert := false
+			hasBareSkip := false
 			ast.Inspect(fn.Body, func(inner ast.Node) bool {
 				call, ok := inner.(*ast.CallExpr)
 				if !ok {
@@ -108,12 +113,23 @@ func TestRegressionSeedAuditNoVacuousPasses(t *testing.T) {
 					if pkg == "assert" || pkg == "require" {
 						hasAssert = true
 					}
-					_ = sel
+					// Codex pass 3 BLOCKING #1: bare t.Skip /
+					// t.Skipf outside requireHandlerImplemented is
+					// the exact vacuous-pass pattern the audit was
+					// supposed to catch. Flag any direct skip on
+					// the testing-T receiver.
+					if pkg == "t" && (sel == "Skip" || sel == "Skipf" || sel == "SkipNow") {
+						hasBareSkip = true
+					}
 				}
 				return true
 			})
 			if hasRequire && hasAssert {
 				t.Errorf("vacuous-pass risk in %s::%s — requireHandlerImplemented coexists with assert./require. in the same func body. Either remove the requireHandlerImplemented call (service has landed) or remove the assertion (this is a stub).",
+					ent.Name(), fn.Name.Name)
+			}
+			if hasBareSkip {
+				t.Errorf("vacuous-pass risk in %s::%s — direct t.Skip/Skipf/SkipNow call. Use requireHandlerImplemented(t, service, slice, pattern) so the audit can track it; bare skips violate the manifest-gated contract.",
 					ent.Name(), fn.Name.Name)
 			}
 			return true
