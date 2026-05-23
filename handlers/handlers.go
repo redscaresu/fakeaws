@@ -17,13 +17,14 @@ import (
 	"github.com/redscaresu/fakeaws/repository"
 )
 
-// Application is the top-level wiring struct. Holds the chi router
-// and the repository handle.
+// Application is the top-level wiring struct. Holds the chi router,
+// the repository handle, and the user-injectable FaultConfig (S49).
 type Application struct {
 	router *chi.Mux
 	repo   *repository.Repository
 	echo   bool
 	dbPath string
+	faults *faultState
 }
 
 // NewApplication boots an Application. dbPath is ":memory:" for
@@ -43,6 +44,7 @@ func NewApplication(dbPath string, echo bool) (*Application, error) {
 		repo:   repo,
 		echo:   echo,
 		dbPath: dbPath,
+		faults: &faultState{},
 	}
 
 	app.router.Use(middleware.Recoverer)
@@ -90,6 +92,7 @@ func (app *Application) RegisterRoutes(r chi.Router) {
 	})
 
 	app.registerAdminRoutes(r)
+	app.registerFaultRoutes(r)
 	app.registerIAMRoutes(r)
 	app.registerS3Routes(r)
 	app.registerEC2Routes(r)
