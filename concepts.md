@@ -13,9 +13,9 @@ Operational state and one-time setup items the build assumes. A fresh agent shou
 - Confirm `codex login` is current; the iterative-review loop needs codex CLI access throughout the build.
 
 **Repo state assumed:**
-- `/Users/ehsanashouri/go/src/github.com/redscaresu/fakeaws` exists as a directory with only `concepts.md` in it. **First action of S43-T1 is `git init` there**, then ship the four-file Day-1 invariant in commit 1.
+- `$GOPATH/src/github.com/redscaresu/fakeaws` exists as a directory with only `concepts.md` in it. **First action of S43-T1 is `git init` there**, then ship the four-file Day-1 invariant in commit 1.
 - mockway runs on `:8080`, fakegcp on `:8081`, fakeaws will be `:8082`. mockway must be restarted after any code change in its repo (procedure documented in the user's MEMORY.md).
-- Commit author identity: `redscaresu <ukashouri@googlemail.com>`.
+- Commit author identity: the repo owner's configured `user.name` / `user.email`.
 
 **Build-time conventions:**
 - Branch strategy: one long-lived `fakeaws-build` branch with per-ticket commits, opened as one PR-per-phase (six PRs total: S43..S48). Per-ticket PRs would be too noisy for ~70 tickets.
@@ -30,7 +30,7 @@ Operational state and one-time setup items the build assumes. A fresh agent shou
 - When the agent encounters a generation-time mistake the LLM repeatedly makes (provider rejects same shape twice in a row), append the rule to `pitfalls/aws.yaml` rather than only fixing the immediate scenario. Same pattern as `pitfalls/scaleway.yaml`'s auto-append behaviour.
 
 **Where to find AWS resource shapes during implementation:**
-- Try `/Users/ehsanashouri/go/src/github.com/redscaresu/terraform-provider-aws` first; if the path doesn't exist on this machine, fall back to `gh api repos/hashicorp/terraform-provider-aws/contents/...` for the relevant `internal/service/<svc>/` files.
+- Try `$GOPATH/src/github.com/redscaresu/terraform-provider-aws` first; if the path doesn't exist on this machine, fall back to `gh api repos/hashicorp/terraform-provider-aws/contents/...` for the relevant `internal/service/<svc>/` files.
 
 **Run cleanup at end:**
 - Archive `/tmp/codex-fakeaws-*-output.txt` files from the planning loop under `fakeaws/docs/review-passes/round-NN-planning.md` (the same directory where the build's review passes live), so the planning history is preserved alongside the implementation history.
@@ -67,7 +67,7 @@ From the 33 codex review passes that landed fakegcp, the patterns that paid for 
 
 ## Lessons we are explicitly NOT carrying over from LocalStack
 
-After reading the LocalStack codebase (`/Users/ehsanashouri/go/src/github.com/redscaresu/localstack`):
+After reading the LocalStack codebase (`$GOPATH/src/github.com/redscaresu/localstack`):
 
 1. **No Python pickle persistence.** SQLite + JSON columns is enough.
 2. **No HandlerChain / per-stage middleware.** chi groups + a single auth middleware is fine; we don't need 13 stages.
@@ -162,7 +162,7 @@ fakeaws/
 
 ## Testing framework — verbatim with mockway/fakegcp
 
-This is non-negotiable per the user. Every contract below mirrors what already exists in `/Users/ehsanashouri/go/src/github.com/redscaresu/fakegcp`.
+This is non-negotiable per the user. Every contract below mirrors what already exists in `$GOPATH/src/github.com/redscaresu/fakegcp`.
 
 **Three-tier pyramid**:
 

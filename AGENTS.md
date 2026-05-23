@@ -95,7 +95,7 @@ patterns regression seed prevents from re-landing.
 
 ## Where to find AWS resource shapes
 
-1. `/Users/ehsanashouri/go/src/github.com/redscaresu/terraform-provider-aws`
+1. `$GOPATH/src/github.com/redscaresu/terraform-provider-aws`
    on disk if it's there — read `internal/service/<svc>/...`.
 2. Otherwise `gh api repos/hashicorp/terraform-provider-aws/contents/internal/service/<svc>` for the list.
 3. AWS documentation as a last resort — provider behaviour wins where
