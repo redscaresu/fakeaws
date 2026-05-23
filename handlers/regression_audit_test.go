@@ -187,13 +187,9 @@ func matchHandlerFile(t *testing.T, dir, id string) bool {
 // admin endpoints, audit tests, etc.) and shouldn't appear in
 // LandedServices.
 var knownNonServiceFiles = map[string]bool{
-	"handlers.go":            true,
-	"admin.go":               true,
-	"regression_manifest.go": true,
-	// faults.go (S49) is cross-cutting fault-injection infrastructure
-	// — knobs that bend behavior across every service rather than a
-	// dedicated AWS service surface. No LandedServices entry needed.
-	"faults.go": true,
+	"handlers.go":             true,
+	"admin.go":                true,
+	"regression_manifest.go":  true,
 }
 
 func serviceFilePrefixes(t *testing.T, dir string) map[string]bool {

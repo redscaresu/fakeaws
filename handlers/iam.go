@@ -635,9 +635,6 @@ func (app *Application) iamAttachRolePolicy(w http.ResponseWriter, account strin
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	// S49 fault hook: simulate real-AWS eventual-consistency latency
-	// between attach and visibility (default 0ms = no delay).
-	app.applyIAMAttachLatency()
 	awsproto.WriteQueryRPCResponse(w, "AttachRolePolicy", nil)
 }
 
@@ -647,9 +644,6 @@ func (app *Application) iamDetachRolePolicy(w http.ResponseWriter, account strin
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	// S49 fault hook: detach has the same eventual-consistency window
-	// as attach in real Cloud IAM, so apply the same latency.
-	app.applyIAMAttachLatency()
 	awsproto.WriteQueryRPCResponse(w, "DetachRolePolicy", nil)
 }
 

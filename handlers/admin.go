@@ -57,12 +57,6 @@ func (app *Application) handleMockReset(w http.ResponseWriter, _ *http.Request) 
 		})
 		return
 	}
-	// S49: reset clears injected fault config alongside table state so
-	// a test that bumped iam_attach_latency_ms doesn't leak the knob
-	// into the next test in a shared-server harness.
-	if app.faults != nil {
-		app.faults.set(FaultConfig{})
-	}
 	writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
