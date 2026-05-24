@@ -52,7 +52,9 @@ type eksCreateClusterInput struct {
 
 type eksVpcConfig struct {
 	SubnetIds        []string `json:"subnetIds"`
-	SecurityGroupIds []string `json:"securityGroupIds,omitempty"`
+	SecurityGroupIds      []string `json:"securityGroupIds,omitempty"`
+	EndpointPublicAccess  bool     `json:"endpointPublicAccess"`
+	EndpointPrivateAccess bool     `json:"endpointPrivateAccess"`
 }
 
 type eksClusterDescription struct {
@@ -62,7 +64,12 @@ type eksClusterDescription struct {
 	Status            string       `json:"status"`
 	Version           string       `json:"version,omitempty"`
 	ResourcesVpcConfig eksVpcConfig `json:"resourcesVpcConfig"`
-	CreatedAt         string       `json:"createdAt"`
+	// EKS DescribeCluster returns createdAt as a JSON number (Unix
+	// epoch seconds with fractional milliseconds), NOT an ISO 8601
+	// string. The AWS SDK's deserialiser asserts on the type and
+	// fails the whole apply with "expected Timestamp to be a JSON
+	// Number, got string instead" otherwise.
+	CreatedAt float64 `json:"createdAt"`
 }
 
 func eksClusterToDescription(c *repository.EKSCluster) eksClusterDescription {
@@ -70,10 +77,29 @@ func eksClusterToDescription(c *repository.EKSCluster) eksClusterDescription {
 		Name: c.Name, Arn: c.ARN, RoleArn: c.RoleARN, Status: c.Status,
 		Version: c.KubernetesVersion,
 		ResourcesVpcConfig: eksVpcConfig{
-			SubnetIds: c.SubnetIDs, SecurityGroupIds: c.SecurityGroupIDs,
+			SubnetIds:             c.SubnetIDs,
+			SecurityGroupIds:      c.SecurityGroupIDs,
+			// AWS default for new EKS clusters; provider drift-checks
+			// against this exact pair.
+			EndpointPublicAccess:  true,
+			EndpointPrivateAccess: false,
 		},
-		CreatedAt: c.CreatedAt,
+		CreatedAt: parseRFC3339ToEpoch(c.CreatedAt),
 	}
+}
+
+// parseRFC3339ToEpoch converts an RFC3339 timestamp to Unix epoch
+// seconds (float64) — the wire format AWS uses for EKS / IAM /
+// Secrets Manager Timestamp fields. Falls back to 0 if parsing fails.
+func parseRFC3339ToEpoch(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return 0
+	}
+	return float64(t.Unix())
 }
 
 func (app *Application) eksCreateCluster(w http.ResponseWriter, r *http.Request) {
@@ -165,14 +191,15 @@ type eksCreateNodeGroupInput struct {
 }
 
 type eksNodeGroupDescription struct {
-	NodegroupName string   `json:"nodegroupName"`
-	ClusterName   string   `json:"clusterName"`
-	NodegroupArn  string   `json:"nodegroupArn"`
-	NodeRole      string   `json:"nodeRole"`
-	Subnets       []string `json:"subnets"`
-	InstanceTypes []string `json:"instanceTypes,omitempty"`
-	Status        string   `json:"status"`
-	CreatedAt     string   `json:"createdAt"`
+	NodegroupName string                 `json:"nodegroupName"`
+	ClusterName   string                 `json:"clusterName"`
+	NodegroupArn  string                 `json:"nodegroupArn"`
+	NodeRole      string                 `json:"nodeRole"`
+	Subnets       []string               `json:"subnets"`
+	InstanceTypes []string               `json:"instanceTypes,omitempty"`
+	ScalingConfig map[string]json.Number `json:"scalingConfig,omitempty"`
+	Status        string                 `json:"status"`
+	CreatedAt     float64                `json:"createdAt"`
 }
 
 func (app *Application) eksCreateNodeGroup(w http.ResponseWriter, r *http.Request) {
@@ -212,12 +239,22 @@ func (app *Application) eksCreateNodeGroup(w http.ResponseWriter, r *http.Reques
 }
 
 func eksNodeGroupToDesc(ng *repository.EKSNodeGroup) eksNodeGroupDescription {
-	return eksNodeGroupDescription{
+	desc := eksNodeGroupDescription{
 		NodegroupName: ng.Name, ClusterName: ng.ClusterName,
 		NodegroupArn: ng.ARN, NodeRole: ng.NodeRoleARN,
 		Subnets: ng.SubnetIDs, InstanceTypes: ng.InstanceTypes,
-		Status: ng.Status, CreatedAt: ng.CreatedAt,
+		Status: ng.Status, CreatedAt: parseRFC3339ToEpoch(ng.CreatedAt),
 	}
+	// Echo back the persisted scaling_config so the provider's Read
+	// sees the same values it sent on Create (otherwise apply→plan
+	// surfaces an empty→declared scalingConfig add-in-place diff).
+	if ng.ScalingConfig != "" {
+		var sc map[string]json.Number
+		if err := json.Unmarshal([]byte(ng.ScalingConfig), &sc); err == nil && len(sc) > 0 {
+			desc.ScalingConfig = sc
+		}
+	}
+	return desc
 }
 
 func (app *Application) eksDescribeNodeGroup(w http.ResponseWriter, r *http.Request) {
@@ -259,12 +296,12 @@ type eksCreateAddonInput struct {
 }
 
 type eksAddonDescription struct {
-	AddonName    string `json:"addonName"`
-	ClusterName  string `json:"clusterName"`
-	AddonArn     string `json:"addonArn"`
-	AddonVersion string `json:"addonVersion,omitempty"`
-	Status       string `json:"status"`
-	CreatedAt    string `json:"createdAt"`
+	AddonName    string  `json:"addonName"`
+	ClusterName  string  `json:"clusterName"`
+	AddonArn     string  `json:"addonArn"`
+	AddonVersion string  `json:"addonVersion,omitempty"`
+	Status       string  `json:"status"`
+	CreatedAt    float64 `json:"createdAt"`
 }
 
 func (app *Application) eksCreateAddon(w http.ResponseWriter, r *http.Request) {
@@ -299,7 +336,7 @@ func (app *Application) eksCreateAddon(w http.ResponseWriter, r *http.Request) {
 func eksAddonToDesc(a *repository.EKSAddon) eksAddonDescription {
 	return eksAddonDescription{
 		AddonName: a.Name, ClusterName: a.ClusterName, AddonArn: a.ARN,
-		AddonVersion: a.Version, Status: a.Status, CreatedAt: a.CreatedAt,
+		AddonVersion: a.Version, Status: a.Status, CreatedAt: parseRFC3339ToEpoch(a.CreatedAt),
 	}
 }
 

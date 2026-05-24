@@ -60,6 +60,15 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 		app.ec2DescribeSubnets(w, account, region, req)
 	case "DeleteSubnet":
 		app.ec2DeleteSubnet(w, account, region, req)
+	case "DescribeNetworkInterfaces":
+		// terraform-provider-aws's aws_subnet Delete preflight calls
+		// DescribeNetworkInterfaces to enumerate ENIs attached to the
+		// subnet (so it can wait for them to detach before deleting).
+		// fakeaws doesn't model ENIs as separate resources — they're
+		// auto-managed by instance / lb attachments — so we return an
+		// empty set, signalling "no ENIs to wait on, delete is safe."
+		awsproto.WriteEC2QueryRPCResponse(w, "DescribeNetworkInterfaces",
+			&ec2DescribeNetworkInterfacesResult{NetworkInterfaceSet: []ec2NetworkInterfaceXML{}})
 
 	// ----- InternetGateway -----
 	case "CreateInternetGateway":
@@ -281,16 +290,58 @@ func (app *Application) ec2DeleteVpc(w http.ResponseWriter, account, region stri
 
 // ----- Subnet handlers -----
 
+// ec2SubnetXML mirrors the real EC2 DescribeSubnets response shape.
+// terraform-provider-aws's aws_subnet Read flow polls for several
+// fields beyond the basic id/vpc/state/cidr/az set; a missing field
+// shows up as the provider erroring "couldn't find resource (21
+// retries)" because the unmarshaller can't construct the expected
+// struct.
 type ec2SubnetXML struct {
-	SubnetId         string   `xml:"subnetId"`
-	VpcId            string   `xml:"vpcId"`
-	State            string   `xml:"state"`
-	CidrBlock        string   `xml:"cidrBlock"`
-	AvailabilityZone string   `xml:"availabilityZone"`
+	SubnetId                       string                          `xml:"subnetId"`
+	VpcId                          string                          `xml:"vpcId"`
+	State                          string                          `xml:"state"`
+	CidrBlock                      string                          `xml:"cidrBlock"`
+	AvailabilityZone               string                          `xml:"availabilityZone"`
+	AvailabilityZoneId             string                          `xml:"availabilityZoneId"`
+	AvailableIpAddressCount        int                             `xml:"availableIpAddressCount"`
+	OwnerId                        string                          `xml:"ownerId"`
+	SubnetArn                      string                          `xml:"subnetArn"`
+	DefaultForAz                   bool                            `xml:"defaultForAz"`
+	MapPublicIpOnLaunch            bool                            `xml:"mapPublicIpOnLaunch"`
+	MapCustomerOwnedIpOnLaunch     bool                            `xml:"mapCustomerOwnedIpOnLaunch"`
+	AssignIpv6AddressOnCreation    bool                            `xml:"assignIpv6AddressOnCreation"`
+	EnableDns64                    bool                            `xml:"enableDns64"`
+	Ipv6Native                     bool                            `xml:"ipv6Native"`
+	Ipv6CidrBlockAssociationSet    []ec2SubnetIpv6BlockAssociation `xml:"ipv6CidrBlockAssociationSet>item,omitempty"`
+	PrivateDnsNameOptionsOnLaunch  *ec2SubnetPrivateDnsOptionsXML  `xml:"privateDnsNameOptionsOnLaunch,omitempty"`
+}
+
+type ec2SubnetIpv6BlockAssociation struct {
+	AssociationId  string                          `xml:"associationId"`
+	Ipv6CidrBlock  string                          `xml:"ipv6CidrBlock"`
+	CidrBlockState ec2VpcCidrBlockAssociationState `xml:"ipv6CidrBlockState"`
+}
+
+type ec2SubnetPrivateDnsOptionsXML struct {
+	HostnameType                    string `xml:"hostnameType"`
+	EnableResourceNameDnsARecord    bool   `xml:"enableResourceNameDnsARecord"`
+	EnableResourceNameDnsAAAARecord bool   `xml:"enableResourceNameDnsAAAARecord"`
 }
 
 type ec2DescribeSubnetsResult struct {
 	SubnetSet []ec2SubnetXML `xml:"subnetSet>item"`
+}
+
+// ec2NetworkInterfaceXML is a placeholder for ENI items in the
+// DescribeNetworkInterfaces response. fakeaws returns an empty
+// network-interface set (no ENI modeling), so this type's full
+// shape doesn't matter — only the wrapper element naming does.
+type ec2NetworkInterfaceXML struct {
+	NetworkInterfaceId string `xml:"networkInterfaceId"`
+}
+
+type ec2DescribeNetworkInterfacesResult struct {
+	NetworkInterfaceSet []ec2NetworkInterfaceXML `xml:"networkInterfaceSet>item"`
 }
 
 type ec2CreateSubnetResult struct {
@@ -320,12 +371,23 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 }
 
 func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	// VpcId.<n> filter is the most common — we accept VpcId.1 as a
-	// single-VPC filter; full filter parsing is deferred.
+	// terraform-provider-aws's Read flow sends SubnetId.N=<id> to look
+	// up exactly one subnet (the one it just created), then expects
+	// the response to contain that subnet and no others. Without the
+	// filter, returning all subnets confuses the wait loop into
+	// reporting "couldn't find resource (21 retries)" because the
+	// match count is wrong. Filter.N.Name=vpc-id is the legacy filter
+	// shape; SubnetId.N is the direct-by-id parameter that the v2 SDK
+	// uses preferentially.
+	subnetIDFilter := map[string]struct{}{}
+	for k, vs := range req.Params {
+		if strings.HasPrefix(k, "SubnetId.") && len(vs) > 0 {
+			subnetIDFilter[vs[0]] = struct{}{}
+		}
+	}
 	vpcFilter := ""
 	for k, vs := range req.Params {
 		if strings.HasPrefix(k, "Filter.") && strings.HasSuffix(k, ".Name") && len(vs) > 0 && vs[0] == "vpc-id" {
-			// Look for the matching Filter.N.Value.1
 			prefix := strings.TrimSuffix(k, ".Name")
 			if v := req.Params.Get(prefix + ".Value.1"); v != "" {
 				vpcFilter = v
@@ -339,6 +401,11 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 	}
 	out := ec2DescribeSubnetsResult{SubnetSet: make([]ec2SubnetXML, 0, len(subnets))}
 	for _, s := range subnets {
+		if len(subnetIDFilter) > 0 {
+			if _, ok := subnetIDFilter[s.ID]; !ok {
+				continue
+			}
+		}
 		out.SubnetSet = append(out.SubnetSet, ec2SubnetToXML(s))
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeSubnets", &out)
@@ -398,9 +465,34 @@ func ec2VpcToXML(v *repository.EC2VPC) ec2VpcXML {
 }
 
 func ec2SubnetToXML(s *repository.EC2Subnet) ec2SubnetXML {
+	// availableIpAddressCount derived from CIDR mask: /24 → 251 usable
+	// (256 − 5 reserved by AWS), /25 → 123, etc. Defaults to 251 if
+	// we can't parse the CIDR — close enough for tests that just
+	// assert non-zero.
+	available := 251
+	if i := strings.LastIndexByte(s.CidrBlock, '/'); i >= 0 {
+		var mask int
+		fmt.Sscanf(s.CidrBlock[i+1:], "%d", &mask)
+		if mask >= 16 && mask <= 28 {
+			// 2^(32-mask) - 5 (AWS reserves .0, .1, .2, .3, broadcast)
+			total := 1 << uint(32-mask)
+			available = total - 5
+		}
+	}
 	return ec2SubnetXML{
-		SubnetId: s.ID, VpcId: s.VPCID, State: s.State,
-		CidrBlock: s.CidrBlock, AvailabilityZone: s.AvailabilityZone,
+		SubnetId:                s.ID,
+		VpcId:                   s.VPCID,
+		State:                   s.State,
+		CidrBlock:               s.CidrBlock,
+		AvailabilityZone:        s.AvailabilityZone,
+		AvailabilityZoneId:      s.AvailabilityZone + "-az1",
+		AvailableIpAddressCount: available,
+		OwnerId:                 awsproto.FakeAccountID,
+		SubnetArn:               s.ARN,
+		PrivateDnsNameOptionsOnLaunch: &ec2SubnetPrivateDnsOptionsXML{
+			HostnameType:                 "ip-name",
+			EnableResourceNameDnsARecord: false,
+		},
 	}
 }
 

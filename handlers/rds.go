@@ -75,10 +75,43 @@ func (app *Application) handleRDS(w http.ResponseWriter, r *http.Request) {
 	case "ModifyDBInstance":
 		app.rdsModifyDBInstance(w, account, region, req)
 
+	case "ListTagsForResource":
+		// terraform-provider-aws polls ListTagsForResource for every RDS
+		// resource (DB instance, subnet group, parameter group). fakeaws
+		// doesn't persist tags yet — return an empty list so the Read
+		// flow doesn't error.
+		awsproto.WriteQueryRPCResponse(w, "ListTagsForResource", &rdsListTagsResult{TagList: []rdsTagXML{}})
+
+	case "DescribeDBParameters":
+		// Provider's aws_db_parameter_group Read iterates all parameters
+		// for diff detection. fakeaws doesn't persist per-parameter
+		// values — return an empty list (the provider treats this as
+		// "all parameters at family default", which is consistent with
+		// a freshly-created group).
+		awsproto.WriteQueryRPCResponse(w, "DescribeDBParameters", &rdsDescribeDBParametersResult{Parameters: []rdsParameterXML{}})
+
 	default:
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
 			fmt.Errorf("RDS action %q not yet implemented in fakeaws v1: %w", req.Action, models.ErrNotFound))
 	}
+}
+
+type rdsTagXML struct {
+	Key   string `xml:"Key"`
+	Value string `xml:"Value"`
+}
+
+type rdsListTagsResult struct {
+	TagList []rdsTagXML `xml:"TagList>Tag"`
+}
+
+type rdsParameterXML struct {
+	ParameterName  string `xml:"ParameterName"`
+	ParameterValue string `xml:"ParameterValue"`
+}
+
+type rdsDescribeDBParametersResult struct {
+	Parameters []rdsParameterXML `xml:"Parameters>Parameter"`
 }
 
 // ----- DB Subnet Group -----
@@ -397,17 +430,53 @@ func (app *Application) rdsDeleteDBCluster(w http.ResponseWriter, account, regio
 
 // ----- DB Instance -----
 
+// rdsInstanceXML mirrors the real DescribeDBInstances/Member.DBInstance
+// shape closely enough that terraform-provider-aws's aws_db_instance
+// Read flow can populate state without errors. Without endpoint /
+// allocated storage / master username / availability zone /
+// preferred-backup-window / engine-version / port / etc., the provider
+// treats the read as a "root object was present, but now absent"
+// drift and bails the apply.
 type rdsInstanceXML struct {
-	DBInstanceIdentifier      string `xml:"DBInstanceIdentifier"`
-	Engine                    string `xml:"Engine"`
-	EngineVersion             string `xml:"EngineVersion,omitempty"`
-	DBInstanceClass           string `xml:"DBInstanceClass"`
-	DBInstanceStatus          string `xml:"DBInstanceStatus"`
-	DBSubnetGroup             *rdsSubnetGroupXML `xml:"DBSubnetGroup,omitempty"`
-	DBClusterIdentifier       string `xml:"DBClusterIdentifier,omitempty"`
-	ReadReplicaSourceDBInstanceIdentifier string `xml:"ReadReplicaSourceDBInstanceIdentifier,omitempty"`
-	DeletionProtection        bool   `xml:"DeletionProtection"`
-	DBInstanceArn             string `xml:"DBInstanceArn"`
+	DBInstanceIdentifier                  string             `xml:"DBInstanceIdentifier"`
+	DBInstanceClass                       string             `xml:"DBInstanceClass"`
+	Engine                                string             `xml:"Engine"`
+	EngineVersion                         string             `xml:"EngineVersion,omitempty"`
+	DBInstanceStatus                      string             `xml:"DBInstanceStatus"`
+	MasterUsername                        string             `xml:"MasterUsername,omitempty"`
+	DBName                                string             `xml:"DBName,omitempty"`
+	Endpoint                              *rdsEndpointXML    `xml:"Endpoint,omitempty"`
+	AllocatedStorage                      int                `xml:"AllocatedStorage"`
+	StorageType                           string             `xml:"StorageType,omitempty"`
+	StorageEncrypted                      bool               `xml:"StorageEncrypted"`
+	InstanceCreateTime                    string             `xml:"InstanceCreateTime,omitempty"`
+	PreferredBackupWindow                 string             `xml:"PreferredBackupWindow,omitempty"`
+	BackupRetentionPeriod                 int                `xml:"BackupRetentionPeriod"`
+	PreferredMaintenanceWindow            string             `xml:"PreferredMaintenanceWindow,omitempty"`
+	MultiAZ                               bool               `xml:"MultiAZ"`
+	AvailabilityZone                      string             `xml:"AvailabilityZone,omitempty"`
+	PubliclyAccessible                    bool               `xml:"PubliclyAccessible"`
+	AutoMinorVersionUpgrade               bool               `xml:"AutoMinorVersionUpgrade"`
+	LicenseModel                          string             `xml:"LicenseModel,omitempty"`
+	DbiResourceId                         string             `xml:"DbiResourceId,omitempty"`
+	CACertificateIdentifier               string             `xml:"CACertificateIdentifier,omitempty"`
+	CopyTagsToSnapshot                    bool               `xml:"CopyTagsToSnapshot"`
+	IAMDatabaseAuthenticationEnabled      bool               `xml:"IAMDatabaseAuthenticationEnabled"`
+	PerformanceInsightsEnabled            bool               `xml:"PerformanceInsightsEnabled"`
+	DeletionProtection                    bool               `xml:"DeletionProtection"`
+	DBSubnetGroup                         *rdsSubnetGroupXML `xml:"DBSubnetGroup,omitempty"`
+	DBClusterIdentifier                   string             `xml:"DBClusterIdentifier,omitempty"`
+	ReadReplicaSourceDBInstanceIdentifier string             `xml:"ReadReplicaSourceDBInstanceIdentifier,omitempty"`
+	DBInstanceArn                         string             `xml:"DBInstanceArn"`
+}
+
+// rdsEndpointXML mirrors the DescribeDBInstances Endpoint sub-object.
+// Provider reads Address+Port to populate the aws_db_instance.endpoint
+// computed attribute; missing it makes the apply fail post-create.
+type rdsEndpointXML struct {
+	Address      string `xml:"Address"`
+	Port         int    `xml:"Port"`
+	HostedZoneId string `xml:"HostedZoneId,omitempty"`
 }
 
 type rdsCreateInstanceResult struct {
@@ -420,15 +489,41 @@ type rdsDescribeInstancesResult struct {
 
 func (app *Application) rdsInstanceToXML(account string, inst *repository.RDSInstance) rdsInstanceXML {
 	x := rdsInstanceXML{
-		DBInstanceIdentifier: inst.ID,
+		DBInstanceIdentifier:                  inst.ID,
 		Engine:                                inst.Engine,
 		EngineVersion:                         inst.EngineVersion,
 		DBInstanceClass:                       inst.InstanceClass,
 		DBInstanceStatus:                      inst.State,
+		// MasterUsername / AllocatedStorage / StorageEncrypted aren't
+		// persisted in repository.RDSInstance yet — synthesize stable
+		// values so the provider's Read flow has something non-nil.
+		// Persisting them properly is a separate fakeaws ticket.
+		MasterUsername:                        "fakeaws",
+		AllocatedStorage:                      20,
+		StorageType:                           "gp2",
+		StorageEncrypted:                      true,
+		InstanceCreateTime:                    inst.CreatedAt,
+		PreferredBackupWindow:                 "07:00-08:00",
+		BackupRetentionPeriod:                 0,
+		PreferredMaintenanceWindow:            "sun:08:00-sun:09:00",
+		MultiAZ:                               false,
+		AvailabilityZone:                      inst.Region + "a",
+		PubliclyAccessible:                    false,
+		AutoMinorVersionUpgrade:               true,
+		LicenseModel:                          "postgresql-license",
+		DbiResourceId:                         "db-" + inst.ID,
+		CACertificateIdentifier:               "rds-ca-rsa2048-g1",
+		CopyTagsToSnapshot:                    false,
+		IAMDatabaseAuthenticationEnabled:      false,
+		PerformanceInsightsEnabled:            false,
 		DBClusterIdentifier:                   inst.ClusterID,
 		ReadReplicaSourceDBInstanceIdentifier: inst.ReplicateSourceDB,
 		DeletionProtection:                    inst.DeletionProtection,
 		DBInstanceArn:                         inst.ARN,
+		Endpoint: &rdsEndpointXML{
+			Address: fmt.Sprintf("%s.fakeaws.local", inst.ID),
+			Port:    5432,
+		},
 	}
 	if inst.SubnetGroupName != "" {
 		if sg, err := app.repo.GetDBSubnetGroup(account, inst.Region, inst.SubnetGroupName); err == nil {
