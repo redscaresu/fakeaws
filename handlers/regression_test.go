@@ -112,9 +112,9 @@ func TestRegressionRelativePathWrongCollectionRejection(t *testing.T) {
 	// not a subnet id. Must reject — handler must validate via
 	// GetSubnet, not lazy trailing-name match.
 	resp, _ := ec2PostRegression(t, srv, region, "RunInstances", url.Values{
-		"SubnetId":          {sgID}, // wrong-collection ref
-		"ImageId":           {"ami-0abcd1234"},
-		"InstanceType":      {"t3.micro"},
+		"SubnetId":     {sgID}, // wrong-collection ref
+		"ImageId":      {"ami-0abcd1234"},
+		"InstanceType": {"t3.micro"},
 	})
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("wrong-collection ref (sg id where subnet id expected): got %d, want 404", resp.StatusCode)
@@ -178,10 +178,10 @@ func TestRegressionPostMergePATCHValidation(t *testing.T) {
 	srv := newTestServerForRegression(t)
 	const region = "us-east-1"
 	resp, body := ec2PostRegression(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{
-		"GroupId":                          {"sg-missing"},
-		"IpPermissions.1.IpProtocol":       {"tcp"},
-		"IpPermissions.1.FromPort":         {"443"},
-		"IpPermissions.1.ToPort":           {"443"},
+		"GroupId":                           {"sg-missing"},
+		"IpPermissions.1.IpProtocol":        {"tcp"},
+		"IpPermissions.1.FromPort":          {"443"},
+		"IpPermissions.1.ToPort":            {"443"},
 		"IpPermissions.1.IpRanges.1.CidrIp": {"0.0.0.0/0"},
 	})
 	if resp.StatusCode != http.StatusNotFound {
@@ -267,7 +267,10 @@ func TestRegressionCacheBaselineLifecycle(t *testing.T) {
 			strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/x-amz-json-1.0")
 		req.Header.Set("X-Amz-Target", target)
-		resp, _ := srv.Client().Do(req)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("post %s: %v", target, err)
+		}
 		defer resp.Body.Close()
 		out := readResponseBody(t, resp)
 		return resp, out
@@ -541,10 +544,10 @@ func TestRegressionSQLColumnJSONBlobSyncOnUpdate(t *testing.T) {
 	sgID := xmlExtract(body, "groupId")
 
 	resp, _ := ec2PostRegression(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{
-		"GroupId":                          {sgID},
-		"IpPermissions.1.IpProtocol":       {"tcp"},
-		"IpPermissions.1.FromPort":         {"22"},
-		"IpPermissions.1.ToPort":           {"22"},
+		"GroupId":                           {sgID},
+		"IpPermissions.1.IpProtocol":        {"tcp"},
+		"IpPermissions.1.FromPort":          {"22"},
+		"IpPermissions.1.ToPort":            {"22"},
 		"IpPermissions.1.IpRanges.1.CidrIp": {"10.0.0.0/8"},
 	})
 	if resp.StatusCode != http.StatusOK {
