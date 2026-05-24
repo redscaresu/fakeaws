@@ -71,6 +71,22 @@ fakeaws/
   `examples/{working,misconfigured,updates}/` registers it for the
   smoke gate (S43-T12). No per-service smoke ticket.
 
+## Provider-wait-state-machine debugging (M61/M62 lessons)
+
+terraform-provider-aws's create/destroy waits poll a `Describe*` endpoint until the resource transitions into/out of a target state. When fakeaws returns the wrong error code or wrong response shape, the wait either loops until timeout ("couldn't find resource" / "Still creating...") or bubbles a fatal error. Three patterns recur:
+
+1. **Service-specific 404 codes are required**, not the generic `ResourceNotFoundException`. The SDK's `errors.As` path checks the typed AWS exception (e.g. `DBInstanceNotFound`, `DBSubnetGroupNotFoundFault`, `SecretNotFoundException`). Use `awsproto.WriteServiceError(w, shape, status, code, message)` to emit the typed code; reserve `awsproto.WriteAWSError` for generic sentinels. The generic code passes through tests but fails real provider waits.
+
+2. **Delete response shape matters**: the SDK deserialises the delete result and errors with "node not found, failed to decode response body" on nil payloads. Real AWS returns the resource snapshot in a deleting/pending-deletion state — mirror that. Example: `<DeleteDBInstanceResult><DBInstance>...status=deleting...</DBInstance></...>` (M61).
+
+3. **Lookup keys can be derivative or filter-shaped**, not just the user identifier. terraform-provider-aws hands ARNs back as `SecretId` on Secrets Manager refreshes (so the repo must accept both name and ARN via `WHERE name = ? OR arn = ?` — M62). RDS uses the create-response `DbiResourceId` as a filter (`Filters.Filter.N.Name=dbi-resource-id&Filters.Filter.N.Values.Value.M=<id>`), so `DbiResourceId` must NOT be derived from the identifier (collisions break the filter); SHA-1-hash the identifier into `db-<16hex>` for stability without collision (M61).
+
+**Debugging recipe**: when an apply hangs at "Still creating" or destroy errors on a wait, run with `TF_LOG=DEBUG tofu apply 2>&1 | grep -E "Action=|<error" | head -30` and trace the exact Describe* request the provider's wait makes — that's the response shape you need to match.
+
+## JSON timestamp gotcha
+
+AWS's JSON-1.1 services (Secrets Manager, DynamoDB) encode date fields as **JSON numbers** (seconds-since-epoch as float). Returning RFC3339 strings errors the SDK with `expected DateType to be a JSON Number, got string`. Use the `secretEpoch` / equivalent helper to convert. Spotted in M62; applies to any new JSON-1.1 handler.
+
 ## Anti-patterns explicitly forbidden
 
 Lifted from mockway's 14-bug catalogue (concepts.md § "Anti-patterns: the
