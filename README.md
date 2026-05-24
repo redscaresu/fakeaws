@@ -58,6 +58,16 @@ make build && ./fakeaws --port 8082 --db :memory:
 ./fakeaws --port 8082 --echo
 ```
 
+### Docker
+
+Pre-built multi-arch images are published to GitHub Container Registry on every push to `main`:
+
+```bash
+docker run --rm -p 8082:8082 ghcr.io/redscaresu/fakeaws:latest --port 8082
+```
+
+The Dockerfile in the repo root produces a `~15MB` static image (multi-stage build from `golang:1.25-alpine`).
+
 ## Provider version pin
 
 This mock targets `hashicorp/aws ~> 5.70`. Bumps require an explicit PR
@@ -65,6 +75,40 @@ that updates this README, every `examples/*/required_providers` block,
 every `prompts/aws/*.md` template, and the e2e harness's provider
 config — together. Single source of truth for the constraint string is
 `coverage_matrix.yaml`'s header comment.
+
+## API compatibility
+
+The point of fakeaws is to be wire-shape compatible with the real `hashicorp/aws` provider — every byte the provider sends or expects to receive must match what real AWS would do, or the provider detects "drift" and the apply loop fails. Three guardrails enforce this; they're identical across [`mockway`](https://github.com/redscaresu/mockway) (Scaleway), [`fakegcp`](https://github.com/redscaresu/fakegcp) (GCP), and [`fakeaws`](https://github.com/redscaresu/fakeaws) (AWS).
+
+### 1. Three example trees, auto-discovered
+
+Every directory under `examples/` is an executable contract against a real Terraform/OpenTofu provider:
+
+| Tree | Contract |
+|---|---|
+| `examples/working/<svc>/` | `apply → plan -detailed-exitcode 0 → destroy` — second plan MUST be a no-op |
+| `examples/misconfigured/<svc>/` | `apply` MUST fail with the documented AWS error code; if `expected.txt` is present, the error output MUST contain that fragment |
+| `examples/updates/<svc>/` | `apply -var-file=v1.tfvars → plan no-op → apply -var-file=v2.tfvars → plan no-op → destroy` |
+
+`examples/provider_smoke_test.go` walks the three trees with `runtime.Caller` and registers each subdirectory as its own `t.Run` sub-test. Adding a directory adds a test — no per-example test wiring. The harness assumes a fakeaws server is reachable at `FAKEAWS_URL` (default `http://127.0.0.1:8082`); CI runs it after `make fakeaws-up` from the infrafactory Makefile.
+
+The **idempotency gate** (`plan -detailed-exitcode 0`) is the strongest compatibility signal: if fakeaws returns a single field with the wrong case, type, or default, the provider sees drift on the second plan and the test fails. Wire-shape parity across the nine S43–S48 services (S3, IAM, EC2, VPC, RDS, DynamoDB, SQS, Route53, Secrets Manager) was closed by the 17-pass codex review loop driving this gate.
+
+### 2. No allowlist — every example must pass
+
+mockway and fakegcp use an `examples/known_broken.yaml` ratchet for examples whose idempotency gate is currently expected to fail. fakeaws does not: the S43–S48 codex review loop closed at pass 17 with zero allowlist entries, so the smoke harness enforces the working-tree contract strictly. Any new example that drifts must be fixed before merge, not allowlisted. If a regression batch ever needs an allowlist, copy the pattern from `fakegcp/examples/provider_smoke_test.go` (ratchet-only-tighten: entries can only be REMOVED).
+
+### 3. Cross-repo e2e from infrafactory
+
+[`infrafactory`](https://github.com/redscaresu/infrafactory) builds fakeaws from this source tree on a free port for every gated AWS e2e test (`TestE2E_AWS*` in `internal/e2e/`, gated by `INFRAFACTORY_ENABLE_E2E=1`). Those tests drive scenarios end-to-end through infrafactory's harness (plan → mock-apply → topology derivation → destroy), so a compatibility regression surfaces in two places: the local `INFRAFACTORY_ENABLE_E2E=1 go test ./examples/...` and the upstream infrafactory CI.
+
+### Adding coverage for a new resource
+
+1. Add an `examples/working/<svc>/` directory with `providers.tf` + `main.tf`.
+2. Run `INFRAFACTORY_ENABLE_E2E=1 go test ./examples/...` — auto-discovery picks it up.
+3. If it drifts: either fix the handler, or (if the fix is non-trivial) add a `known_broken.yaml` entry pointing at a new BACKLOG ticket.
+4. Mirror with `examples/misconfigured/<svc>/` (FK / validation paths) and `examples/updates/<svc>/` (update paths) as the service warrants.
+5. Add a `TestE2E_AWS<Svc>` in infrafactory's `internal/e2e/aws_services_test.go` so the cross-repo gate covers the scenario flow too.
 
 ## Documentation
 
