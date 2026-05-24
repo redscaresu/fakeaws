@@ -718,21 +718,13 @@ type iamListAttachedRolePoliciesResult struct {
 // real IAM behavior: 404 ResourceNotFoundException when the role is
 // missing, otherwise an empty PolicyNames list (no inline-policy
 // storage in fakeaws yet — separate handler when needed).
-//
-// XML is written inline (not via WriteQueryRPCResponse + typed struct)
-// because xml.Encoder always wraps a struct in its type name, which
-// would emit a stray <iamListRolePoliciesResult> element inside
-// <ListRolePoliciesResult>. The AWS provider tolerates this wrapping
-// for ListAttachedRolePolicies (empty list) but crashes the gRPC plugin
-// for ListRolePolicies. Manual XML matches the wire shape the
-// provider's parser expects.
 func (app *Application) iamListRolePolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("RoleName")
 	if _, err := app.repo.GetRole(account, name); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	writeIAMListInline(w, "ListRolePolicies", "<PolicyNames/>\n    <IsTruncated>false</IsTruncated>")
+	awsproto.WriteQueryRPCResponse(w, "ListRolePolicies", &iamListRolePoliciesResult{PolicyNames: []string{}})
 }
 
 // iamListRoleTags mirrors ListRolePolicies: provider Read calls it
@@ -744,7 +736,7 @@ func (app *Application) iamListRoleTags(w http.ResponseWriter, account string, r
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	writeIAMListInline(w, "ListRoleTags", "<Tags/>\n    <IsTruncated>false</IsTruncated>")
+	awsproto.WriteQueryRPCResponse(w, "ListRoleTags", &iamListRoleTagsResult{Tags: []iamTagXML{}})
 }
 
 // iamListInstanceProfilesForRole is called by terraform-provider-aws
@@ -760,25 +752,27 @@ func (app *Application) iamListInstanceProfilesForRole(w http.ResponseWriter, ac
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	writeIAMListInline(w, "ListInstanceProfilesForRole", "<InstanceProfiles/>\n    <IsTruncated>false</IsTruncated>")
+	awsproto.WriteQueryRPCResponse(w, "ListInstanceProfilesForRole", &iamListInstanceProfilesForRoleResult{InstanceProfiles: []iamInstanceProfileXML{}})
 }
 
-// writeIAMListInline writes an empty IAM List* response with the
-// inner-result body emitted verbatim (matching the wire shape the AWS
-// provider expects, avoiding the xml.Encoder type-wrapper issue).
-func writeIAMListInline(w http.ResponseWriter, action, innerXML string) {
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
-<%[1]sResponse>
-  <%[1]sResult>
-    %[2]s
-  </%[1]sResult>
-  <ResponseMetadata>
-    <RequestId>fakeaws-synthetic</RequestId>
-  </ResponseMetadata>
-</%[1]sResponse>
-`, action, innerXML)
+type iamListRolePoliciesResult struct {
+	PolicyNames []string `xml:"PolicyNames>member"`
+	IsTruncated bool     `xml:"IsTruncated"`
+}
+
+type iamTagXML struct {
+	Key   string `xml:"Key"`
+	Value string `xml:"Value"`
+}
+
+type iamListRoleTagsResult struct {
+	Tags        []iamTagXML `xml:"Tags>member"`
+	IsTruncated bool        `xml:"IsTruncated"`
+}
+
+type iamListInstanceProfilesForRoleResult struct {
+	InstanceProfiles []iamInstanceProfileXML `xml:"InstanceProfiles>member"`
+	IsTruncated      bool                    `xml:"IsTruncated"`
 }
 
 // ----- helpers -----

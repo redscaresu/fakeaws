@@ -46,6 +46,10 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 		app.ec2CreateVpc(w, account, region, req)
 	case "DescribeVpcs":
 		app.ec2DescribeVpcs(w, account, region, req)
+	case "DescribeVpcAttribute":
+		app.ec2DescribeVpcAttribute(w, account, region, req)
+	case "ModifyVpcAttribute":
+		app.ec2ModifyVpcAttribute(w, account, region, req)
 	case "DeleteVpc":
 		app.ec2DeleteVpc(w, account, region, req)
 
@@ -201,7 +205,7 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 		return
 	}
 	out := ec2CreateVpcResult{Vpc: ec2VpcToXML(v)}
-	awsproto.WriteQueryRPCResponse(w, "CreateVpc", &out)
+	awsproto.WriteEC2QueryRPCResponse(w, "CreateVpc", &out)
 }
 
 func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -214,7 +218,57 @@ func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region s
 	for _, v := range vpcs {
 		out.VpcSet = append(out.VpcSet, ec2VpcToXML(v))
 	}
-	awsproto.WriteQueryRPCResponse(w, "DescribeVpcs", &out)
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeVpcs", &out)
+}
+
+// ec2DescribeVpcAttribute models the real EC2 API: caller specifies
+// one attribute (enableDnsHostnames / enableDnsSupport / etc.) via
+// the `Attribute` parameter, response returns just that attribute's
+// boolean value. terraform-provider-aws calls this twice as part of
+// the aws_vpc Read flow (once per attribute) after CreateVpc.
+//
+// fakeaws doesn't persist per-VPC DNS settings; both attributes
+// default to true (matching the AWS default for non-default VPCs).
+func (app *Application) ec2DescribeVpcAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if _, err := app.repo.GetVPC(account, region, req.Params.Get("VpcId")); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	attr := req.Params.Get("Attribute")
+	out := ec2DescribeVpcAttributeResult{VpcId: req.Params.Get("VpcId")}
+	switch attr {
+	case "enableDnsSupport":
+		out.EnableDnsSupport = &ec2BoolValue{Value: true}
+	case "enableDnsHostnames":
+		out.EnableDnsHostnames = &ec2BoolValue{Value: true}
+	case "enableNetworkAddressUsageMetrics":
+		out.EnableNetworkAddressUsageMetrics = &ec2BoolValue{Value: false}
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeVpcAttribute", &out)
+}
+
+// ec2ModifyVpcAttribute accepts the provider's writes to DNS / hostname
+// flags but doesn't persist them — fakeaws returns the same defaults
+// from ec2DescribeVpcAttribute regardless. Accepts (silently) so the
+// provider's apply doesn't error; revisit when a scenario actually
+// depends on the persisted value.
+func (app *Application) ec2ModifyVpcAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if _, err := app.repo.GetVPC(account, region, req.Params.Get("VpcId")); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "ModifyVpcAttribute", nil)
+}
+
+type ec2DescribeVpcAttributeResult struct {
+	VpcId                            string        `xml:"vpcId"`
+	EnableDnsSupport                 *ec2BoolValue `xml:"enableDnsSupport,omitempty"`
+	EnableDnsHostnames               *ec2BoolValue `xml:"enableDnsHostnames,omitempty"`
+	EnableNetworkAddressUsageMetrics *ec2BoolValue `xml:"enableNetworkAddressUsageMetrics,omitempty"`
+}
+
+type ec2BoolValue struct {
+	Value bool `xml:"value"`
 }
 
 func (app *Application) ec2DeleteVpc(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -222,7 +276,7 @@ func (app *Application) ec2DeleteVpc(w http.ResponseWriter, account, region stri
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "DeleteVpc", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "DeleteVpc", nil)
 }
 
 // ----- Subnet handlers -----
@@ -262,7 +316,7 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 		return
 	}
 	out := ec2CreateSubnetResult{Subnet: ec2SubnetToXML(s)}
-	awsproto.WriteQueryRPCResponse(w, "CreateSubnet", &out)
+	awsproto.WriteEC2QueryRPCResponse(w, "CreateSubnet", &out)
 }
 
 func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -287,7 +341,7 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 	for _, s := range subnets {
 		out.SubnetSet = append(out.SubnetSet, ec2SubnetToXML(s))
 	}
-	awsproto.WriteQueryRPCResponse(w, "DescribeSubnets", &out)
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeSubnets", &out)
 }
 
 func (app *Application) ec2DeleteSubnet(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -295,7 +349,7 @@ func (app *Application) ec2DeleteSubnet(w http.ResponseWriter, account, region s
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "DeleteSubnet", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "DeleteSubnet", nil)
 }
 
 // ----- helpers -----
@@ -389,7 +443,7 @@ func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account,
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "CreateInternetGateway", &ec2CreateIgwResult{InternetGateway: ec2IgwToXML(igw)})
+	awsproto.WriteEC2QueryRPCResponse(w, "CreateInternetGateway", &ec2CreateIgwResult{InternetGateway: ec2IgwToXML(igw)})
 }
 
 func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -402,7 +456,7 @@ func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, accou
 	for _, igw := range igws {
 		out.InternetGatewaySet = append(out.InternetGatewaySet, ec2IgwToXML(igw))
 	}
-	awsproto.WriteQueryRPCResponse(w, "DescribeInternetGateways", &out)
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInternetGateways", &out)
 }
 
 func (app *Application) ec2AttachInternetGateway(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -417,7 +471,7 @@ func (app *Application) ec2AttachInternetGateway(w http.ResponseWriter, account,
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "AttachInternetGateway", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "AttachInternetGateway", nil)
 }
 
 func (app *Application) ec2DetachInternetGateway(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -425,7 +479,7 @@ func (app *Application) ec2DetachInternetGateway(w http.ResponseWriter, account,
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "DetachInternetGateway", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "DetachInternetGateway", nil)
 }
 
 func (app *Application) ec2DeleteInternetGateway(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -433,7 +487,7 @@ func (app *Application) ec2DeleteInternetGateway(w http.ResponseWriter, account,
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "DeleteInternetGateway", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "DeleteInternetGateway", nil)
 }
 
 // ----- RouteTable + Route handlers -----
@@ -472,7 +526,7 @@ func (app *Application) ec2CreateRouteTable(w http.ResponseWriter, account, regi
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "CreateRouteTable",
+	awsproto.WriteEC2QueryRPCResponse(w, "CreateRouteTable",
 		&ec2CreateRouteTableResult{RouteTable: ec2RouteTableXML{RouteTableId: rt.ID, VpcId: rt.VPCID}})
 }
 
@@ -481,7 +535,7 @@ func (app *Application) ec2DeleteRouteTable(w http.ResponseWriter, account, regi
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "DeleteRouteTable", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "DeleteRouteTable", nil)
 }
 
 func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -499,7 +553,7 @@ func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account, r
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "AssociateRouteTable",
+	awsproto.WriteEC2QueryRPCResponse(w, "AssociateRouteTable",
 		&ec2AssociateRouteTableResult{AssociationId: assoc.ID})
 }
 
@@ -508,7 +562,7 @@ func (app *Application) ec2DisassociateRouteTable(w http.ResponseWriter, account
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "DisassociateRouteTable", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "DisassociateRouteTable", nil)
 }
 
 func (app *Application) ec2CreateRoute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -529,7 +583,7 @@ func (app *Application) ec2CreateRoute(w http.ResponseWriter, account, region st
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "CreateRoute", &ec2CreateRouteResult{Return: true})
+	awsproto.WriteEC2QueryRPCResponse(w, "CreateRoute", &ec2CreateRouteResult{Return: true})
 }
 
 func (app *Application) ec2DeleteRoute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -538,7 +592,7 @@ func (app *Application) ec2DeleteRoute(w http.ResponseWriter, account, region st
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "DeleteRoute", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "DeleteRoute", nil)
 }
 
 // ----- EIP handlers -----
@@ -594,7 +648,7 @@ func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, regio
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "AllocateAddress",
+	awsproto.WriteEC2QueryRPCResponse(w, "AllocateAddress",
 		&ec2AllocateAddressResult{AllocationId: eip.AllocationID, PublicIp: eip.PublicIP, Domain: eip.Domain})
 }
 
@@ -610,7 +664,7 @@ func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, reg
 	if len(wanted) == 0 {
 		// No filter — describe nothing (full list scan deferred; AWS
 		// provider's import path always supplies the AllocationId).
-		awsproto.WriteQueryRPCResponse(w, "DescribeAddresses", &out)
+		awsproto.WriteEC2QueryRPCResponse(w, "DescribeAddresses", &out)
 		return
 	}
 	for id := range wanted {
@@ -623,7 +677,7 @@ func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, reg
 			AllocationId: eip.AllocationID, PublicIp: eip.PublicIP, Domain: eip.Domain,
 		})
 	}
-	awsproto.WriteQueryRPCResponse(w, "DescribeAddresses", &out)
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeAddresses", &out)
 }
 
 func (app *Application) ec2ReleaseAddress(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -631,7 +685,7 @@ func (app *Application) ec2ReleaseAddress(w http.ResponseWriter, account, region
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "ReleaseAddress", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "ReleaseAddress", nil)
 }
 
 // ----- SecurityGroup handlers -----
@@ -777,7 +831,7 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "CreateSecurityGroup",
+	awsproto.WriteEC2QueryRPCResponse(w, "CreateSecurityGroup",
 		&ec2CreateSecurityGroupResult{GroupId: sg.ID})
 }
 
@@ -812,7 +866,7 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 			IpPermsEgress: ec2SgRulesToXML(eg),
 		})
 	}
-	awsproto.WriteQueryRPCResponse(w, "DescribeSecurityGroups", &out)
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeSecurityGroups", &out)
 }
 
 func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -827,7 +881,7 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, r
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "DeleteSecurityGroup", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "DeleteSecurityGroup", nil)
 }
 
 // ec2AuthorizeSecurityGroupRules adds the parsed IpPermissions to the
@@ -862,7 +916,7 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 	if direction == "egress" {
 		action = "AuthorizeSecurityGroupEgress"
 	}
-	awsproto.WriteQueryRPCResponse(w, action, nil)
+	awsproto.WriteEC2QueryRPCResponse(w, action, nil)
 }
 
 func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
@@ -888,7 +942,7 @@ func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, accou
 	if direction == "egress" {
 		action = "RevokeSecurityGroupEgress"
 	}
-	awsproto.WriteQueryRPCResponse(w, action, nil)
+	awsproto.WriteEC2QueryRPCResponse(w, action, nil)
 }
 
 func loadSGRules(app *Application, account, region, id, direction string) ([]ec2IpPermission, error) {
@@ -1123,7 +1177,7 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "RunInstances", &ec2RunInstancesResult{
+	awsproto.WriteEC2QueryRPCResponse(w, "RunInstances", &ec2RunInstancesResult{
 		Reservation: "r-" + ec2RandID(),
 		OwnerId:     awsproto.FakeAccountID,
 		InstancesSet: []ec2InstanceXML{app.ec2InstanceToXML(account, inst)},
@@ -1163,7 +1217,7 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 			InstancesSet:  []ec2InstanceXML{app.ec2InstanceToXML(account, inst)},
 		})
 	}
-	awsproto.WriteQueryRPCResponse(w, "DescribeInstances", &out)
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInstances", &out)
 }
 
 // ec2ModifyInstanceAttribute is intentionally minimal at v1 — the
@@ -1184,7 +1238,7 @@ func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, accoun
 	}
 	// Existence check is enough at v1 — the fixture state suffices for
 	// terraform-provider-aws's expected refresh pattern.
-	awsproto.WriteQueryRPCResponse(w, "ModifyInstanceAttribute", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "ModifyInstanceAttribute", nil)
 }
 
 func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -1224,7 +1278,7 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, re
 			PreviousState: ec2InstanceStateForName(previous),
 		})
 	}
-	awsproto.WriteQueryRPCResponse(w, "TerminateInstances", &out)
+	awsproto.WriteEC2QueryRPCResponse(w, "TerminateInstances", &out)
 }
 
 // ----- KeyPair handlers -----
@@ -1274,7 +1328,7 @@ func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region 
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "ImportKeyPair",
+	awsproto.WriteEC2QueryRPCResponse(w, "ImportKeyPair",
 		&ec2ImportKeyPairResult{KeyName: name, KeyFingerprint: fp})
 }
 
@@ -1307,7 +1361,7 @@ func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, regi
 			out.KeySet = append(out.KeySet, ec2KeyPairXML{KeyName: kp.Name, KeyFingerprint: kp.Fingerprint})
 		}
 	}
-	awsproto.WriteQueryRPCResponse(w, "DescribeKeyPairs", &out)
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeKeyPairs", &out)
 }
 
 func (app *Application) ec2DeleteKeyPair(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -1315,7 +1369,7 @@ func (app *Application) ec2DeleteKeyPair(w http.ResponseWriter, account, region 
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "DeleteKeyPair", nil)
+	awsproto.WriteEC2QueryRPCResponse(w, "DeleteKeyPair", nil)
 }
 
 // ----- AMI (read-only fixture) handlers -----
@@ -1367,7 +1421,7 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 			out.ImagesSet = append(out.ImagesSet, ec2AMIToXML(a))
 		}
 	}
-	awsproto.WriteQueryRPCResponse(w, "DescribeImages", &out)
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeImages", &out)
 }
 
 func ec2AMIToXML(a *repository.EC2AMI) ec2ImageXML {
