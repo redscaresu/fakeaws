@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +15,19 @@ import (
 	"github.com/redscaresu/fakeaws/models"
 	"github.com/redscaresu/fakeaws/repository"
 )
+
+// dbiResourceIDFor synthesises a stable RDS DbiResourceId from an
+// instance identifier. Real AWS DbiResourceId is a random 21-char
+// "db-<hex>" string with no relationship to the user-given
+// DBInstanceIdentifier; terraform-provider-aws's Read flow uses it
+// as a lookup key in some Describe* paths, so it MUST NOT be derived
+// in a way that collides with the identifier. We hash the ID and
+// take the first 16 hex chars after the "db-" prefix — stable
+// across reads, visibly distinct from any plausible user identifier.
+func dbiResourceIDFor(instanceID string) string {
+	h := sha1.Sum([]byte(instanceID))
+	return "db-" + strings.ToUpper(hex.EncodeToString(h[:])[:16])
+}
 
 // RDS dispatcher. Per fakeaws/PLAN.md § "Phase 3 — Stateful data":
 // RDS routes at POST /rds/region/<region>. Same Query-RPC family
@@ -186,7 +202,13 @@ func (app *Application) rdsDescribeDBSubnetGroups(w http.ResponseWriter, account
 	if name != "" {
 		sg, err := app.repo.GetDBSubnetGroup(account, region, name)
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			// Service-specific 404 code so terraform-provider-aws's
+			// destroy-wait recognises "subnet group is gone" as a
+			// successful deletion. The generic ResourceNotFoundException
+			// bubbles out of the wait state machine as a fatal error.
+			awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
+				"DBSubnetGroupNotFoundFault",
+				fmt.Sprintf("DBSubnetGroup %s not found.", name))
 			return
 		}
 		out.DBSubnetGroups = append(out.DBSubnetGroups, rdsSubnetGroupToXML(sg))
@@ -267,7 +289,9 @@ func (app *Application) rdsDescribeDBParameterGroups(w http.ResponseWriter, acco
 	if name != "" {
 		pg, err := app.repo.GetDBParameterGroup(account, region, name)
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
+				"DBParameterGroupNotFound",
+				fmt.Sprintf("DBParameterGroup %s not found.", name))
 			return
 		}
 		out.DBParameterGroups = append(out.DBParameterGroups, rdsParamGroupXML{
@@ -321,7 +345,9 @@ func (app *Application) rdsDescribeDBClusterParameterGroups(w http.ResponseWrite
 	if name != "" {
 		pg, err := app.repo.GetDBClusterParameterGroup(account, region, name)
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
+				"DBParameterGroupNotFound",
+				fmt.Sprintf("DBClusterParameterGroup %s not found.", name))
 			return
 		}
 		out.DBClusterParameterGroups = append(out.DBClusterParameterGroups, rdsClusterParamGroupXML{
@@ -412,7 +438,9 @@ func (app *Application) rdsDescribeDBClusters(w http.ResponseWriter, account, re
 	if id != "" {
 		c, err := app.repo.GetDBCluster(account, region, id)
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
+				"DBClusterNotFoundFault",
+				fmt.Sprintf("DBCluster %s not found.", id))
 			return
 		}
 		out.DBClusters = append(out.DBClusters, rdsClusterToXML(c))
@@ -488,30 +516,61 @@ type rdsDescribeInstancesResult struct {
 }
 
 func (app *Application) rdsInstanceToXML(account string, inst *repository.RDSInstance) rdsInstanceXML {
+	// Echo persisted values; fall back to safe defaults only when
+	// the user didn't supply them. Hard-coding any field that the
+	// HCL also sets forces terraform-provider-aws to detect drift
+	// on plan and trigger a replacement (e.g. before this change
+	// MasterUsername was always "fakeaws" → plan showed
+	// `username "fakeaws" -> "appuser" # forces replacement`).
+	masterUser := inst.MasterUsername
+	if masterUser == "" {
+		masterUser = "fakeaws"
+	}
+	allocated := inst.AllocatedStorage
+	if allocated == 0 {
+		allocated = 20
+	}
+	storageType := inst.StorageType
+	if storageType == "" {
+		storageType = "gp2"
+	}
+	port := inst.Port
+	if port == 0 {
+		port = 5432
+	}
 	x := rdsInstanceXML{
 		DBInstanceIdentifier:                  inst.ID,
 		Engine:                                inst.Engine,
 		EngineVersion:                         inst.EngineVersion,
 		DBInstanceClass:                       inst.InstanceClass,
 		DBInstanceStatus:                      inst.State,
-		// MasterUsername / AllocatedStorage / StorageEncrypted aren't
-		// persisted in repository.RDSInstance yet — synthesize stable
-		// values so the provider's Read flow has something non-nil.
-		// Persisting them properly is a separate fakeaws ticket.
-		MasterUsername:                        "fakeaws",
-		AllocatedStorage:                      20,
-		StorageType:                           "gp2",
-		StorageEncrypted:                      true,
+		MasterUsername:                        masterUser,
+		AllocatedStorage:                      allocated,
+		StorageType:                           storageType,
+		StorageEncrypted:                      inst.StorageEncrypted,
 		InstanceCreateTime:                    inst.CreatedAt,
 		PreferredBackupWindow:                 "07:00-08:00",
-		BackupRetentionPeriod:                 0,
+		BackupRetentionPeriod:                 inst.BackupRetentionPeriod,
 		PreferredMaintenanceWindow:            "sun:08:00-sun:09:00",
-		MultiAZ:                               false,
+		MultiAZ:                               inst.MultiAZ,
 		AvailabilityZone:                      inst.Region + "a",
-		PubliclyAccessible:                    false,
+		PubliclyAccessible:                    inst.PubliclyAccessible,
 		AutoMinorVersionUpgrade:               true,
 		LicenseModel:                          "postgresql-license",
-		DbiResourceId:                         "db-" + inst.ID,
+		// DbiResourceId must NOT be a derivative of DBInstanceIdentifier.
+		// terraform-provider-aws's aws_db_instance Read flow has a code
+		// path that uses DbiResourceId as a lookup key in some Describe
+		// calls. If we return e.g. "db-test-db" for an instance named
+		// "test-db", the provider issues a follow-up
+		// DescribeDBInstances?DBInstanceIdentifier=db-test-db, gets 404
+		// (because that's not the identifier), and treats the resource
+		// as gone → "reading RDS DB Instance: ResourceNotFoundException".
+		// Real AWS DbiResourceId is a random 21-char identifier
+		// (e.g. db-ABCDEFG1234567890123) with no relationship to the
+		// user-given DBInstanceIdentifier. We synthesise the same shape
+		// from the SHA-1 of the instance ID so it's stable across reads
+		// but visibly distinct from the identifier.
+		DbiResourceId: dbiResourceIDFor(inst.ID),
 		CACertificateIdentifier:               "rds-ca-rsa2048-g1",
 		CopyTagsToSnapshot:                    false,
 		IAMDatabaseAuthenticationEnabled:      false,
@@ -522,7 +581,7 @@ func (app *Application) rdsInstanceToXML(account string, inst *repository.RDSIns
 		DBInstanceArn:                         inst.ARN,
 		Endpoint: &rdsEndpointXML{
 			Address: fmt.Sprintf("%s.fakeaws.local", inst.ID),
-			Port:    5432,
+			Port:    port,
 		},
 	}
 	if inst.SubnetGroupName != "" {
@@ -555,6 +614,18 @@ func (app *Application) rdsCreateDBInstance(w http.ResponseWriter, account, regi
 		Region:              region,
 		ARN:                 awsproto.BuildRDSDBARN(region, id),
 		CreatedAt:           time.Now().UTC().Format(time.RFC3339),
+		// Persist user-supplied values so Read echoes them back
+		// verbatim — see rdsInstanceToXML's comment about plan
+		// drift / replacement.
+		MasterUsername:        req.Params.Get("MasterUsername"),
+		AllocatedStorage:      atoiOrZero(req.Params.Get("AllocatedStorage")),
+		StorageType:           req.Params.Get("StorageType"),
+		StorageEncrypted:      req.Params.Get("StorageEncrypted") == "true",
+		MultiAZ:               req.Params.Get("MultiAZ") == "true",
+		Port:                  atoiOrZero(req.Params.Get("Port")),
+		PubliclyAccessible:    req.Params.Get("PubliclyAccessible") == "true",
+		BackupRetentionPeriod: atoiOrZero(req.Params.Get("BackupRetentionPeriod")),
+		Tags:                  parseRDSTags(req),
 	}
 	if err := app.repo.CreateDBInstance(account, inst); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
@@ -568,13 +639,41 @@ func (app *Application) rdsCreateDBInstance(w http.ResponseWriter, account, regi
 func (app *Application) rdsDescribeDBInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	id := req.Params.Get("DBInstanceIdentifier")
 	out := rdsDescribeInstancesResult{DBInstances: []rdsInstanceXML{}}
+
+	// terraform-provider-aws's refresh & wait paths sometimes use
+	// Filters.Filter.N.Name=dbi-resource-id&Filters.Filter.N.Values.Value.M=<id>
+	// in place of the direct DBInstanceIdentifier param. We must
+	// resolve those to the underlying instance; otherwise the
+	// unfiltered fall-through path returns all instances, the
+	// provider sees zero matches, and treats the resource as gone.
+	filterName, filterValues := parseRDSFilter(req, "dbi-resource-id")
+
 	if id != "" {
 		inst, err := app.repo.GetDBInstance(account, region, id)
+		if err != nil {
+			rdsWriteInstanceNotFound(w, id, err)
+			return
+		}
+		out.DBInstances = append(out.DBInstances, app.rdsInstanceToXML(account, inst))
+	} else if filterName == "dbi-resource-id" && len(filterValues) > 0 {
+		all, err := app.repo.ListDBInstances(account, region)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 			return
 		}
-		out.DBInstances = append(out.DBInstances, app.rdsInstanceToXML(account, inst))
+		want := make(map[string]struct{}, len(filterValues))
+		for _, v := range filterValues {
+			want[v] = struct{}{}
+		}
+		for _, inst := range all {
+			if _, ok := want[dbiResourceIDFor(inst.ID)]; ok {
+				out.DBInstances = append(out.DBInstances, app.rdsInstanceToXML(account, inst))
+			}
+		}
+		if len(out.DBInstances) == 0 {
+			rdsWriteInstanceNotFound(w, filterValues[0], nil)
+			return
+		}
 	} else {
 		// Unfiltered list (uncommon but the AWS provider's import path uses it).
 		all, err := app.repo.ListDBInstances(account, region)
@@ -589,12 +688,47 @@ func (app *Application) rdsDescribeDBInstances(w http.ResponseWriter, account, r
 	awsproto.WriteQueryRPCResponse(w, "DescribeDBInstances", &out)
 }
 
+// rdsWriteInstanceNotFound emits the RDS-specific
+// "DBInstanceNotFound" error code (HTTP 404) the SDK & terraform-
+// provider-aws's delete-wait state machine actually checks for.
+// Returning the generic ResourceNotFoundException bubbles out of
+// the wait as a hard error and breaks destroy.
+func rdsWriteInstanceNotFound(w http.ResponseWriter, id string, _ error) {
+	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
+		"DBInstanceNotFound",
+		fmt.Sprintf("DBInstance %s not found.", id))
+}
+
 func (app *Application) rdsDeleteDBInstance(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteDBInstance(account, region, req.Params.Get("DBInstanceIdentifier")); err != nil {
+	id := req.Params.Get("DBInstanceIdentifier")
+	// Real RDS DeleteDBInstance returns the instance in "deleting"
+	// state inside a <DeleteDBInstanceResult><DBInstance>...</...>
+	// envelope. Returning a bare envelope (nil payload) errors the
+	// SDK with "DeleteDBInstanceResult node not found, failed to
+	// decode response body" — read the instance BEFORE deletion,
+	// mutate status to "deleting", then run the delete and emit the
+	// snapshot.
+	inst, err := app.repo.GetDBInstance(account, region, id)
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "DeleteDBInstance", nil)
+	if err := app.repo.DeleteDBInstance(account, region, id); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	deleting := app.rdsInstanceToXML(account, inst)
+	deleting.DBInstanceStatus = "deleting"
+	awsproto.WriteQueryRPCResponse(w, "DeleteDBInstance",
+		&rdsDeleteInstanceResult{DBInstance: deleting})
+}
+
+// rdsDeleteInstanceResult is the DeleteDBInstance response payload
+// shape. Real RDS wraps the snapshot of the deleting instance in
+// <DeleteDBInstanceResult><DBInstance>...</DBInstance></...>; SDK
+// fails to deserialise if the inner wrapper is missing.
+type rdsDeleteInstanceResult struct {
+	DBInstance rdsInstanceXML `xml:"DBInstance"`
 }
 
 // rdsModifyDBInstance is intentionally minimal at v1 — handlers
@@ -631,6 +765,65 @@ func parseSubnetIds(req awsproto.QueryRPCRequest) []string {
 		}
 	}
 	return out
+}
+
+// atoiOrZero is a tiny helper to convert numeric query params
+// without panicking on empty input. Returns 0 on parse failure
+// so the caller can apply its own default downstream.
+func atoiOrZero(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
+}
+
+// parseRDSTags reads Tags.Tag.N.Key / Tags.Tag.N.Value params
+// from the Query-RPC form (CreateDBInstance puts user tags here)
+// into a flat map. Returns nil when no tags are present so the
+// JSON blob stays compact.
+func parseRDSTags(req awsproto.QueryRPCRequest) map[string]string {
+	out := map[string]string{}
+	for k, vs := range req.Params {
+		if !strings.HasPrefix(k, "Tags.Tag.") || !strings.HasSuffix(k, ".Key") {
+			continue
+		}
+		if len(vs) == 0 {
+			continue
+		}
+		// Tags.Tag.1.Key → Tags.Tag.1.Value
+		idx := strings.TrimSuffix(strings.TrimPrefix(k, "Tags.Tag."), ".Key")
+		val := req.Params.Get("Tags.Tag." + idx + ".Value")
+		out[vs[0]] = val
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseRDSFilter scans Filters.Filter.N.Name / Filters.Filter.N.Values.Value.M
+// params for a filter whose name matches `want` and returns its
+// values. Used by DescribeDBInstances to resolve the
+// dbi-resource-id lookup terraform-provider-aws issues after some
+// Create/Refresh calls. Returns ("", nil) when no matching filter
+// is present.
+func parseRDSFilter(req awsproto.QueryRPCRequest, want string) (string, []string) {
+	for k, vs := range req.Params {
+		if !strings.HasPrefix(k, "Filters.Filter.") || !strings.HasSuffix(k, ".Name") {
+			continue
+		}
+		if len(vs) == 0 || vs[0] != want {
+			continue
+		}
+		idx := strings.TrimSuffix(strings.TrimPrefix(k, "Filters.Filter."), ".Name")
+		prefix := "Filters.Filter." + idx + ".Values.Value."
+		var values []string
+		for vk, vv := range req.Params {
+			if strings.HasPrefix(vk, prefix) && len(vv) > 0 {
+				values = append(values, vv[0])
+			}
+		}
+		return want, values
+	}
+	return "", nil
 }
 
 // gatherRDSStateReal emits the RDS block of /mock/state.

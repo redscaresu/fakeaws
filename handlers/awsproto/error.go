@@ -68,6 +68,36 @@ func mapDomainError(err error) errorMapping {
 	}
 }
 
+// WriteServiceError emits a 404/409/etc. with a service-specific AWS
+// error code (e.g. "DBInstanceNotFound", "SecretNotFoundException")
+// instead of the generic mapping mapDomainError produces. Some SDK
+// wait-state-machines check the exact service code rather than the
+// generic ResourceNotFoundException — terraform-provider-aws's RDS
+// delete-wait, for example, only treats "DBInstanceNotFound" as
+// "resource is gone, deletion complete"; returning the generic code
+// bubbles up as a hard error and breaks destroy.
+//
+// status: HTTP status code (typically 404 or 409).
+// code: AWS-spec error code, e.g. "DBInstanceNotFound".
+// message: human-readable message body.
+func WriteServiceError(w http.ResponseWriter, shape WireShape, status int, code, message string) {
+	m := errorMapping{Status: status, Code: code, Message: message, Type: code}
+	switch shape {
+	case ShapeXML:
+		writeXMLError(w, m)
+	case ShapeQueryRPC:
+		writeQueryRPCError(w, m)
+	case ShapeJSON10:
+		writeJSON10Error(w, m)
+	case ShapeJSON11:
+		writeJSON11Error(w, m)
+	case ShapeJSONREST:
+		writeJSONRESTError(w, m)
+	default:
+		writeJSON11Error(w, m)
+	}
+}
+
 // WriteAWSError dispatches the error to the right per-protocol writer.
 // Caller passes the wire shape this handler speaks; awsproto knows how
 // to render the response.

@@ -113,13 +113,20 @@ func (r *Repository) CreateSecret(account string, s *SecretsManagerSecret) error
 // GetSecret returns the secret row regardless of state. Callers that
 // must enforce the "Destroyed = not found" contract use
 // GetSecretActiveOrPending which gates the read.
-func (r *Repository) GetSecret(account, region, name string) (*SecretsManagerSecret, error) {
+//
+// The `secretId` argument accepts either the secret name OR its ARN
+// — real Secrets Manager's SecretId param does the same, and
+// terraform-provider-aws hands the create-response ARN back as the
+// id on every subsequent DescribeSecret call. A name-only lookup
+// breaks the create-wait state machine ("couldn't find resource"
+// loop until timeout).
+func (r *Repository) GetSecret(account, region, secretId string) (*SecretsManagerSecret, error) {
 	var s SecretsManagerSecret
 	var tagsJSON string
 	err := r.db.QueryRow(
 		`SELECT name, arn, description, kms_key_id, recovery_window_in_days, deleted_at, state, tags, region, created_at
-		 FROM secretsmanager_secrets WHERE account_id = ? AND region = ? AND name = ?`,
-		account, region, name,
+		 FROM secretsmanager_secrets WHERE account_id = ? AND region = ? AND (name = ? OR arn = ?)`,
+		account, region, secretId, secretId,
 	).Scan(&s.Name, &s.ARN, &s.Description, &s.KMSKeyID, &s.RecoveryWindowInDays,
 		&s.DeletedAt, &s.State, &tagsJSON, &s.Region, &s.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -195,8 +202,8 @@ func (r *Repository) ListSecrets(account, region string) ([]*SecretsManagerSecre
 // directly to Destroyed if recoveryWindowInDays==0). Per concepts.md
 // "Standing patterns" item 9 — terminal-state refusal: trying to
 // delete an already-Destroyed secret is rejected.
-func (r *Repository) ScheduleSecretDeletion(account, region, name string, recoveryWindowInDays int, now string) (*SecretsManagerSecret, error) {
-	s, err := r.GetSecret(account, region, name)
+func (r *Repository) ScheduleSecretDeletion(account, region, secretId string, recoveryWindowInDays int, now string) (*SecretsManagerSecret, error) {
+	s, err := r.GetSecret(account, region, secretId)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +211,7 @@ func (r *Repository) ScheduleSecretDeletion(account, region, name string, recove
 		// Codex pass 15 BLOCKING #1: terminal-state refusal must
 		// surface as InvalidRequestException, not ConflictException.
 		// Distinct 409 sentinels matter on the wire.
-		return nil, fmt.Errorf("secret %q already destroyed: %w", name, models.ErrTerminalState)
+		return nil, fmt.Errorf("secret %q already destroyed: %w", s.Name, models.ErrTerminalState)
 	}
 	newState := SecretStatePendingDeletion
 	if recoveryWindowInDays == 0 {
@@ -212,34 +219,34 @@ func (r *Repository) ScheduleSecretDeletion(account, region, name string, recove
 	}
 	if _, err := r.db.Exec(
 		`UPDATE secretsmanager_secrets SET state = ?, deleted_at = ?, recovery_window_in_days = ? WHERE account_id = ? AND region = ? AND name = ?`,
-		newState, now, recoveryWindowInDays, account, region, name,
+		newState, now, recoveryWindowInDays, account, region, s.Name,
 	); err != nil {
 		return nil, err
 	}
-	return r.GetSecret(account, region, name)
+	return r.GetSecret(account, region, s.Name)
 }
 
 // RestoreSecret reverses scheduled deletion. RestoreSecret on a
 // Destroyed secret returns 409 (concepts.md item 9).
-func (r *Repository) RestoreSecret(account, region, name string) (*SecretsManagerSecret, error) {
-	s, err := r.GetSecret(account, region, name)
+func (r *Repository) RestoreSecret(account, region, secretId string) (*SecretsManagerSecret, error) {
+	s, err := r.GetSecret(account, region, secretId)
 	if err != nil {
 		return nil, err
 	}
 	if s.State == SecretStateDestroyed {
 		// Codex pass 15 BLOCKING #1: see ScheduleSecretDeletion.
-		return nil, fmt.Errorf("secret %q is destroyed and cannot be restored: %w", name, models.ErrTerminalState)
+		return nil, fmt.Errorf("secret %q is destroyed and cannot be restored: %w", s.Name, models.ErrTerminalState)
 	}
 	if s.State == SecretStateActive {
 		return s, nil
 	}
 	if _, err := r.db.Exec(
 		`UPDATE secretsmanager_secrets SET state = ?, deleted_at = '' WHERE account_id = ? AND region = ? AND name = ?`,
-		SecretStateActive, account, region, name,
+		SecretStateActive, account, region, s.Name,
 	); err != nil {
 		return nil, err
 	}
-	return r.GetSecret(account, region, name)
+	return r.GetSecret(account, region, s.Name)
 }
 
 // ----- Versions -----
@@ -252,10 +259,17 @@ func (r *Repository) RestoreSecret(account, region, name string) (*SecretsManage
 // too, which let writes silently land under a force-deleted secret
 // that DescribeSecret/GetSecretValue/ListSecrets all treat as gone.
 // Use the terminal-state-aware helper instead.
-func (r *Repository) PutSecretValue(account, region, name string, v *SecretsManagerVersion) error {
-	if _, err := r.GetSecretActiveOrPending(account, region, name); err != nil {
+func (r *Repository) PutSecretValue(account, region, secretId string, v *SecretsManagerVersion) error {
+	// Callers may pass either the secret name or its ARN as the
+	// SecretId param (terraform-provider-aws hands back the ARN
+	// after Create). Resolve to the canonical name so subsequent
+	// rows under secretsmanager_versions.secret_name are keyed on
+	// the same value the get-path uses.
+	parent, err := r.GetSecretActiveOrPending(account, region, secretId)
+	if err != nil {
 		return err
 	}
+	name := parent.Name
 	// Demote any existing AWSCURRENT to AWSPREVIOUS.
 	rows, err := r.db.Query(
 		`SELECT version_id, stages FROM secretsmanager_versions WHERE account_id = ? AND region = ? AND secret_name = ?`,
@@ -314,10 +328,12 @@ func (r *Repository) PutSecretValue(account, region, name string, v *SecretsMana
 // GetSecretValue returns the version with the given stage, defaulting
 // to AWSCURRENT. Destroyed secrets behave as not-found (Codex pass 2
 // BLOCKING #2 — "fully destroyed" contract).
-func (r *Repository) GetSecretValue(account, region, name, versionStage, versionID string) (*SecretsManagerVersion, error) {
-	if _, err := r.GetSecretActiveOrPending(account, region, name); err != nil {
+func (r *Repository) GetSecretValue(account, region, secretId, versionStage, versionID string) (*SecretsManagerVersion, error) {
+	parent, err := r.GetSecretActiveOrPending(account, region, secretId)
+	if err != nil {
 		return nil, err
 	}
+	name := parent.Name
 	if versionStage == "" && versionID == "" {
 		versionStage = "AWSCURRENT"
 	}

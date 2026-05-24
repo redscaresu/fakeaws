@@ -47,6 +47,30 @@ func (app *Application) handleSecretsManager(w http.ResponseWriter, r *http.Requ
 		app.smPutSecretValue(w, account, region, req)
 	case "GetSecretValue":
 		app.smGetSecretValue(w, account, region, req)
+	case "GetResourcePolicy":
+		// terraform-provider-aws calls GetResourcePolicy on every
+		// aws_secretsmanager_secret Read. We don't model resource
+		// policies — return a 200 with a null body so the provider's
+		// JSON decode populates `policy = ""` and Read completes.
+		// Missing handler returned the default "not yet implemented"
+		// 404 which bubbled as "reading Secrets Manager Secret policy:
+		// couldn't find resource".
+		app.smGetResourcePolicy(w, account, region, req)
+	case "PutResourcePolicy", "DeleteResourcePolicy":
+		// No-ops in v1 — accept the request and reply with the
+		// minimal envelope the SDK expects so subsequent reads
+		// don't error.
+		var in struct{ SecretId string `json:"SecretId"` }
+		_ = json.Unmarshal(req.Body, &in)
+		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
+			"Name": in.SecretId, "ARN": in.SecretId,
+		})
+	case "TagResource", "UntagResource":
+		// Tag mutations after create — accept silently. Persisted
+		// tags from CreateSecret already echo through DescribeSecret.
+		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+	case "ListSecretVersionIds":
+		app.smListSecretVersionIds(w, account, region, req)
 	default:
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
 			fmt.Errorf("Secrets Manager operation %q not yet implemented in fakeaws v1: %w", req.Operation, models.ErrNotFound))
@@ -120,16 +144,75 @@ func (app *Application) smDescribeSecret(w http.ResponseWriter, account, region 
 	// destroyed" contract; Codex pass 2 BLOCKING #2).
 	s, err := app.repo.GetSecretActiveOrPending(account, region, in.SecretId)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
+		// Service-specific 404 code so the SDK + terraform-provider-aws
+		// delete-wait recognise "secret is gone" as a successful
+		// deletion. Generic ResourceNotFoundException is also valid
+		// per the Secrets Manager spec, but the typed error is what
+		// the SDK's errors.As path checks.
+		awsproto.WriteServiceError(w, awsproto.ShapeJSON11, http.StatusNotFound,
+			"ResourceNotFoundException",
+			fmt.Sprintf("Secrets Manager can't find the specified secret: %s", in.SecretId))
 		return
 	}
-	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
-		"ARN":         s.ARN,
-		"Name":        s.Name,
-		"Description": s.Description,
-		"KmsKeyId":    s.KMSKeyID,
-		"DeletedDate": s.DeletedAt,
-	})
+	// VersionIdsToStages is the map terraform-provider-aws's Read
+	// flow uses to derive aws_secretsmanager_secret_version.version_stages.
+	// Missing field → provider treats every version as stage-less,
+	// triggering drift on the next plan. Build it from the persisted
+	// versions ordered by created_at descending so AWSCURRENT shows
+	// up on the most-recent row.
+	versions, _ := app.repo.ListSecretVersions(account, s.Region, s.Name)
+	versionIdsToStages := map[string][]string{}
+	for _, v := range versions {
+		stages := v.Stages
+		if stages == nil {
+			stages = []string{}
+		}
+		versionIdsToStages[v.VersionID] = stages
+	}
+	resp := map[string]any{
+		"ARN":                s.ARN,
+		"Name":               s.Name,
+		"Description":        s.Description,
+		"KmsKeyId":           s.KMSKeyID,
+		"CreatedDate":        secretEpoch(s.CreatedAt),
+		"LastChangedDate":    secretEpoch(s.CreatedAt),
+		"VersionIdsToStages": versionIdsToStages,
+		// Empty slices instead of null so the SDK's JSON decode
+		// produces zero-length slices the provider can iterate.
+		"Tags": tagsAsJSONSlice(s.Tags),
+	}
+	if s.DeletedAt != "" {
+		resp["DeletedDate"] = secretEpoch(s.DeletedAt)
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, resp)
+}
+
+// secretEpoch converts an RFC3339 timestamp into the seconds-since-
+// epoch float Secrets Manager's JSON wire format uses for date
+// fields (CreatedDate, LastChangedDate, DeletedDate). Returns 0
+// when the input is empty so the JSON encodes as a present-but-zero
+// field; the SDK's date parser treats that the same as absent.
+func secretEpoch(ts string) float64 {
+	if ts == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return 0
+	}
+	return float64(t.Unix())
+}
+
+// tagsAsJSONSlice turns the persisted tag map into the
+// [{Key,Value},...] slice the AWS Secrets Manager JSON shape uses.
+// Returns an empty slice (not nil) so the SDK doesn't drift on an
+// unset-vs-empty mismatch.
+func tagsAsJSONSlice(tags map[string]string) []map[string]string {
+	out := make([]map[string]string, 0, len(tags))
+	for k, v := range tags {
+		out = append(out, map[string]string{"Key": k, "Value": v})
+	}
+	return out
 }
 
 func (app *Application) smListSecrets(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
@@ -170,8 +253,11 @@ func (app *Application) smDeleteSecret(w http.ResponseWriter, account, region st
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
 		return
 	}
+	// DeletionDate must be a JSON number (seconds-since-epoch).
+	// Returning the RFC3339 string errors the SDK with
+	// "expected DeletionDateType to be a JSON Number, got string".
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
-		"ARN": s.ARN, "Name": s.Name, "DeletionDate": s.DeletedAt,
+		"ARN": s.ARN, "Name": s.Name, "DeletionDate": secretEpoch(s.DeletedAt),
 	})
 }
 
@@ -235,6 +321,71 @@ func (app *Application) smGetSecretValue(w http.ResponseWriter, account, region 
 		"ARN": s.ARN, "Name": s.Name,
 		"VersionId": v.VersionID, "SecretString": v.SecretString,
 		"VersionStages": v.Stages,
+	})
+}
+
+// smGetResourcePolicy returns an empty resource-policy envelope so
+// the provider's Read flow completes (it polls GetResourcePolicy on
+// every refresh; missing handler bubbles as "reading Secrets Manager
+// Secret policy: couldn't find resource"). Real AWS returns an
+// empty string here when no policy has been attached, and the
+// provider treats that as the canonical zero-value.
+func (app *Application) smGetResourcePolicy(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		SecretId string `json:"SecretId"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+	s, err := app.repo.GetSecretActiveOrPending(account, region, in.SecretId)
+	if err != nil {
+		awsproto.WriteServiceError(w, awsproto.ShapeJSON11, http.StatusNotFound,
+			"ResourceNotFoundException",
+			fmt.Sprintf("Secrets Manager can't find the specified secret: %s", in.SecretId))
+		return
+	}
+	// Omit ResourcePolicy entirely when no policy is attached.
+	// Returning "" caused the provider's Read flow to error with
+	// `parsing policy: unexpected end of JSON input` — the SDK
+	// only invokes the policy parser when the field is present.
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
+		"ARN":  s.ARN,
+		"Name": s.Name,
+	})
+}
+
+// smListSecretVersionIds backs the provider's
+// aws_secretsmanager_secret_version Read which calls this to find
+// the AWSCURRENT version after a refresh. Returns the persisted
+// version list in the JSON shape the SDK expects.
+func (app *Application) smListSecretVersionIds(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		SecretId string `json:"SecretId"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+	s, err := app.repo.GetSecretActiveOrPending(account, region, in.SecretId)
+	if err != nil {
+		awsproto.WriteServiceError(w, awsproto.ShapeJSON11, http.StatusNotFound,
+			"ResourceNotFoundException",
+			fmt.Sprintf("Secrets Manager can't find the specified secret: %s", in.SecretId))
+		return
+	}
+	versions, _ := app.repo.ListSecretVersions(account, s.Region, s.Name)
+	out := make([]map[string]any, 0, len(versions))
+	for _, v := range versions {
+		stages := v.Stages
+		if stages == nil {
+			stages = []string{}
+		}
+		out = append(out, map[string]any{
+			"VersionId":          v.VersionID,
+			"VersionStages":      stages,
+			"CreatedDate":        secretEpoch(v.CreatedAt),
+			"LastAccessedDate":   secretEpoch(v.CreatedAt),
+		})
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
+		"ARN":      s.ARN,
+		"Name":     s.Name,
+		"Versions": out,
 	})
 }
 
