@@ -103,6 +103,12 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		app.iamDetachRolePolicy(w, account, req)
 	case "ListAttachedRolePolicies":
 		app.iamListAttachedRolePolicies(w, account, req)
+	case "ListRolePolicies":
+		app.iamListRolePolicies(w, account, req)
+	case "ListRoleTags":
+		app.iamListRoleTags(w, account, req)
+	case "ListInstanceProfilesForRole":
+		app.iamListInstanceProfilesForRole(w, account, req)
 
 	default:
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
@@ -703,6 +709,76 @@ type iamAttachedPolicy struct {
 type iamListAttachedRolePoliciesResult struct {
 	AttachedPolicies []iamAttachedPolicy `xml:"AttachedPolicies>member"`
 	IsTruncated      bool                `xml:"IsTruncated"`
+}
+
+// iamListRolePolicies returns the inline-policy names attached to a
+// role. terraform-provider-aws calls this as part of the aws_iam_role
+// Read flow after CreateRole; returning the default unsupported-action
+// 404 made the provider conclude the role didn't exist. We model the
+// real IAM behavior: 404 ResourceNotFoundException when the role is
+// missing, otherwise an empty PolicyNames list (no inline-policy
+// storage in fakeaws yet — separate handler when needed).
+//
+// XML is written inline (not via WriteQueryRPCResponse + typed struct)
+// because xml.Encoder always wraps a struct in its type name, which
+// would emit a stray <iamListRolePoliciesResult> element inside
+// <ListRolePoliciesResult>. The AWS provider tolerates this wrapping
+// for ListAttachedRolePolicies (empty list) but crashes the gRPC plugin
+// for ListRolePolicies. Manual XML matches the wire shape the
+// provider's parser expects.
+func (app *Application) iamListRolePolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	name := req.Params.Get("RoleName")
+	if _, err := app.repo.GetRole(account, name); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	writeIAMListInline(w, "ListRolePolicies", "<PolicyNames/>\n    <IsTruncated>false</IsTruncated>")
+}
+
+// iamListRoleTags mirrors ListRolePolicies: provider Read calls it
+// post-create, default 404 breaks the apply loop. Returns an empty
+// Tags list when the role exists.
+func (app *Application) iamListRoleTags(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	name := req.Params.Get("RoleName")
+	if _, err := app.repo.GetRole(account, name); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	writeIAMListInline(w, "ListRoleTags", "<Tags/>\n    <IsTruncated>false</IsTruncated>")
+}
+
+// iamListInstanceProfilesForRole is called by terraform-provider-aws
+// as part of the aws_iam_role Delete preflight: it checks for
+// dependent instance profiles so the destroy ordering is correct.
+// We model the real behavior — 404 when the role is missing,
+// otherwise an empty InstanceProfiles list (fakeaws's CreateRole
+// doesn't auto-attach an instance profile, and AddRoleToInstanceProfile
+// stores the membership in instance-profile state, not role state).
+func (app *Application) iamListInstanceProfilesForRole(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	name := req.Params.Get("RoleName")
+	if _, err := app.repo.GetRole(account, name); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	writeIAMListInline(w, "ListInstanceProfilesForRole", "<InstanceProfiles/>\n    <IsTruncated>false</IsTruncated>")
+}
+
+// writeIAMListInline writes an empty IAM List* response with the
+// inner-result body emitted verbatim (matching the wire shape the AWS
+// provider expects, avoiding the xml.Encoder type-wrapper issue).
+func writeIAMListInline(w http.ResponseWriter, action, innerXML string) {
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+<%[1]sResponse>
+  <%[1]sResult>
+    %[2]s
+  </%[1]sResult>
+  <ResponseMetadata>
+    <RequestId>fakeaws-synthetic</RequestId>
+  </ResponseMetadata>
+</%[1]sResponse>
+`, action, innerXML)
 }
 
 // ----- helpers -----
