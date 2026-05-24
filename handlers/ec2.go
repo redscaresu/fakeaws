@@ -140,11 +140,43 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 
 // ----- VPC handlers -----
 
+// ec2VpcXML mirrors the real EC2 CreateVpc/DescribeVpcs response
+// shape. terraform-provider-aws's resourceVPCCreate (vpc_.go:235)
+// iterates CidrBlockAssociationSet and reads OwnerId during Read;
+// nil/missing values panic the provider plugin. We populate the
+// associated CIDR block, owner id, default DHCP options id, and
+// default tenancy so the standard EC2 schema fields the provider
+// expects are all non-nil.
 type ec2VpcXML struct {
-	VpcId     string   `xml:"vpcId"`
-	State     string   `xml:"state"`
-	CidrBlock string   `xml:"cidrBlock"`
-	IsDefault bool     `xml:"isDefault"`
+	VpcId                       string                          `xml:"vpcId"`
+	State                       string                          `xml:"state"`
+	CidrBlock                   string                          `xml:"cidrBlock"`
+	DhcpOptionsId               string                          `xml:"dhcpOptionsId"`
+	InstanceTenancy             string                          `xml:"instanceTenancy"`
+	OwnerId                     string                          `xml:"ownerId"`
+	IsDefault                   bool                            `xml:"isDefault"`
+	CidrBlockAssociationSet     []ec2VpcCidrBlockAssociationXML `xml:"cidrBlockAssociationSet>item"`
+	Ipv6CidrBlockAssociationSet []ec2VpcIpv6BlockAssociationXML `xml:"ipv6CidrBlockAssociationSet>item,omitempty"`
+}
+
+// ec2VpcCidrBlockAssociationXML mirrors the per-CIDR association
+// entry. Every VPC has at least one (the primary block matching
+// `cidrBlock`), and the provider treats the SET as the source of
+// truth for IPv4 associations.
+type ec2VpcCidrBlockAssociationXML struct {
+	AssociationId  string                          `xml:"associationId"`
+	CidrBlock      string                          `xml:"cidrBlock"`
+	CidrBlockState ec2VpcCidrBlockAssociationState `xml:"cidrBlockState"`
+}
+
+type ec2VpcCidrBlockAssociationState struct {
+	State string `xml:"state"`
+}
+
+type ec2VpcIpv6BlockAssociationXML struct {
+	AssociationId  string                          `xml:"associationId"`
+	Ipv6CidrBlock  string                          `xml:"ipv6CidrBlock"`
+	CidrBlockState ec2VpcCidrBlockAssociationState `xml:"ipv6CidrBlockState"`
 }
 
 type ec2DescribeVpcsResult struct {
@@ -293,7 +325,22 @@ func newEC2Subnet(account, region, id, vpcID, cidr, az string) *repository.EC2Su
 }
 
 func ec2VpcToXML(v *repository.EC2VPC) ec2VpcXML {
-	return ec2VpcXML{VpcId: v.ID, State: v.State, CidrBlock: v.CidrBlock, IsDefault: false}
+	return ec2VpcXML{
+		VpcId:           v.ID,
+		State:           v.State,
+		CidrBlock:       v.CidrBlock,
+		DhcpOptionsId:   "dopt-fakeaws-default",
+		InstanceTenancy: "default",
+		OwnerId:         awsproto.FakeAccountID,
+		IsDefault:       false,
+		CidrBlockAssociationSet: []ec2VpcCidrBlockAssociationXML{
+			{
+				AssociationId:  "vpc-cidr-assoc-" + v.ID,
+				CidrBlock:      v.CidrBlock,
+				CidrBlockState: ec2VpcCidrBlockAssociationState{State: "associated"},
+			},
+		},
+	}
 }
 
 func ec2SubnetToXML(s *repository.EC2Subnet) ec2SubnetXML {
