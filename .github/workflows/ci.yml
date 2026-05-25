@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - run: go vet ./...
 
   build:
@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - run: go build ./...
 
   test:
@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - run: go test ./... -race
 
   gitleaks:
@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - run: go test ./handlers/ -run "TestRegressionSeedAudit"
 
   # coverage-audit runs TestFullCoverageAudit shipped by S43-T10.
@@ -82,7 +82,7 @@ jobs:
           path: infrafactory
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - working-directory: fakeaws
         run: go test ./internal/audit/ -run TestFullCoverageAudit
 
@@ -98,7 +98,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
       - name: Emit aggregate handlers/... coverage (informational)
         run: |
           go test -coverprofile=cov.out -covermode=atomic ./handlers/... || true

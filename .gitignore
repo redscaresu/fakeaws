@@ -24,3 +24,13 @@
 *.pem
 *.key
 credentials.json
+
+# Terraform state from running examples locally (mirror of mockway's
+# .gitignore patterns). The .terraform/ provider-cache dir can be
+# hundreds of MB; tfstate files contain a snapshot of mock state and
+# should never be committed.
+examples/**/.terraform/
+examples/**/.terraform.lock.hcl
+examples/**/terraform.tfstate
+examples/**/terraform.tfstate.backup
+examples/**/terraform.tfstate.*.backup
