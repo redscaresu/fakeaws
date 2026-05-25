@@ -59,8 +59,12 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		app.iamCreatePolicy(w, account, req)
 	case "GetPolicy":
 		app.iamGetPolicy(w, account, req)
+	case "GetPolicyVersion":
+		app.iamGetPolicyVersion(w, account, req)
 	case "ListPolicies":
 		app.iamListPolicies(w, account, req)
+	case "ListPolicyVersions":
+		app.iamListPolicyVersions(w, account, req)
 	case "DeletePolicy":
 		app.iamDeletePolicy(w, account, req)
 
@@ -367,6 +371,80 @@ func (app *Application) iamGetPolicy(w http.ResponseWriter, account string, req 
 	}
 	p := policyToXML(policy)
 	awsproto.WriteQueryRPCResponse(w, "GetPolicy", &p)
+}
+
+// iamGetPolicyVersion returns the policy document for the named
+// version. fakeaws only stores a single policy document per policy
+// (no version history) so every request resolves to v1 with the
+// stored document. terraform-provider-aws calls this immediately
+// after CreatePolicy to read the document back into state; without
+// it the apply fails with "reading IAM Policy ... 404
+// ResourceNotFoundException". M69.
+func (app *Application) iamGetPolicyVersion(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	name := req.Params.Get("PolicyName")
+	if name == "" {
+		if arn := req.Params.Get("PolicyArn"); arn != "" {
+			name, _ = repository.ResolveSameAccountName(account, arn, "policy")
+		}
+	}
+	policy, err := app.repo.GetPolicy(account, name)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	// PolicyDocument must be URL-encoded per the IAM wire contract —
+	// SDK calls url.QueryUnescape on the response. CreatePolicy
+	// receives an already-encoded document (the provider sends it
+	// that way), so we round-trip the persisted value verbatim.
+	awsproto.WriteQueryRPCResponse(w, "GetPolicyVersion", &iamPolicyVersionResult{
+		PolicyVersion: iamPolicyVersionXML{
+			Document:         policy.PolicyDocument,
+			VersionID:        "v1",
+			IsDefaultVersion: true,
+			CreateDate:       policy.CreatedAt,
+		},
+	})
+}
+
+// iamListPolicyVersions returns the single v1 version every fakeaws
+// policy has. The provider sometimes calls this before
+// GetPolicyVersion to find the default-version-id; without it the
+// pre-Read flow 404s. M69.
+func (app *Application) iamListPolicyVersions(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	name := req.Params.Get("PolicyName")
+	if name == "" {
+		if arn := req.Params.Get("PolicyArn"); arn != "" {
+			name, _ = repository.ResolveSameAccountName(account, arn, "policy")
+		}
+	}
+	policy, err := app.repo.GetPolicy(account, name)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "ListPolicyVersions", &iamListPolicyVersionsResult{
+		Versions: []iamPolicyVersionXML{{
+			// ListPolicyVersions returns the metadata only (no Document).
+			VersionID:        "v1",
+			IsDefaultVersion: true,
+			CreateDate:       policy.CreatedAt,
+		}},
+	})
+}
+
+type iamPolicyVersionXML struct {
+	Document         string `xml:"Document,omitempty"`
+	VersionID        string `xml:"VersionId"`
+	IsDefaultVersion bool   `xml:"IsDefaultVersion"`
+	CreateDate       string `xml:"CreateDate"`
+}
+
+type iamPolicyVersionResult struct {
+	PolicyVersion iamPolicyVersionXML `xml:"PolicyVersion"`
+}
+
+type iamListPolicyVersionsResult struct {
+	Versions []iamPolicyVersionXML `xml:"Versions>member"`
 }
 
 func (app *Application) iamListPolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
