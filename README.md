@@ -1,5 +1,9 @@
 # fakeaws
 
+[![CI](https://github.com/redscaresu/fakeaws/actions/workflows/ci.yml/badge.svg)](https://github.com/redscaresu/fakeaws/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go)](go.mod)
+
 A local Go-based mock of the AWS HTTP API surface, sibling to
 [mockway](https://github.com/redscaresu/mockway) (Scaleway) and
 [fakegcp](https://github.com/redscaresu/fakegcp) (GCP).
