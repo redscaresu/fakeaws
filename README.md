@@ -112,6 +112,7 @@ mockway and fakegcp use an `examples/known_broken.yaml` ratchet for examples who
 3. If it drifts: either fix the handler, or (if the fix is non-trivial) add a `known_broken.yaml` entry pointing at a new BACKLOG ticket.
 4. Mirror with `examples/misconfigured/<svc>/` (FK / validation paths) and `examples/updates/<svc>/` (update paths) as the service warrants.
 5. Add a `TestE2E_AWS<Svc>` in infrafactory's `internal/e2e/aws_services_test.go` so the cross-repo gate covers the scenario flow too.
+6. Append the service id to `LandedServices` in `handlers/regression_manifest.go`. This trips infrafactory's `TestCrossRepoParity_EveryLandedServiceHasScenario` (in its `internal/e2e/cross_repo_parity_test.go`) until either (a) a `scenarios/training/aws-<svc>.yaml` is added on the infrafactory side AND a `cloudParityMap["aws"]["<svc>"]` entry pointing at it lands in the same PR, or (b) the service is added to that test's `exempt` map with a written reason (only appropriate for read-only / meta APIs with no standalone resource type). The parity test runs in infrafactory CI on every push, so landing here without the upstream change will break the badge — coordinate the two PRs.
 
 ## Documentation
 
