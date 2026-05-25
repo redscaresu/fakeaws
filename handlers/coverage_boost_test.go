@@ -564,8 +564,12 @@ func TestCoverage_SQSErrorPaths(t *testing.T) {
 		t.Errorf("DeleteQueue missing: %d", resp.StatusCode)
 	}
 	resp, _ = sqsCall(t, srv, "GetQueueAttributes", `{"QueueUrl":"http://x.fakeaws.local/000000000000/missing"}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("GetQueueAttributes missing: %d", resp.StatusCode)
+	// M68 fix: GetQueueAttributes against a missing queue returns
+	// 400 AWS.SimpleQueueService.NonExistentQueue (the service-
+	// specific code terraform-provider-aws's delete-wait checks for),
+	// not the generic 404 ResourceNotFoundException.
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("GetQueueAttributes missing: got %d, want 400 (NonExistentQueue)", resp.StatusCode)
 	}
 	resp, _ = sqsCall(t, srv, "SendMessage", `{"QueueUrl":"http://x.fakeaws.local/000000000000/missing","MessageBody":"x"}`)
 	if resp.StatusCode != http.StatusNotFound {
