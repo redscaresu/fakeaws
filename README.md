@@ -15,26 +15,29 @@ fork story alive — narrow in coverage, deep in the few services we ship.
 
 ## Status
 
-All v1 service surface (S43–S47) landed. Currently in S48 (polish +
-codex review iteration loop). Two passes archived under
-`docs/review-passes/passN.md`. Aggregate handlers coverage 82.4% on
-the `total:` line.
+Nine services across five wire formats. The S43–S48 codex review loop
+closed at pass 17 with zero allowlist entries; post-S48 polish landed
+the M51 Query-RPC envelope rewrite, M57 per-resource field parity, M61
+full RDS lifecycle (`aws_db_instance` apply → plan no-op → destroy
+clean), and M62 full Secrets Manager lifecycle. The 17 review passes
+are archived under `docs/review-passes/passN.md`. Aggregate handlers
+coverage 77.2% on the `total:` line (`handlers` 79.4% + `handlers/awsproto` 53.4%).
 
-Implemented services:
+| Service | Wire format | Endpoint | TF lifecycle |
+| ------- | ----------- | -------- | ------------ |
+| IAM | Query-RPC + XML | `POST /iam` | apply / plan-no-op / destroy ✓ |
+| S3 | XML REST | `/s3/<bucket>/<key>?<sub-resource>` | apply / plan-no-op / destroy ✓ (S3 bucket sub-resource reads are limited — for `terraform-provider-aws`'s full Read flow infrafactory pairs fakeaws with SeaweedFS, see M59) |
+| EC2 | Query-RPC + XML | `POST /ec2/region/<region>` | VPC + Subnet + IGW + RouteTable + Route + EIP + SG + Instance + KeyPair + AMI fixture; full lifecycle ✓ |
+| RDS | Query-RPC + XML | `POST /rds/region/<region>` | DB Instance + Subnet/Parameter/Cluster Groups + Clusters; full lifecycle ✓ (M61: DbiResourceId stability, service-specific 404 codes, DeleteDBInstance envelope, user-field persistence) |
+| DynamoDB | JSON 1.1 + X-Amz-Target | `POST /dynamodb/region/<region>` | apply / plan-no-op / destroy ✓ |
+| EKS | JSON-REST | `/eks/region/<region>/clusters/...` | cluster + node group; full lifecycle ✓ |
+| SQS | JSON 1.0 + X-Amz-Target | `POST /sqs/region/<region>` | apply / plan-no-op / destroy ✓ |
+| Route53 | XML REST | `/route53/2013-04-01/...` | hosted zone + record set; full lifecycle ✓ |
+| Secrets Manager | JSON 1.1 + X-Amz-Target | `POST /secretsmanager/region/<region>` | apply / plan-no-op / destroy ✓ (M62: ARN-or-name SecretId, epoch timestamps, VersionIdsToStages, GetResourcePolicy + ListSecretVersionIds) |
 
-| Service | Wire format | Endpoint |
-| ------- | ----------- | -------- |
-| IAM | Query-RPC + XML | `POST /iam` |
-| S3 | XML REST | `/s3/<bucket>/<key>?<sub-resource>` |
-| EC2 | Query-RPC + XML | `POST /ec2/region/<region>` |
-| RDS | Query-RPC + XML | `POST /rds/region/<region>` |
-| DynamoDB | JSON 1.1 + X-Amz-Target | `POST /dynamodb/region/<region>` |
-| EKS | JSON-REST | `/eks/region/<region>/clusters/...` |
-| SQS | JSON 1.0 + X-Amz-Target | `POST /sqs/region/<region>` |
-| Route53 | XML REST | `/route53/2013-04-01/...` |
-| Secrets Manager | JSON 1.1 + X-Amz-Target | `POST /secretsmanager/region/<region>` |
-
-Per-resource details + load-bearing FK contracts live in `PLAN.md`.
+Per-resource details + load-bearing FK contracts live in `PLAN.md`;
+the M61/M62 wire-shape lessons are documented in `AGENTS.md` under
+"Provider-wait-state-machine debugging".
 
 ## Quickstart
 
@@ -112,13 +115,21 @@ mockway and fakegcp use an `examples/known_broken.yaml` ratchet for examples who
 
 ## Documentation
 
-- `concepts.md` — load-bearing design doc (will be folded into
-  `PLAN.md` once the repo has shape).
-- `AGENTS.md` — fresh-agent entry point: layout, conventions,
-  anti-patterns, where to look for AWS resource shapes.
-- `docs/review-passes/passN.md` — codex review prompts and findings
-  archived per pass; the planning loop's output is preserved alongside
-  the implementation history.
+- [`concepts.md`](concepts.md) — load-bearing design doc (pre-flight
+  checklist, service surface, wire-format strategy, anti-patterns,
+  resolved decisions).
+- [`AGENTS.md`](AGENTS.md) — fresh-agent entry point: layout,
+  conventions, anti-patterns, where to look for AWS resource shapes,
+  and the M61/M62 "Provider-wait-state-machine debugging" recipe.
+- [`PLAN.md`](PLAN.md) — phase-by-phase delivery history with the
+  FK-chain analyses that gated handler ordering.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — PR contract, quality gates,
+  pre-commit hook setup.
+- [`docs/review-passes/passN.md`](docs/review-passes/) — codex review
+  prompts and findings archived per pass; 17 passes preserved
+  alongside the implementation history.
+- [`examples/README.md`](examples/README.md) — quickstart for running
+  the auto-discovered example tree against a live fakeaws.
 
 ## Non-goals
 
@@ -131,4 +142,4 @@ mockway and fakegcp use an `examples/known_broken.yaml` ratchet for examples who
 
 ## License
 
-TBD.
+Apache 2.0 — see [LICENSE](LICENSE).
