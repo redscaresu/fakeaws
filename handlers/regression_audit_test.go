@@ -25,12 +25,12 @@ import (
 // (handlers/regression_manifest.go::LandedServices) and the
 // handlers/ directory; asserts:
 //
-//   (a) every id in LandedServices is satisfied by ≥1 handlers/<id>*.go
-//       file (so "ec2" is satisfied collectively by ec2_network.go +
-//       ec2_security.go + ec2_instance.go); and
-//   (b) every service prefix in handlers/ has a manifest entry — the
-//       audit groups files by their before-first-`_`-or-`.go` prefix
-//       and asserts every prefix appears in LandedServices.
+//	(a) every id in LandedServices is satisfied by ≥1 handlers/<id>*.go
+//	    file (so "ec2" is satisfied collectively by ec2_network.go +
+//	    ec2_security.go + ec2_instance.go); and
+//	(b) every service prefix in handlers/ has a manifest entry — the
+//	    audit groups files by their before-first-`_`-or-`.go` prefix
+//	    and asserts every prefix appears in LandedServices.
 //
 // Files that are not service handlers (handlers.go itself, admin.go,
 // regression_manifest.go, regression_test.go, *_test.go) are excluded
@@ -149,6 +149,60 @@ func TestRegressionSeedAuditNoVacuousPasses(t *testing.T) {
 	}
 }
 
+// TestRegressionSeedAuditHasPatterns is the M85 vacuous-audit guard.
+// The two audits above are necessary but not sufficient: they enforce
+// shape constraints on patterns that EXIST. They do not enforce that
+// patterns exist at all. mockway and fakegcp both shipped this audit
+// scaffolding with ZERO TestRegression* functions for ~18 months
+// (M75/M79 closed the gap by porting fakeaws's catalogue), passing CI
+// the whole time because there was nothing to validate. This guard
+// asserts a minimum pattern count proportional to the LandedServices
+// manifest so a future repo cannot pull the same trick.
+//
+// Threshold: min(len(LandedServices), 8). A floor of 8 keeps small
+// repos from being forced into thin patterns; the per-service cap
+// makes the guard tighten as the surface grows.
+//
+// Counting rule: functions named ^TestRegression but NOT
+// ^TestRegressionSeedAudit (the audit tests themselves don't count).
+func TestRegressionSeedAuditHasPatterns(t *testing.T) {
+	dir := handlersDir(t)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read handlers/: %v", err)
+	}
+	fset := token.NewFileSet()
+	count := 0
+	for _, ent := range entries {
+		if !strings.HasSuffix(ent.Name(), "_test.go") {
+			continue
+		}
+		path := filepath.Join(dir, ent.Name())
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			fn, ok := n.(*ast.FuncDecl)
+			if !ok || fn.Name == nil {
+				return true
+			}
+			name := fn.Name.Name
+			if strings.HasPrefix(name, "TestRegression") && !strings.HasPrefix(name, "TestRegressionSeedAudit") {
+				count++
+			}
+			return true
+		})
+	}
+	threshold := len(handlers.LandedServices)
+	if threshold > 8 {
+		threshold = 8
+	}
+	if count < threshold {
+		t.Fatalf("vacuous-audit guard: found only %d TestRegression* patterns, need ≥%d (LandedServices has %d entries). Add patterns to handlers/regression_test.go that exercise FK rejection, cascade ordering, wire-shape contracts, etc. See M75/M79 for the pattern catalogue.", count, threshold, len(handlers.LandedServices))
+	}
+}
+
 // ----- helpers (local to the audit suite) -----
 
 func handlersDir(t *testing.T) string {
@@ -187,9 +241,9 @@ func matchHandlerFile(t *testing.T, dir, id string) bool {
 // admin endpoints, audit tests, etc.) and shouldn't appear in
 // LandedServices.
 var knownNonServiceFiles = map[string]bool{
-	"handlers.go":             true,
-	"admin.go":                true,
-	"regression_manifest.go":  true,
+	"handlers.go":            true,
+	"admin.go":               true,
+	"regression_manifest.go": true,
 }
 
 func serviceFilePrefixes(t *testing.T, dir string) map[string]bool {
