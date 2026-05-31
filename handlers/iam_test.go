@@ -439,6 +439,7 @@ func TestIAM_UserDestroyPreflightListsReturn200Empty(t *testing.T) {
 		{"ListServiceSpecificCredentials", "<ServiceSpecificCredentials"},
 		{"ListMFADevices", "<MFADevices"},
 		{"ListSigningCertificates", "<Certificates"},
+		{"ListVirtualMFADevices", "<VirtualMFADevices"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.action, func(t *testing.T) {
@@ -460,6 +461,25 @@ func TestIAM_UserDestroyPreflightListsReturn200Empty(t *testing.T) {
 				t.Errorf("%s: response missing <%sResult> wrapper, body=%s", tc.action, tc.action, body)
 			}
 		})
+	}
+}
+
+// TestIAM_DeleteLoginProfileReturnsNoSuchEntity pins the
+// Ticket A follow-up: fakeaws doesn't model console login
+// profiles. The provider's aws_iam_user destroy calls
+// DeleteLoginProfile unconditionally and treats NoSuchEntity (404)
+// as "already gone" — making destroy idempotent. Any other status
+// breaks destroy.
+func TestIAM_DeleteLoginProfileReturnsNoSuchEntity(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	_, _ = iamCall(t, srv, "CreateUser", url.Values{"UserName": {"u"}})
+
+	resp, raw := iamCall(t, srv, "DeleteLoginProfile", url.Values{"UserName": {"u"}})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DeleteLoginProfile: %d want 404, body=%s", resp.StatusCode, raw)
+	}
+	if !strings.Contains(string(raw), "NoSuchEntity") {
+		t.Errorf("DeleteLoginProfile: missing NoSuchEntity code, body=%s", raw)
 	}
 }
 

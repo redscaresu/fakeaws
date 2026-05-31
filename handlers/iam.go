@@ -121,6 +121,26 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		// Same destroy-preflight rationale. The destroy flow walks
 		// signing certificates so it can delete them first.
 		app.iamListSigningCertificates(w, account, req)
+	case "ListVirtualMFADevices":
+		// Account-level (not user-level) virtual MFA enumeration in
+		// the aws_iam_user destroy preflight. Different from
+		// ListMFADevices (user-level). The provider passes
+		// AssignmentStatus=Assigned + UserName to scope; fakeaws
+		// doesn't model MFA so we return an empty list either way.
+		app.iamListVirtualMFADevices(w, account, req)
+	case "DeleteLoginProfile":
+		// User destroy attempts to delete the console-login profile
+		// unconditionally. fakeaws doesn't model login profiles;
+		// returning NoSuchEntity (404) is the correct contract — the
+		// provider treats that as "nothing to delete" and proceeds.
+		// Without a handler, the default unimplemented-action path
+		// would return a generic 500 that the provider treats as fatal.
+		app.iamDeleteLoginProfile(w, account, req)
+	case "GetLoginProfile":
+		// Read-path companion to DeleteLoginProfile — returns 404 so
+		// any provider preflight that asks "does this profile exist?"
+		// gets the "no" answer.
+		app.iamDeleteLoginProfile(w, account, req)
 	case "AttachUserPolicy":
 		// User-level analogue of AttachRolePolicy. Persisted now
 		// (Ticket 1 closeout): aws_iam_user_policy_attachment Read
@@ -788,6 +808,37 @@ type iamListMFADevicesResult struct {
 type iamListSigningCertificatesResult struct {
 	Certificates []string `xml:"Certificates>member,omitempty"`
 	IsTruncated  bool     `xml:"IsTruncated"`
+}
+
+// iamListVirtualMFADevices returns an empty <VirtualMFADevices/>
+// list. Account-level (not user-level) MFA enumeration; the
+// aws_iam_user destroy preflight calls this in addition to
+// ListMFADevices (which is user-level). Empty list → nothing to
+// detach/delete, destroy proceeds.
+func (app *Application) iamListVirtualMFADevices(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteQueryRPCResponse(w, "ListVirtualMFADevices", &iamListVirtualMFADevicesResult{})
+}
+
+type iamListVirtualMFADevicesResult struct {
+	VirtualMFADevices []string `xml:"VirtualMFADevices>member,omitempty"`
+	IsTruncated       bool     `xml:"IsTruncated"`
+}
+
+// iamDeleteLoginProfile returns NoSuchEntity. fakeaws doesn't model
+// console login profiles; the provider's aws_iam_user destroy calls
+// this unconditionally and treats NoSuchEntity as "already gone"
+// (the same pattern real AWS uses to make destroy idempotent).
+// Shared between DeleteLoginProfile and GetLoginProfile — both
+// expect the same 404-with-NoSuchEntity contract.
+//
+// IAM's wire-spec "not-found" code is NoSuchEntity, NOT the generic
+// ResourceNotFoundException that WriteAWSError emits for
+// models.ErrNotFound. The provider's destroy idempotency check
+// keys off NoSuchEntity exactly, so we use WriteServiceError to
+// pin the exact code string.
+func (app *Application) iamDeleteLoginProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
+		"NoSuchEntity", "The specified login profile does not exist.")
 }
 
 // iamListUserPolicies returns the inline-policy names attached to a
