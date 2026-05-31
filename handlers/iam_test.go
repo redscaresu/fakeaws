@@ -447,8 +447,17 @@ func TestIAM_UserDestroyPreflightListsReturn200Empty(t *testing.T) {
 			if resp.StatusCode != http.StatusOK {
 				t.Errorf("%s: %d want 200, body=%s", tc.action, resp.StatusCode, body)
 			}
-			if !strings.Contains(body, tc.wantMarker) && !strings.Contains(body, tc.action+"Result") {
-				t.Errorf("%s: response missing wrapper, body=%s", tc.action, body)
+			// Tight: assert no marshal-error comment AND that the
+			// result wrapper is present. The marshal-error comment
+			// would appear if awsproto.WriteQueryRPCResponse falls
+			// back when it can't serialize the result type (anonymous
+			// multi-field structs trip this — see iamGetUserPolicyResult
+			// inline comment).
+			if strings.Contains(body, "marshal error") {
+				t.Errorf("%s: marshal error in body, body=%s", tc.action, body)
+			}
+			if !strings.Contains(body, "<"+tc.action+"Result>") {
+				t.Errorf("%s: response missing <%sResult> wrapper, body=%s", tc.action, tc.action, body)
 			}
 		})
 	}

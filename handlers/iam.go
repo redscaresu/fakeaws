@@ -744,38 +744,50 @@ func (app *Application) iamListGroupsForUser(w http.ResponseWriter, account stri
 // the destroy-preflight rationale. Without this, aws-full-stack
 // destroy fails on "removing public SSH keys of user X" with
 // ListSSHPublicKeys 404.
+//
+// Uses a NAMED result struct (the awsproto encoder's marshalInnerXML
+// rejects anonymous multi-field structs — same gotcha documented on
+// iamGetUserPolicyResult).
 func (app *Application) iamListSSHPublicKeys(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	awsproto.WriteQueryRPCResponse(w, "ListSSHPublicKeys", &struct {
-		SSHPublicKeys []string `xml:"SSHPublicKeys>member,omitempty"`
-		IsTruncated   bool     `xml:"IsTruncated"`
-	}{})
+	awsproto.WriteQueryRPCResponse(w, "ListSSHPublicKeys", &iamListSSHPublicKeysResult{})
 }
 
 // iamListServiceSpecificCredentials returns an empty list. Same
 // destroy-preflight rationale as iamListSSHPublicKeys.
 func (app *Application) iamListServiceSpecificCredentials(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	awsproto.WriteQueryRPCResponse(w, "ListServiceSpecificCredentials", &struct {
-		ServiceSpecificCredentials []string `xml:"ServiceSpecificCredentials>member,omitempty"`
-	}{})
+	awsproto.WriteQueryRPCResponse(w, "ListServiceSpecificCredentials", &iamListServiceSpecificCredentialsResult{})
 }
 
 // iamListMFADevices returns an empty <MFADevices/> list. Same
 // destroy-preflight rationale; the provider walks MFA devices to
 // deactivate before DeleteUser.
 func (app *Application) iamListMFADevices(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	awsproto.WriteQueryRPCResponse(w, "ListMFADevices", &struct {
-		MFADevices  []string `xml:"MFADevices>member,omitempty"`
-		IsTruncated bool     `xml:"IsTruncated"`
-	}{})
+	awsproto.WriteQueryRPCResponse(w, "ListMFADevices", &iamListMFADevicesResult{})
 }
 
 // iamListSigningCertificates returns an empty <Certificates/> list.
 // Same destroy-preflight rationale.
 func (app *Application) iamListSigningCertificates(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	awsproto.WriteQueryRPCResponse(w, "ListSigningCertificates", &struct {
-		Certificates []string `xml:"Certificates>member,omitempty"`
-		IsTruncated  bool     `xml:"IsTruncated"`
-	}{})
+	awsproto.WriteQueryRPCResponse(w, "ListSigningCertificates", &iamListSigningCertificatesResult{})
+}
+
+type iamListSSHPublicKeysResult struct {
+	SSHPublicKeys []string `xml:"SSHPublicKeys>member,omitempty"`
+	IsTruncated   bool     `xml:"IsTruncated"`
+}
+
+type iamListServiceSpecificCredentialsResult struct {
+	ServiceSpecificCredentials []string `xml:"ServiceSpecificCredentials>member,omitempty"`
+}
+
+type iamListMFADevicesResult struct {
+	MFADevices  []string `xml:"MFADevices>member,omitempty"`
+	IsTruncated bool     `xml:"IsTruncated"`
+}
+
+type iamListSigningCertificatesResult struct {
+	Certificates []string `xml:"Certificates>member,omitempty"`
+	IsTruncated  bool     `xml:"IsTruncated"`
 }
 
 // iamListUserPolicies returns the inline-policy names attached to a
