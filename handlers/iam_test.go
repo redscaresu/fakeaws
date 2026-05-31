@@ -420,6 +420,77 @@ func TestIAM_AttachRolePolicyMissingPolicyIs404(t *testing.T) {
 	}
 }
 
+// TestIAM_UserDestroyPreflightListsReturn200Empty pins the Ticket A
+// closeout: the aws_iam_user destroy preflight walks four list
+// endpoints (SSH public keys, service-specific credentials, MFA
+// devices, signing certificates) before DeleteUser. Pre-T-A, each
+// returned 404 and broke destroy mid-flight; now each returns 200
+// with an empty list so destroy can proceed even on users with
+// none of those resources attached.
+func TestIAM_UserDestroyPreflightListsReturn200Empty(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	_, _ = iamCall(t, srv, "CreateUser", url.Values{"UserName": {"u"}})
+
+	cases := []struct {
+		action     string
+		wantMarker string
+	}{
+		{"ListSSHPublicKeys", "<SSHPublicKeys"},
+		{"ListServiceSpecificCredentials", "<ServiceSpecificCredentials"},
+		{"ListMFADevices", "<MFADevices"},
+		{"ListSigningCertificates", "<Certificates"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			resp, raw := iamCall(t, srv, tc.action, url.Values{"UserName": {"u"}})
+			body := string(raw)
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("%s: %d want 200, body=%s", tc.action, resp.StatusCode, body)
+			}
+			if !strings.Contains(body, tc.wantMarker) && !strings.Contains(body, tc.action+"Result") {
+				t.Errorf("%s: response missing wrapper, body=%s", tc.action, body)
+			}
+		})
+	}
+}
+
+// TestIAM_MockStateExcludesAutoSeededManagedPolicies pins the
+// Ticket B closeout: SeedManagedPolicy lazy-inserts AWS-managed
+// policy stubs (arn:aws:iam::aws:policy/*) when AttachRolePolicy
+// or AttachUserPolicy references one. They aren't tenant resources
+// and shouldn't surface in /mock/state's per-account view —
+// otherwise infrafactory's countOrphans gate fires on them after
+// destroy.
+func TestIAM_MockStateExcludesAutoSeededManagedPolicies(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	_, _ = iamCall(t, srv, "CreateUser", url.Values{"UserName": {"u"}})
+	_, _ = iamCall(t, srv, "AttachUserPolicy", url.Values{
+		"UserName":  {"u"},
+		"PolicyArn": {"arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"},
+	})
+
+	resp, raw := doGet(t, srv, "/mock/state/iam")
+	body := string(raw)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /mock/state/iam: %d", resp.StatusCode)
+	}
+	if strings.Contains(body, "arn:aws:iam::aws:policy/") {
+		t.Errorf("auto-seeded managed policy ARN leaked into /mock/state: %s", body)
+	}
+
+	// Also create a tenant policy and confirm it STAYS visible —
+	// the filter must only drop arn:aws:iam::aws:policy/* prefix.
+	_, _ = iamCall(t, srv, "CreatePolicy", url.Values{"PolicyName": {"mine"}})
+	resp, raw = doGet(t, srv, "/mock/state/iam")
+	body = string(raw)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /mock/state/iam: %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, `"mine"`) {
+		t.Errorf("tenant policy missing from /mock/state after filter: %s", body)
+	}
+}
+
 // ----- Unknown action -----
 
 func TestIAM_UnknownActionIs404(t *testing.T) {

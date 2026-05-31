@@ -98,6 +98,29 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		// uses them); return an empty <Groups/> list rather than a
 		// 404 so the destroy can proceed.
 		app.iamListGroupsForUser(w, account, req)
+	case "ListSSHPublicKeys":
+		// Sibling of ListGroupsForUser in the aws_iam_user destroy
+		// preflight: the provider walks SSH keys + service-specific
+		// credentials before DeleteUser so it can remove them first.
+		// fakeaws doesn't model either (no scenario uses them);
+		// returning an empty list lets destroy proceed. Without
+		// this, the 404 surfaces as "removing public SSH keys of
+		// user X: ListSSHPublicKeys ResourceNotFoundException" and
+		// blocks aws-full-stack destroy.
+		app.iamListSSHPublicKeys(w, account, req)
+	case "ListServiceSpecificCredentials":
+		// Same destroy-preflight rationale as ListSSHPublicKeys.
+		app.iamListServiceSpecificCredentials(w, account, req)
+	case "ListMFADevices":
+		// Same destroy-preflight rationale. The aws_iam_user destroy
+		// flow walks MFA devices to deactivate them before DeleteUser;
+		// fakeaws doesn't model MFA, so an empty list lets the destroy
+		// proceed.
+		app.iamListMFADevices(w, account, req)
+	case "ListSigningCertificates":
+		// Same destroy-preflight rationale. The destroy flow walks
+		// signing certificates so it can delete them first.
+		app.iamListSigningCertificates(w, account, req)
 	case "AttachUserPolicy":
 		// User-level analogue of AttachRolePolicy. Persisted now
 		// (Ticket 1 closeout): aws_iam_user_policy_attachment Read
@@ -194,6 +217,16 @@ func (app *Application) gatherIAMStateReal() map[string]any {
 	policies, _ := app.repo.ListPolicies(account)
 	pOut := make([]map[string]any, 0, len(policies))
 	for _, p := range policies {
+		// Filter AWS-managed policy stubs (arn:aws:iam::aws:policy/*)
+		// that SeedManagedPolicy lazy-inserts on Attach*Policy calls.
+		// They aren't tenant-owned resources — real AWS pre-creates
+		// them globally — so they shouldn't surface in /mock/state's
+		// per-account view and shouldn't count toward the
+		// infrafactory countOrphans gate that fires on non-empty
+		// collections after destroy. (Ticket B closeout.)
+		if strings.HasPrefix(p.ARN, "arn:aws:iam::aws:policy/") {
+			continue
+		}
 		pOut = append(pOut, map[string]any{
 			"name":       p.Name,
 			"arn":        p.ARN,
@@ -703,6 +736,45 @@ func (app *Application) iamDeleteUser(w http.ResponseWriter, account string, req
 func (app *Application) iamListGroupsForUser(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	awsproto.WriteQueryRPCResponse(w, "ListGroupsForUser", &struct {
 		Groups []string `xml:"Groups>member,omitempty"`
+	}{})
+}
+
+// iamListSSHPublicKeys returns an empty <SSHPublicKeys/> list.
+// Mirrors iamListGroupsForUser — see the dispatcher comment for
+// the destroy-preflight rationale. Without this, aws-full-stack
+// destroy fails on "removing public SSH keys of user X" with
+// ListSSHPublicKeys 404.
+func (app *Application) iamListSSHPublicKeys(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteQueryRPCResponse(w, "ListSSHPublicKeys", &struct {
+		SSHPublicKeys []string `xml:"SSHPublicKeys>member,omitempty"`
+		IsTruncated   bool     `xml:"IsTruncated"`
+	}{})
+}
+
+// iamListServiceSpecificCredentials returns an empty list. Same
+// destroy-preflight rationale as iamListSSHPublicKeys.
+func (app *Application) iamListServiceSpecificCredentials(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteQueryRPCResponse(w, "ListServiceSpecificCredentials", &struct {
+		ServiceSpecificCredentials []string `xml:"ServiceSpecificCredentials>member,omitempty"`
+	}{})
+}
+
+// iamListMFADevices returns an empty <MFADevices/> list. Same
+// destroy-preflight rationale; the provider walks MFA devices to
+// deactivate before DeleteUser.
+func (app *Application) iamListMFADevices(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteQueryRPCResponse(w, "ListMFADevices", &struct {
+		MFADevices  []string `xml:"MFADevices>member,omitempty"`
+		IsTruncated bool     `xml:"IsTruncated"`
+	}{})
+}
+
+// iamListSigningCertificates returns an empty <Certificates/> list.
+// Same destroy-preflight rationale.
+func (app *Application) iamListSigningCertificates(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteQueryRPCResponse(w, "ListSigningCertificates", &struct {
+		Certificates []string `xml:"Certificates>member,omitempty"`
+		IsTruncated  bool     `xml:"IsTruncated"`
 	}{})
 }
 
