@@ -61,6 +61,22 @@ runs `gitleaks protect --staged --no-banner` *before* `go test ./...`,
 so secret detection short-circuits the commit before tests have a
 chance to print env vars to terminal logs.
 
+### One-shot demo (with sibling repos)
+
+If you've cloned the four-repo layout, the easiest way to see fakeaws
+in action is via [`infrafactory`](https://github.com/redscaresu/infrafactory)'s
+`make up`:
+
+```bash
+cd ~/dev && for r in infrafactory fakeaws fakegcp mockway; do git clone https://github.com/redscaresu/$r.git; done
+cd infrafactory && make up
+./bin/infrafactory run scenarios/training/aws-s3.yaml --config infrafactory.yaml   # drives fakeaws end-to-end
+make down
+```
+
+That brings up fakeaws on `:8082`, exercises an AWS scenario through
+`tofu apply → test → destroy`, and tears everything down.
+
 ## Run
 
 ```bash
