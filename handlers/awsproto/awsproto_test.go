@@ -42,6 +42,12 @@ func TestErrorMatrixCoversEveryWireShapeSentinelCell(t *testing.T) {
 	}{
 		{ShapeXML, "application/xml", []string{"<Error>", "<Code>", "<Message>"}},
 		{ShapeQueryRPC, "text/xml", []string{"<ErrorResponse>", "<Code>", "<Type>"}},
+		// EC2 uses Query Protocol but with a distinct envelope — the
+		// SDK parses <Response><Errors><Error>...</Error></Errors></Response>.
+		// Sending the RDS/IAM envelope to an EC2 client produces
+		// "UnknownError: UnknownError" because no field path matches,
+		// which is exactly how aws-instance failed in the 2026-05-29 sweep.
+		{ShapeEC2Query, "text/xml", []string{"<Response>", "<Errors>", "<Error>", "<Code>", "<Message>"}},
 		{ShapeJSON10, "application/x-amz-json-1.0", []string{`"__type"`, `"message"`}},
 		{ShapeJSON11, "application/x-amz-json-1.1", []string{`"__type"`, `"message"`}},
 		{ShapeJSONREST, "application/json", []string{`"__type"`, `"message"`}},
@@ -83,8 +89,28 @@ func TestErrorMatrixCoversEveryWireShapeSentinelCell(t *testing.T) {
 			})
 		}
 	}
-	if cells < 20 {
-		t.Fatalf("only exercised %d (shape × sentinel) cells; S43-T2 acceptance requires ≥20", cells)
+	if cells < 24 {
+		t.Fatalf("only exercised %d (shape × sentinel) cells; expected ≥24 after ShapeEC2Query was added", cells)
+	}
+}
+
+// TestEC2QueryErrorEnvelopeIsNotIAMShape pins the bug the 2026-05-29
+// sweep surfaced: writeEC2QueryError must NOT emit the IAM/RDS
+// <ErrorResponse> envelope — sending that to the EC2 SDK produces
+// "UnknownError: UnknownError" because the SDK's parser can't find
+// any field at the path it expects. EC2 demands the
+// <Response><Errors><Error>...</Error></Errors></Response> shape.
+func TestEC2QueryErrorEnvelopeIsNotIAMShape(t *testing.T) {
+	w := httptest.NewRecorder()
+	WriteAWSError(w, ShapeEC2Query, models.ErrNotFound)
+	body := w.Body.String()
+	if strings.Contains(body, "<ErrorResponse>") {
+		t.Fatalf("EC2 error envelope must not be the IAM/RDS <ErrorResponse> shape — the SDK can't parse it. Body:\n%s", body)
+	}
+	for _, want := range []string{"<Response>", "<Errors>", "<Error>", "<Code>", "<Message>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing required EC2 envelope element %q in body:\n%s", want, body)
+		}
 	}
 }
 

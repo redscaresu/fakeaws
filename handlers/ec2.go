@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -34,7 +35,7 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	region := chi.URLParam(r, "region")
 	req, err := awsproto.ParseQueryRPC(r)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
@@ -60,6 +61,13 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 		app.ec2DescribeSubnets(w, account, region, req)
 	case "DeleteSubnet":
 		app.ec2DeleteSubnet(w, account, region, req)
+	case "ModifySubnetAttribute":
+		// terraform-provider-aws calls this after CreateSubnet to
+		// toggle MapPublicIpOnLaunch / AssignIpv6AddressOnCreation /
+		// EnableDns64. We don't persist these scalar flags on the
+		// subnet fixture (no scenario reads them back), so the no-op
+		// 200 response matches what the provider needs to proceed.
+		app.ec2NoOpSuccess(w, "ModifySubnetAttribute")
 	case "DescribeNetworkInterfaces":
 		// terraform-provider-aws's aws_subnet Delete preflight calls
 		// DescribeNetworkInterfaces to enumerate ENIs attached to the
@@ -85,6 +93,8 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	// ----- RouteTable + Route -----
 	case "CreateRouteTable":
 		app.ec2CreateRouteTable(w, account, region, req)
+	case "DescribeRouteTables":
+		app.ec2DescribeRouteTables(w, account, region, req)
 	case "DeleteRouteTable":
 		app.ec2DeleteRouteTable(w, account, region, req)
 	case "AssociateRouteTable":
@@ -126,6 +136,34 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "DescribeImages":
 		app.ec2DescribeImages(w, account, region, req)
 
+	// ----- InstanceType (read-only fixture) -----
+	// terraform-provider-aws calls DescribeInstanceTypes during the
+	// read path of `aws_instance` to surface capacity fields back to
+	// state. Without this handler the provider gets a 404 and the
+	// apply fails *after* successful RunInstances — a confusing
+	// post-create failure that the LLM can't act on.
+	case "DescribeInstanceTypes":
+		app.ec2DescribeInstanceTypes(w, account, region, req)
+
+	// ----- Tags (read-only) -----
+	// terraform-provider-aws calls DescribeTags on aws_instance's read
+	// path to surface launch-template ID tags into state. Real EC2
+	// returns 200 with an empty <tagSet> when nothing matches; the
+	// fakeaws default-arm 404 looked like the resource didn't exist
+	// and broke the read entirely. We don't model tag storage yet —
+	// the empty set is the correct "no tags here" answer.
+	case "DescribeTags":
+		app.ec2DescribeTags(w, account, region, req)
+
+	// ----- InstanceAttribute (read-only) -----
+	// terraform-provider-aws calls DescribeInstanceAttribute for each
+	// scalar attribute on the read path (disableApiTermination,
+	// instanceInitiatedShutdownBehavior, userData, etc.). We return
+	// the AWS default for the requested attribute — these aren't
+	// stored on our instance fixture.
+	case "DescribeInstanceAttribute":
+		app.ec2DescribeInstanceAttribute(w, account, region, req)
+
 	// ----- SecurityGroup -----
 	case "CreateSecurityGroup":
 		app.ec2CreateSecurityGroup(w, account, region, req)
@@ -146,7 +184,7 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	// a log line — per concepts.md "Anti-patterns explicitly forbidden",
 	// no silent 200.
 	default:
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("EC2 action %q not yet implemented in fakeaws v1: %w", req.Action, models.ErrNotFound))
 	}
 }
@@ -193,24 +231,24 @@ type ec2VpcIpv6BlockAssociationXML struct {
 }
 
 type ec2DescribeVpcsResult struct {
-	VpcSet  []ec2VpcXML `xml:"vpcSet>item"`
+	VpcSet []ec2VpcXML `xml:"vpcSet>item"`
 }
 
 type ec2CreateVpcResult struct {
-	Vpc     ec2VpcXML `xml:"vpc"`
+	Vpc ec2VpcXML `xml:"vpc"`
 }
 
 func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	cidr := req.Params.Get("CidrBlock")
 	if cidr == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("CidrBlock required: %w", models.ErrConflict))
 		return
 	}
 	id := "vpc-" + ec2RandID()
 	v := newEC2VPC(account, region, id, cidr)
 	if err := app.repo.CreateVPC(account, v); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	out := ec2CreateVpcResult{Vpc: ec2VpcToXML(v)}
@@ -220,7 +258,7 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	vpcs, err := app.repo.ListVPCs(account, region)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	out := ec2DescribeVpcsResult{VpcSet: make([]ec2VpcXML, 0, len(vpcs))}
@@ -240,7 +278,7 @@ func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region s
 // default to true (matching the AWS default for non-default VPCs).
 func (app *Application) ec2DescribeVpcAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	if _, err := app.repo.GetVPC(account, region, req.Params.Get("VpcId")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	attr := req.Params.Get("Attribute")
@@ -263,7 +301,7 @@ func (app *Application) ec2DescribeVpcAttribute(w http.ResponseWriter, account, 
 // depends on the persisted value.
 func (app *Application) ec2ModifyVpcAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	if _, err := app.repo.GetVPC(account, region, req.Params.Get("VpcId")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "ModifyVpcAttribute", nil)
@@ -282,7 +320,7 @@ type ec2BoolValue struct {
 
 func (app *Application) ec2DeleteVpc(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DeleteVPC(account, region, req.Params.Get("VpcId")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DeleteVpc", nil)
@@ -297,23 +335,23 @@ func (app *Application) ec2DeleteVpc(w http.ResponseWriter, account, region stri
 // retries)" because the unmarshaller can't construct the expected
 // struct.
 type ec2SubnetXML struct {
-	SubnetId                       string                          `xml:"subnetId"`
-	VpcId                          string                          `xml:"vpcId"`
-	State                          string                          `xml:"state"`
-	CidrBlock                      string                          `xml:"cidrBlock"`
-	AvailabilityZone               string                          `xml:"availabilityZone"`
-	AvailabilityZoneId             string                          `xml:"availabilityZoneId"`
-	AvailableIpAddressCount        int                             `xml:"availableIpAddressCount"`
-	OwnerId                        string                          `xml:"ownerId"`
-	SubnetArn                      string                          `xml:"subnetArn"`
-	DefaultForAz                   bool                            `xml:"defaultForAz"`
-	MapPublicIpOnLaunch            bool                            `xml:"mapPublicIpOnLaunch"`
-	MapCustomerOwnedIpOnLaunch     bool                            `xml:"mapCustomerOwnedIpOnLaunch"`
-	AssignIpv6AddressOnCreation    bool                            `xml:"assignIpv6AddressOnCreation"`
-	EnableDns64                    bool                            `xml:"enableDns64"`
-	Ipv6Native                     bool                            `xml:"ipv6Native"`
-	Ipv6CidrBlockAssociationSet    []ec2SubnetIpv6BlockAssociation `xml:"ipv6CidrBlockAssociationSet>item,omitempty"`
-	PrivateDnsNameOptionsOnLaunch  *ec2SubnetPrivateDnsOptionsXML  `xml:"privateDnsNameOptionsOnLaunch,omitempty"`
+	SubnetId                      string                          `xml:"subnetId"`
+	VpcId                         string                          `xml:"vpcId"`
+	State                         string                          `xml:"state"`
+	CidrBlock                     string                          `xml:"cidrBlock"`
+	AvailabilityZone              string                          `xml:"availabilityZone"`
+	AvailabilityZoneId            string                          `xml:"availabilityZoneId"`
+	AvailableIpAddressCount       int                             `xml:"availableIpAddressCount"`
+	OwnerId                       string                          `xml:"ownerId"`
+	SubnetArn                     string                          `xml:"subnetArn"`
+	DefaultForAz                  bool                            `xml:"defaultForAz"`
+	MapPublicIpOnLaunch           bool                            `xml:"mapPublicIpOnLaunch"`
+	MapCustomerOwnedIpOnLaunch    bool                            `xml:"mapCustomerOwnedIpOnLaunch"`
+	AssignIpv6AddressOnCreation   bool                            `xml:"assignIpv6AddressOnCreation"`
+	EnableDns64                   bool                            `xml:"enableDns64"`
+	Ipv6Native                    bool                            `xml:"ipv6Native"`
+	Ipv6CidrBlockAssociationSet   []ec2SubnetIpv6BlockAssociation `xml:"ipv6CidrBlockAssociationSet>item,omitempty"`
+	PrivateDnsNameOptionsOnLaunch *ec2SubnetPrivateDnsOptionsXML  `xml:"privateDnsNameOptionsOnLaunch,omitempty"`
 }
 
 type ec2SubnetIpv6BlockAssociation struct {
@@ -345,14 +383,14 @@ type ec2DescribeNetworkInterfacesResult struct {
 }
 
 type ec2CreateSubnetResult struct {
-	Subnet  ec2SubnetXML `xml:"subnet"`
+	Subnet ec2SubnetXML `xml:"subnet"`
 }
 
 func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	vpcID := req.Params.Get("VpcId")
 	cidr := req.Params.Get("CidrBlock")
 	if vpcID == "" || cidr == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("VpcId and CidrBlock required: %w", models.ErrConflict))
 		return
 	}
@@ -363,7 +401,7 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 	id := "subnet-" + ec2RandID()
 	s := newEC2Subnet(account, region, id, vpcID, cidr, az)
 	if err := app.repo.CreateSubnet(account, s); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	out := ec2CreateSubnetResult{Subnet: ec2SubnetToXML(s)}
@@ -396,7 +434,7 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 	}
 	subnets, err := app.repo.ListSubnets(account, region, vpcFilter)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	out := ec2DescribeSubnetsResult{SubnetSet: make([]ec2SubnetXML, 0, len(subnets))}
@@ -412,8 +450,21 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 }
 
 func (app *Application) ec2DeleteSubnet(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteSubnet(account, region, req.Params.Get("SubnetId")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+	subnetID := req.Params.Get("SubnetId")
+	// Lazily GC any terminated instances in this subnet so the FK
+	// constraint doesn't block the delete. Real AWS does this on a
+	// ~60min timer; in the mock we mirror that semantics on demand.
+	// terraform-provider-aws calls DeleteSubnet only after it has
+	// already TerminateInstances'd everything that referenced it, so
+	// purging terminated-state rows here is the right scope.
+	instances, _ := app.repo.ListInstances(account, region)
+	for _, inst := range instances {
+		if inst.SubnetID == subnetID && inst.State == "terminated" {
+			_ = app.repo.DeleteInstance(account, region, inst.ID)
+		}
+	}
+	if err := app.repo.DeleteSubnet(account, region, subnetID); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DeleteSubnet", nil)
@@ -499,8 +550,8 @@ func ec2SubnetToXML(s *repository.EC2Subnet) ec2SubnetXML {
 // ----- InternetGateway handlers -----
 
 type ec2IgwAttachmentXML struct {
-	VpcId   string   `xml:"vpcId"`
-	State   string   `xml:"state"`
+	VpcId string `xml:"vpcId"`
+	State string `xml:"state"`
 }
 
 type ec2IgwXML struct {
@@ -532,7 +583,7 @@ func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateInternetGateway(account, igw); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateInternetGateway", &ec2CreateIgwResult{InternetGateway: ec2IgwToXML(igw)})
@@ -541,7 +592,7 @@ func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account,
 func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	igws, err := app.repo.ListInternetGateways(account, region)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	out := ec2DescribeIgwsResult{InternetGatewaySet: make([]ec2IgwXML, 0, len(igws))}
@@ -555,12 +606,12 @@ func (app *Application) ec2AttachInternetGateway(w http.ResponseWriter, account,
 	igwID := req.Params.Get("InternetGatewayId")
 	vpcID := req.Params.Get("VpcId")
 	if igwID == "" || vpcID == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("InternetGatewayId and VpcId required: %w", models.ErrConflict))
 		return
 	}
 	if err := app.repo.AttachInternetGateway(account, region, igwID, vpcID); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "AttachInternetGateway", nil)
@@ -568,7 +619,7 @@ func (app *Application) ec2AttachInternetGateway(w http.ResponseWriter, account,
 
 func (app *Application) ec2DetachInternetGateway(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DetachInternetGateway(account, region, req.Params.Get("InternetGatewayId")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DetachInternetGateway", nil)
@@ -576,7 +627,7 @@ func (app *Application) ec2DetachInternetGateway(w http.ResponseWriter, account,
 
 func (app *Application) ec2DeleteInternetGateway(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DeleteInternetGateway(account, region, req.Params.Get("InternetGatewayId")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DeleteInternetGateway", nil)
@@ -585,26 +636,62 @@ func (app *Application) ec2DeleteInternetGateway(w http.ResponseWriter, account,
 // ----- RouteTable + Route handlers -----
 
 type ec2RouteTableXML struct {
-	RouteTableId string   `xml:"routeTableId"`
-	VpcId        string   `xml:"vpcId"`
+	RouteTableId string `xml:"routeTableId"`
+	VpcId        string `xml:"vpcId"`
+	// routeSet must appear in DescribeRouteTables responses so the
+	// provider's CreateRoute wait-loop can confirm the new entry
+	// landed (otherwise: 5-minute timeout per iter).
+	Routes []ec2RouteXML `xml:"routeSet>item,omitempty"`
+	// associationSet — same wait-loop story for aws_route_table_association.
+	// Provider polls DescribeRouteTables looking for the new association
+	// in this set; without it the wait times out at 5 min.
+	Associations []ec2RouteTableAssociationXML `xml:"associationSet>item,omitempty"`
+}
+
+type ec2RouteTableAssociationXML struct {
+	AssociationId string `xml:"routeTableAssociationId"`
+	RouteTableId  string `xml:"routeTableId"`
+	SubnetId      string `xml:"subnetId"`
+	// AssociationState is the structured indicator the provider uses
+	// to decide whether the association is ready. "associated" is the
+	// terminal state; nothing else exists in our model.
+	AssociationState struct {
+		State string `xml:"state"`
+	} `xml:"associationState"`
 }
 
 type ec2CreateRouteTableResult struct {
 	RouteTable ec2RouteTableXML `xml:"routeTable"`
 }
 
+// ec2RouteXML mirrors the per-route entry under <routeSet><item>. The
+// provider's CreateRoute wait-loop polls DescribeRouteTables and looks
+// for its destination CIDR in this set; without it, the wait times
+// out after 5 minutes per iteration. Real EC2 also includes a State
+// field ("active" once the route is installed) — we always emit
+// "active" because there's no async install step in the mock.
+type ec2RouteXML struct {
+	DestinationCidrBlock string `xml:"destinationCidrBlock"`
+	GatewayId            string `xml:"gatewayId,omitempty"`
+	NatGatewayId         string `xml:"natGatewayId,omitempty"`
+	InstanceId           string `xml:"instanceId,omitempty"`
+	NetworkInterfaceId   string `xml:"networkInterfaceId,omitempty"`
+	State                string `xml:"state"`
+	Origin               string `xml:"origin"`
+}
+
 type ec2AssociateRouteTableResult struct {
-	AssociationId string   `xml:"associationId"`
+	AssociationId string `xml:"associationId"`
 }
 
 type ec2CreateRouteResult struct {
-	Return  bool     `xml:"return"`
+	Return bool `xml:"return"`
 }
 
 func (app *Application) ec2CreateRouteTable(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	vpcID := req.Params.Get("VpcId")
 	if vpcID == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("VpcId required: %w", models.ErrConflict))
 		return
 	}
@@ -615,16 +702,108 @@ func (app *Application) ec2CreateRouteTable(w http.ResponseWriter, account, regi
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateRouteTable(account, rt); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateRouteTable",
 		&ec2CreateRouteTableResult{RouteTable: ec2RouteTableXML{RouteTableId: rt.ID, VpcId: rt.VPCID}})
 }
 
+// ec2NoOpSuccess returns a minimal 200 response for EC2 actions we
+// accept but don't model. Real EC2 returns an action-named envelope
+// with a <return>true</return> child for these mutating actions —
+// the provider just needs the envelope shape to parse successfully.
+func (app *Application) ec2NoOpSuccess(w http.ResponseWriter, action string) {
+	awsproto.WriteEC2QueryRPCResponse(w, action, &struct {
+		Return bool `xml:"return"`
+	}{Return: true})
+}
+
+// ec2DescribeRouteTablesResult mirrors the AWS EC2 DescribeRouteTables
+// response. Provider's create wait-loop polls this right after
+// CreateRouteTable to confirm the RT exists; without the handler the
+// default-arm returned 404 and the wait timed out.
+type ec2DescribeRouteTablesResult struct {
+	RouteTableSet []ec2RouteTableXML `xml:"routeTableSet>item"`
+}
+
+func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	var wanted []string
+	for k, vs := range req.Params {
+		if strings.HasPrefix(k, "RouteTableId.") && len(vs) > 0 {
+			wanted = append(wanted, vs[0])
+		}
+	}
+	// Pre-load all routes once and key by route_table_id so the
+	// per-RT lookup below is O(1). ListRoutes returns the union for
+	// the account; we filter by RT id at populate time.
+	allRoutes, _ := app.repo.ListRoutes(account)
+	routesByRT := make(map[string][]ec2RouteXML, len(allRoutes))
+	for _, rt := range allRoutes {
+		routesByRT[rt.RouteTableID] = append(routesByRT[rt.RouteTableID], ec2RouteXML{
+			DestinationCidrBlock: rt.DestinationCidrBlock,
+			GatewayId:            rt.GatewayID,
+			NatGatewayId:         rt.NatGatewayID,
+			InstanceId:           rt.InstanceID,
+			NetworkInterfaceId:   rt.NetworkInterfaceID,
+			State:                "active",
+			Origin:               "CreateRoute",
+		})
+	}
+	// Same trick for associations — populate <associationSet> so the
+	// CreateAssociation wait-loop terminates.
+	allAssocs, _ := app.repo.ListRouteTableAssociations(account)
+	assocsByRT := make(map[string][]ec2RouteTableAssociationXML, len(allAssocs))
+	for _, a := range allAssocs {
+		x := ec2RouteTableAssociationXML{
+			AssociationId: a.ID, RouteTableId: a.RouteTableID, SubnetId: a.SubnetID,
+		}
+		x.AssociationState.State = "associated"
+		assocsByRT[a.RouteTableID] = append(assocsByRT[a.RouteTableID], x)
+	}
+	out := ec2DescribeRouteTablesResult{RouteTableSet: []ec2RouteTableXML{}}
+	if len(wanted) == 0 {
+		rts, err := app.repo.ListRouteTables(account, region)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return
+		}
+		for _, rt := range rts {
+			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableXML{
+				RouteTableId: rt.ID, VpcId: rt.VPCID,
+				Routes:       routesByRT[rt.ID],
+				Associations: assocsByRT[rt.ID],
+			})
+		}
+	} else {
+		for _, id := range wanted {
+			rt, err := app.repo.GetRouteTable(account, region, id)
+			if err != nil {
+				// Mirror the SG fix: surface the AWS-specific code
+				// terraform-provider-aws's destroy wait-loop expects
+				// rather than the generic ResourceNotFoundException.
+				if errors.Is(err, models.ErrNotFound) {
+					awsproto.WriteServiceError(w, awsproto.ShapeEC2Query,
+						http.StatusNotFound, "InvalidRouteTableID.NotFound",
+						fmt.Sprintf("The route table ID '%s' does not exist", id))
+					return
+				}
+				awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+				return
+			}
+			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableXML{
+				RouteTableId: rt.ID, VpcId: rt.VPCID,
+				Routes:       routesByRT[rt.ID],
+				Associations: assocsByRT[rt.ID],
+			})
+		}
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeRouteTables", &out)
+}
+
 func (app *Application) ec2DeleteRouteTable(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DeleteRouteTable(account, region, req.Params.Get("RouteTableId")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DeleteRouteTable", nil)
@@ -634,7 +813,7 @@ func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account, r
 	rtID := req.Params.Get("RouteTableId")
 	subnetID := req.Params.Get("SubnetId")
 	if rtID == "" || subnetID == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("RouteTableId and SubnetId required: %w", models.ErrConflict))
 		return
 	}
@@ -642,7 +821,7 @@ func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account, r
 		ID: "rtbassoc-" + ec2RandID(), RouteTableID: rtID, SubnetID: subnetID,
 	}
 	if err := app.repo.AssociateRouteTable(account, region, assoc); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "AssociateRouteTable",
@@ -651,7 +830,7 @@ func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account, r
 
 func (app *Application) ec2DisassociateRouteTable(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DisassociateRouteTable(account, req.Params.Get("AssociationId")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DisassociateRouteTable", nil)
@@ -667,12 +846,12 @@ func (app *Application) ec2CreateRoute(w http.ResponseWriter, account, region st
 		NetworkInterfaceID:   req.Params.Get("NetworkInterfaceId"),
 	}
 	if rt.RouteTableID == "" || rt.DestinationCidrBlock == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("RouteTableId and DestinationCidrBlock required: %w", models.ErrConflict))
 		return
 	}
 	if err := app.repo.CreateRoute(account, region, rt); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateRoute", &ec2CreateRouteResult{Return: true})
@@ -681,7 +860,7 @@ func (app *Application) ec2CreateRoute(w http.ResponseWriter, account, region st
 func (app *Application) ec2DeleteRoute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DeleteRoute(account, region,
 		req.Params.Get("RouteTableId"), req.Params.Get("DestinationCidrBlock")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DeleteRoute", nil)
@@ -690,15 +869,15 @@ func (app *Application) ec2DeleteRoute(w http.ResponseWriter, account, region st
 // ----- EIP handlers -----
 
 type ec2AddressXML struct {
-	AllocationId string   `xml:"allocationId"`
-	PublicIp     string   `xml:"publicIp"`
-	Domain       string   `xml:"domain"`
+	AllocationId string `xml:"allocationId"`
+	PublicIp     string `xml:"publicIp"`
+	Domain       string `xml:"domain"`
 }
 
 type ec2AllocateAddressResult struct {
-	AllocationId string   `xml:"allocationId"`
-	PublicIp     string   `xml:"publicIp"`
-	Domain       string   `xml:"domain"`
+	AllocationId string `xml:"allocationId"`
+	PublicIp     string `xml:"publicIp"`
+	Domain       string `xml:"domain"`
 }
 
 type ec2DescribeAddressesResult struct {
@@ -725,7 +904,7 @@ func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, regio
 	}
 	if domain != "vpc" {
 		// classic EIPs are out of scope at v1 per PLAN.md S44.
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("Domain=%q not supported (v1 supports 'vpc' only): %w", domain, models.ErrConflict))
 		return
 	}
@@ -737,7 +916,7 @@ func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, regio
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateEIP(account, eip); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "AllocateAddress",
@@ -762,7 +941,7 @@ func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, reg
 	for id := range wanted {
 		eip, err := app.repo.GetEIP(account, region, id)
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
 		}
 		out.AddressSet = append(out.AddressSet, ec2AddressXML{
@@ -774,7 +953,7 @@ func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, reg
 
 func (app *Application) ec2ReleaseAddress(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DeleteEIP(account, region, req.Params.Get("AllocationId")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "ReleaseAddress", nil)
@@ -804,7 +983,7 @@ type ec2IpPermission struct {
 }
 
 type ec2SgIpRangeXML struct {
-	CidrIp  string   `xml:"cidrIp"`
+	CidrIp string `xml:"cidrIp"`
 }
 
 type ec2SgIpPermissionXML struct {
@@ -824,7 +1003,7 @@ type ec2SecurityGroupXML struct {
 }
 
 type ec2CreateSecurityGroupResult struct {
-	GroupId string   `xml:"groupId"`
+	GroupId string `xml:"groupId"`
 }
 
 type ec2DescribeSecurityGroupsResult struct {
@@ -908,19 +1087,19 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 	desc := req.Params.Get("GroupDescription")
 	vpcID := req.Params.Get("VpcId")
 	if groupName == "" || desc == "" || vpcID == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("GroupName, GroupDescription, and VpcId required: %w", models.ErrConflict))
 		return
 	}
 	id := "sg-" + ec2RandID()
 	sg := &repository.EC2SecurityGroup{
 		ID: id, VPCID: vpcID, GroupName: groupName, Description: desc,
-		Region: region,
-		ARN:    awsproto.BuildEC2SecurityGroupARN(region, id),
+		Region:    region,
+		ARN:       awsproto.BuildEC2SecurityGroupARN(region, id),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateSecurityGroup(account, sg); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateSecurityGroup",
@@ -936,7 +1115,7 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 		}
 	}
 	if len(wanted) == 0 {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("DescribeSecurityGroups without GroupId.<n> filter not yet supported: %w", models.ErrConflict))
 		return
 	}
@@ -944,12 +1123,28 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 	for _, id := range wanted {
 		sg, err := app.repo.GetSecurityGroup(account, region, id)
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			// terraform-provider-aws's destroy wait-loop polls
+			// DescribeSecurityGroups({sg-id}) after DeleteSecurityGroup
+			// and treats EXACTLY the AWS code "InvalidGroup.NotFound"
+			// as "deletion complete". A generic ResourceNotFoundException
+			// (the default mapDomainError gives) is treated as an
+			// unexpected hard error and the wait bails out, leaving
+			// the SG marked as undeleted in state. Surface the
+			// service-specific code on this read path so destroy
+			// drains cleanly. Same pattern as the WriteServiceError
+			// note for RDS's DBInstanceNotFound.
+			if errors.Is(err, models.ErrNotFound) {
+				awsproto.WriteServiceError(w, awsproto.ShapeEC2Query,
+					http.StatusNotFound, "InvalidGroup.NotFound",
+					fmt.Sprintf("The security group ID '%s' does not exist", id))
+				return
+			}
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
 		}
 		ing, eg, err := app.repo.GetSecurityGroupRules(account, region, id)
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
 		}
 		out.SecurityGroupSet = append(out.SecurityGroupSet, ec2SecurityGroupXML{
@@ -965,12 +1160,12 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, r
 	id := req.Params.Get("GroupId")
 	if id == "" {
 		// AWS also accepts GroupName for non-VPC SGs; v1 supports GroupId only.
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("GroupId required: %w", models.ErrConflict))
 		return
 	}
 	if err := app.repo.DeleteSecurityGroup(account, region, id); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DeleteSecurityGroup", nil)
@@ -983,25 +1178,25 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, r
 func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
 	sgID := req.Params.Get("GroupId")
 	if sgID == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("GroupId required: %w", models.ErrConflict))
 		return
 	}
 	add := parseIpPermissions(req)
 	if len(add) == 0 {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("at least one IpPermissions.<n>.* required: %w", models.ErrConflict))
 		return
 	}
 	existing, err := loadSGRules(app, account, region, sgID, direction)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	merged := mergeIpPermissions(existing, add)
 	body, _ := json.Marshal(merged)
 	if err := app.repo.UpdateSecurityGroupRules(account, region, sgID, direction, body); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	action := "AuthorizeSecurityGroupIngress"
@@ -1014,20 +1209,20 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
 	sgID := req.Params.Get("GroupId")
 	if sgID == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("GroupId required: %w", models.ErrConflict))
 		return
 	}
 	rm := parseIpPermissions(req)
 	existing, err := loadSGRules(app, account, region, sgID, direction)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	remaining := subtractIpPermissions(existing, rm)
 	body, _ := json.Marshal(remaining)
 	if err := app.repo.UpdateSecurityGroupRules(account, region, sgID, direction, body); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	action := "RevokeSecurityGroupIngress"
@@ -1110,18 +1305,18 @@ func subtractIpPermissions(existing, rm []ec2IpPermission) []ec2IpPermission {
 // ----- Instance handlers -----
 
 type ec2InstanceXML struct {
-	InstanceId           string             `xml:"instanceId"`
-	ImageId              string             `xml:"imageId"`
-	InstanceType         string             `xml:"instanceType"`
-	SubnetId             string             `xml:"subnetId"`
-	IamProfile           *ec2IamProfileXML  `xml:"iamInstanceProfile,omitempty"`
-	InstanceState        ec2InstanceStateXML `xml:"instanceState"`
-	GroupSet             []ec2InstanceSGXML `xml:"groupSet>item,omitempty"`
+	InstanceId    string              `xml:"instanceId"`
+	ImageId       string              `xml:"imageId"`
+	InstanceType  string              `xml:"instanceType"`
+	SubnetId      string              `xml:"subnetId"`
+	IamProfile    *ec2IamProfileXML   `xml:"iamInstanceProfile,omitempty"`
+	InstanceState ec2InstanceStateXML `xml:"instanceState"`
+	GroupSet      []ec2InstanceSGXML  `xml:"groupSet>item,omitempty"`
 }
 
 type ec2IamProfileXML struct {
-	Arn     string   `xml:"arn"`
-	Id      string   `xml:"id"`
+	Arn string `xml:"arn"`
+	Id  string `xml:"id"`
 }
 
 // ec2InstanceStateXML is rendered through three distinct field
@@ -1134,7 +1329,7 @@ type ec2InstanceStateXML struct {
 }
 
 type ec2InstanceSGXML struct {
-	GroupId string   `xml:"groupId"`
+	GroupId string `xml:"groupId"`
 }
 
 type ec2RunInstancesResult struct {
@@ -1144,7 +1339,7 @@ type ec2RunInstancesResult struct {
 }
 
 type ec2DescribeInstancesResult struct {
-	ReservationSet []ec2ReservationXML   `xml:"reservationSet>item"`
+	ReservationSet []ec2ReservationXML `xml:"reservationSet>item"`
 }
 
 type ec2ReservationXML struct {
@@ -1154,11 +1349,11 @@ type ec2ReservationXML struct {
 }
 
 type ec2TerminateInstancesResult struct {
-	InstancesSet   []ec2InstanceStateChangeXML `xml:"instancesSet>item"`
+	InstancesSet []ec2InstanceStateChangeXML `xml:"instancesSet>item"`
 }
 
 type ec2InstanceStateChangeXML struct {
-	InstanceId    string             `xml:"instanceId"`
+	InstanceId    string              `xml:"instanceId"`
 	CurrentState  ec2InstanceStateXML `xml:"currentState"`
 	PreviousState ec2InstanceStateXML `xml:"previousState"`
 }
@@ -1179,7 +1374,7 @@ func ec2InstanceStateForName(name string) ec2InstanceStateXML {
 func (app *Application) ec2InstanceToXML(account string, inst *repository.EC2Instance) ec2InstanceXML {
 	x := ec2InstanceXML{
 		InstanceId:    inst.ID,
-		ImageId:        inst.AMIID,
+		ImageId:       inst.AMIID,
 		InstanceType:  inst.InstanceType,
 		SubnetId:      inst.SubnetID,
 		InstanceState: ec2InstanceStateForName(inst.State),
@@ -1224,7 +1419,7 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	imageID := req.Params.Get("ImageId")
 	instanceType := req.Params.Get("InstanceType")
 	if subnetID == "" || imageID == "" || instanceType == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("SubnetId, ImageId, InstanceType required: %w", models.ErrConflict))
 		return
 	}
@@ -1232,23 +1427,31 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	// BLOCKING #1) so RunInstances and DescribeImages stay consistent
 	// regardless of which region the caller picked.
 	app.ensureAMIFixturesForRegion(account, region)
+	// Auto-seed the caller's AMI id when it's not in the fixture set.
+	// Real AWS rejects unknown AMIs, but mocks optimize for fast
+	// feedback (feedback_mock_design memory): the LLM frequently picks
+	// example AMI IDs from AWS docs (ami-0c55b159..., ami-0123abcd...)
+	// and gating test scenarios on whether those exact IDs are seeded
+	// produces noise without catching real bugs. Treat any well-formed
+	// `ami-*` value the caller hands us as a valid stub.
+	app.ensureAMIExists(account, region, imageID)
 	// Subnet/VPC pairing — if SecurityGroupId.<n> is given, the SGs'
 	// VPC must match the subnet's VPC (S44-T8 regression pattern; the
 	// load-bearing fakegcp pass-27 finding ported to AWS).
 	subnet, err := app.repo.GetSubnet(account, region, subnetID)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	sgIDs := parseSecurityGroupIDs(req)
 	for _, sgID := range sgIDs {
 		sg, err := app.repo.GetSecurityGroup(account, region, sgID)
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
 		}
 		if sg.VPCID != subnet.VPCID {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 				fmt.Errorf("security group %q lives in vpc %q but subnet %q is in vpc %q: %w",
 					sgID, sg.VPCID, subnetID, subnet.VPCID, models.ErrNotFound))
 			return
@@ -1266,12 +1469,12 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		CreatedAt:              time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateInstance(account, inst); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "RunInstances", &ec2RunInstancesResult{
-		Reservation: "r-" + ec2RandID(),
-		OwnerId:     awsproto.FakeAccountID,
+		Reservation:  "r-" + ec2RandID(),
+		OwnerId:      awsproto.FakeAccountID,
 		InstancesSet: []ec2InstanceXML{app.ec2InstanceToXML(account, inst)},
 	})
 }
@@ -1283,7 +1486,18 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 		for _, id := range wanted {
 			inst, err := app.repo.GetInstance(account, region, id)
 			if err != nil {
-				awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+				// Surface the EC2-specific NotFound code so
+				// terraform-provider-aws's destroy wait-loop can treat
+				// the response as "instance is gone, deletion complete"
+				// instead of a generic hard error. Mirrors the SG /
+				// RouteTable fix earlier in this session.
+				if errors.Is(err, models.ErrNotFound) {
+					awsproto.WriteServiceError(w, awsproto.ShapeEC2Query,
+						http.StatusNotFound, "InvalidInstanceID.NotFound",
+						fmt.Sprintf("The instance ID '%s' does not exist", id))
+					return
+				}
+				awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 				return
 			}
 			instances = append(instances, inst)
@@ -1295,7 +1509,7 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 		var err error
 		instances, err = app.repo.ListInstances(account, "")
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
 		}
 	}
@@ -1320,12 +1534,12 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	id := req.Params.Get("InstanceId")
 	if id == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("InstanceId required: %w", models.ErrConflict))
 		return
 	}
 	if _, err := app.repo.GetInstance(account, region, id); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	// Existence check is enough at v1 — the fixture state suffices for
@@ -1336,7 +1550,7 @@ func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, accoun
 func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	ids := parseInstanceIDs(req)
 	if len(ids) == 0 {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("InstanceId.<n> required: %w", models.ErrConflict))
 		return
 	}
@@ -1344,7 +1558,21 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, re
 	for _, id := range ids {
 		inst, err := app.repo.GetInstance(account, region, id)
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			// Already gone — TerminateInstances is idempotent in real
+			// AWS: a second call after the row has been GCd still
+			// returns 200 with terminated/terminated. Match that by
+			// synthesising the response when the row is no longer in
+			// the repo. (The hard-delete-on-terminate below depends
+			// on this branch to stay idempotent.)
+			if errors.Is(err, models.ErrNotFound) {
+				out.InstancesSet = append(out.InstancesSet, ec2InstanceStateChangeXML{
+					InstanceId:    id,
+					CurrentState:  ec2InstanceStateForName("terminated"),
+					PreviousState: ec2InstanceStateForName("terminated"),
+				})
+				continue
+			}
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
 		}
 		previous := inst.State
@@ -1361,7 +1589,7 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, re
 			continue
 		}
 		if err := app.repo.SetInstanceState(account, region, id, "terminated"); err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
 		}
 		out.InstancesSet = append(out.InstancesSet, ec2InstanceStateChangeXML{
@@ -1369,6 +1597,14 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, re
 			CurrentState:  ec2InstanceStateForName("terminated"),
 			PreviousState: ec2InstanceStateForName(previous),
 		})
+		// NOTE: do NOT hard-delete the row here. The provider's
+		// destroy wait-loop polls DescribeInstances expecting to
+		// observe the state transition (running→stopping→terminated)
+		// before accepting "gone." Hard-deleting collapses the wait
+		// into a confusing "couldn't find resource (21 retries)"
+		// error. Cleanup of terminated rows happens lazily inside
+		// DeleteSubnet/DeleteVPC so the FK constraint doesn't block
+		// dependent resource deletion.
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "TerminateInstances", &out)
 }
@@ -1376,17 +1612,17 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, re
 // ----- KeyPair handlers -----
 
 type ec2KeyPairXML struct {
-	KeyName        string   `xml:"keyName"`
-	KeyFingerprint string   `xml:"keyFingerprint"`
+	KeyName        string `xml:"keyName"`
+	KeyFingerprint string `xml:"keyFingerprint"`
 }
 
 type ec2ImportKeyPairResult struct {
-	KeyName        string   `xml:"keyName"`
-	KeyFingerprint string   `xml:"keyFingerprint"`
+	KeyName        string `xml:"keyName"`
+	KeyFingerprint string `xml:"keyFingerprint"`
 }
 
 type ec2DescribeKeyPairsResult struct {
-	KeySet     []ec2KeyPairXML `xml:"keySet>item"`
+	KeySet []ec2KeyPairXML `xml:"keySet>item"`
 }
 
 func ec2KeyFingerprint(publicKey string) string {
@@ -1407,7 +1643,7 @@ func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region 
 	name := req.Params.Get("KeyName")
 	publicKey := req.Params.Get("PublicKeyMaterial")
 	if name == "" || publicKey == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("KeyName and PublicKeyMaterial required: %w", models.ErrConflict))
 		return
 	}
@@ -1417,7 +1653,7 @@ func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region 
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateKeyPair(account, kp); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "ImportKeyPair",
@@ -1437,7 +1673,7 @@ func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, regi
 		// no filter — list all in region
 		kps, err := app.repo.ListKeyPairs(account, region)
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
 		}
 		for _, kp := range kps {
@@ -1447,7 +1683,7 @@ func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, regi
 		for _, name := range wanted {
 			kp, err := app.repo.GetKeyPair(account, region, name)
 			if err != nil {
-				awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+				awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 				return
 			}
 			out.KeySet = append(out.KeySet, ec2KeyPairXML{KeyName: kp.Name, KeyFingerprint: kp.Fingerprint})
@@ -1458,7 +1694,7 @@ func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, regi
 
 func (app *Application) ec2DeleteKeyPair(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DeleteKeyPair(account, region, req.Params.Get("KeyName")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DeleteKeyPair", nil)
@@ -1467,12 +1703,12 @@ func (app *Application) ec2DeleteKeyPair(w http.ResponseWriter, account, region 
 // ----- AMI (read-only fixture) handlers -----
 
 type ec2ImageXML struct {
-	ImageId            string   `xml:"imageId"`
-	Name               string   `xml:"name"`
-	OwnerId            string   `xml:"imageOwnerId"`
-	VirtualizationType string   `xml:"virtualizationType"`
-	RootDeviceName     string   `xml:"rootDeviceName"`
-	State              string   `xml:"imageState"`
+	ImageId            string `xml:"imageId"`
+	Name               string `xml:"name"`
+	OwnerId            string `xml:"imageOwnerId"`
+	VirtualizationType string `xml:"virtualizationType"`
+	RootDeviceName     string `xml:"rootDeviceName"`
+	State              string `xml:"imageState"`
 }
 
 type ec2DescribeImagesResult struct {
@@ -1497,7 +1733,7 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 	if len(wanted) == 0 {
 		amis, err := app.repo.ListAMIs(account, region)
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
 		}
 		for _, a := range amis {
@@ -1507,7 +1743,7 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 		for _, id := range wanted {
 			a, err := app.repo.GetAMI(account, region, id)
 			if err != nil {
-				awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+				awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 				return
 			}
 			out.ImagesSet = append(out.ImagesSet, ec2AMIToXML(a))
@@ -1533,6 +1769,189 @@ var ec2AMIFixtures = []repository.EC2AMI{
 	{ID: "ami-0abcd1234", Name: "amzn2-ami-hvm-2.0", OwnerID: "amazon", VirtualizationType: "hvm", RootDeviceName: "/dev/xvda"},
 	{ID: "ami-0ubuntu2004", Name: "ubuntu/images/hvm-ssd/ubuntu-focal-20.04", OwnerID: "099720109477", VirtualizationType: "hvm", RootDeviceName: "/dev/sda1"},
 	{ID: "ami-0ubuntu2204", Name: "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04", OwnerID: "099720109477", VirtualizationType: "hvm", RootDeviceName: "/dev/sda1"},
+}
+
+// ensureAMIExists auto-seeds a stub AMI fixture when the caller's
+// ImageId isn't already known. Idempotent — re-entry is harmless
+// because repository SeedAMI uses INSERT OR IGNORE. Skips invalid
+// shapes (empty, non-`ami-` prefix) so we still surface obvious bad
+// input as a real error.
+func (app *Application) ensureAMIExists(account, region, imageID string) {
+	if imageID == "" || !strings.HasPrefix(imageID, "ami-") {
+		return
+	}
+	if _, err := app.repo.GetAMI(account, region, imageID); err == nil {
+		return
+	}
+	_ = app.repo.SeedAMI(account, &repository.EC2AMI{
+		ID:                 imageID,
+		Name:               imageID, // synthesised — the caller picked it
+		OwnerID:            "amazon",
+		VirtualizationType: "hvm",
+		RootDeviceName:     "/dev/xvda",
+		Region:             region,
+	})
+}
+
+// ec2InstanceTypeXML mirrors a single InstanceTypeInfo entry in a
+// DescribeInstanceTypes response. The provider's `aws_instance` read
+// path uses `InstanceType`, `MemoryInfo.SizeInMiB`, `VCpuInfo.DefaultVCpus`,
+// and `Hypervisor`; missing values bubble up as nil-deref panics in
+// the provider plugin, so we always populate those fields with
+// plausible defaults.
+type ec2InstanceTypeXML struct {
+	InstanceType string                `xml:"instanceType"`
+	VCpuInfo     ec2InstanceVCpuInfo   `xml:"vCpuInfo"`
+	MemoryInfo   ec2InstanceMemoryInfo `xml:"memoryInfo"`
+	Hypervisor   string                `xml:"hypervisor"`
+}
+
+type ec2InstanceVCpuInfo struct {
+	DefaultVCpus int `xml:"defaultVCpus"`
+}
+
+type ec2InstanceMemoryInfo struct {
+	SizeInMiB int64 `xml:"sizeInMiB"`
+}
+
+type ec2DescribeInstanceTypesResult struct {
+	InstanceTypeSet []ec2InstanceTypeXML `xml:"instanceTypeSet>item"`
+}
+
+// ec2DescribeInstanceTypes serves the read-path call that
+// terraform-provider-aws makes after RunInstances to populate
+// `aws_instance` state fields (memory, vcpu, hypervisor). The set of
+// real-world instance types is huge and grows constantly, so we
+// synthesise a plausible fixture for whatever the caller asks for
+// rather than enumerating. Same justification as ensureAMIExists:
+// mocks optimize for fast feedback, not for rejecting unknown
+// fixture data.
+func (app *Application) ec2DescribeInstanceTypes(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	var wanted []string
+	for k, vs := range req.Params {
+		if strings.HasPrefix(k, "InstanceType.") && len(vs) > 0 {
+			wanted = append(wanted, vs[0])
+		}
+	}
+	if len(wanted) == 0 {
+		// Unfiltered DescribeInstanceTypes returns a representative
+		// slice. Common terraform-provider-aws docs examples are t3.* /
+		// t2.* / m5.* — covering them avoids a noisy 404 when the
+		// LLM lists types without filtering.
+		wanted = []string{"t2.micro", "t3.micro", "t3.small", "t3.medium", "m5.large"}
+	}
+	out := ec2DescribeInstanceTypesResult{InstanceTypeSet: make([]ec2InstanceTypeXML, 0, len(wanted))}
+	for _, name := range wanted {
+		out.InstanceTypeSet = append(out.InstanceTypeSet, synthesizeInstanceType(name))
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInstanceTypes", &out)
+}
+
+// ec2DescribeInstanceAttributeResult is the response wrapper for one
+// scalar attribute lookup. terraform-provider-aws issues one of these
+// per attribute it wants to read; the response varies per attribute
+// name. We synthesise the AWS default for the requested attribute
+// rather than tracking attribute state on the instance fixture —
+// none of our scenarios mutate these attributes after create.
+type ec2DescribeInstanceAttributeResult struct {
+	InstanceId                        string                   `xml:"instanceId"`
+	InstanceInitiatedShutdownBehavior *ec2AttributeStringValue `xml:"instanceInitiatedShutdownBehavior,omitempty"`
+	DisableApiTermination             *ec2AttributeBoolValue   `xml:"disableApiTermination,omitempty"`
+	DisableApiStop                    *ec2AttributeBoolValue   `xml:"disableApiStop,omitempty"`
+	UserData                          *ec2AttributeStringValue `xml:"userData,omitempty"`
+	EbsOptimized                      *ec2AttributeBoolValue   `xml:"ebsOptimized,omitempty"`
+	SourceDestCheck                   *ec2AttributeBoolValue   `xml:"sourceDestCheck,omitempty"`
+}
+
+type ec2AttributeStringValue struct {
+	Value string `xml:"value"`
+}
+
+type ec2AttributeBoolValue struct {
+	Value bool `xml:"value"`
+}
+
+// ec2DescribeInstanceAttribute synthesises AWS defaults for the
+// commonly-read scalar attributes. The Attribute query param selects
+// which one to populate.
+func (app *Application) ec2DescribeInstanceAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	instanceID := req.Params.Get("InstanceId")
+	attr := req.Params.Get("Attribute")
+	out := ec2DescribeInstanceAttributeResult{InstanceId: instanceID}
+	switch attr {
+	case "instanceInitiatedShutdownBehavior":
+		out.InstanceInitiatedShutdownBehavior = &ec2AttributeStringValue{Value: "stop"}
+	case "disableApiTermination":
+		out.DisableApiTermination = &ec2AttributeBoolValue{Value: false}
+	case "disableApiStop":
+		out.DisableApiStop = &ec2AttributeBoolValue{Value: false}
+	case "userData":
+		out.UserData = &ec2AttributeStringValue{Value: ""}
+	case "ebsOptimized":
+		out.EbsOptimized = &ec2AttributeBoolValue{Value: false}
+	case "sourceDestCheck":
+		out.SourceDestCheck = &ec2AttributeBoolValue{Value: true}
+	default:
+		// Unknown attribute — return the envelope with just the
+		// instance id. The provider will see "attribute not present"
+		// and treat it as default-valued.
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInstanceAttribute", &out)
+}
+
+// ec2DescribeTagsResult is the response shape — an empty tagSet is a
+// valid 200 in real EC2 when no tags match the filters.
+type ec2DescribeTagsResult struct {
+	TagSet []ec2TagXML `xml:"tagSet>item"`
+}
+
+type ec2TagXML struct {
+	ResourceId   string `xml:"resourceId"`
+	ResourceType string `xml:"resourceType"`
+	Key          string `xml:"key"`
+	Value        string `xml:"value"`
+}
+
+// ec2DescribeTags returns an empty tag set. fakeaws doesn't model
+// instance-level tag storage yet — the terraform-provider-aws read
+// path uses DescribeTags to look up launch-template ID tags on the
+// instance, and the correct "no tags here" response is 200 + empty
+// set, not 404 (which the provider treats as a transient/missing
+// resource error and bails out).
+func (app *Application) ec2DescribeTags(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeTags", &ec2DescribeTagsResult{TagSet: []ec2TagXML{}})
+}
+
+// synthesizeInstanceType returns a plausible InstanceTypeInfo for any
+// type name. Real values are looked up where well-known; otherwise a
+// safe default keeps the schema fields non-nil.
+func synthesizeInstanceType(name string) ec2InstanceTypeXML {
+	type spec struct {
+		vcpu int
+		miB  int64
+	}
+	knownTypes := map[string]spec{
+		"t2.micro":  {1, 1024},
+		"t2.small":  {1, 2048},
+		"t2.medium": {2, 4096},
+		"t3.micro":  {2, 1024},
+		"t3.small":  {2, 2048},
+		"t3.medium": {2, 4096},
+		"t3.large":  {2, 8192},
+		"m5.large":  {2, 8192},
+		"m5.xlarge": {4, 16384},
+		"c5.large":  {2, 4096},
+	}
+	s, ok := knownTypes[name]
+	if !ok {
+		s = spec{vcpu: 2, miB: 4096}
+	}
+	return ec2InstanceTypeXML{
+		InstanceType: name,
+		VCpuInfo:     ec2InstanceVCpuInfo{DefaultVCpus: s.vcpu},
+		MemoryInfo:   ec2InstanceMemoryInfo{SizeInMiB: s.miB},
+		Hypervisor:   "nitro",
+	}
 }
 
 // gatherEC2StateReal emits the EC2 block of /mock/state. Per
@@ -1586,11 +2005,11 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 		// re-bound to a different IAM profile or SG set was invisible.
 		iOut = append(iOut, map[string]any{
 			"id": inst.ID, "subnet_id": inst.SubnetID, "ami_id": inst.AMIID,
-			"instance_type":              inst.InstanceType,
-			"iam_instance_profile_name":  inst.IAMInstanceProfileName,
-			"vpc_security_group_ids":     inst.VPCSecurityGroupIDs,
-			"state":  inst.State,
-			"region": inst.Region, "arn": inst.ARN,
+			"instance_type":             inst.InstanceType,
+			"iam_instance_profile_name": inst.IAMInstanceProfileName,
+			"vpc_security_group_ids":    inst.VPCSecurityGroupIDs,
+			"state":                     inst.State,
+			"region":                    inst.Region, "arn": inst.ARN,
 		})
 	}
 	out["instances"] = iOut

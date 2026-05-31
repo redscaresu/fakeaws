@@ -91,6 +91,35 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		app.iamListUsers(w, account, req)
 	case "DeleteUser":
 		app.iamDeleteUser(w, account, req)
+	case "ListGroupsForUser":
+		// terraform-provider-aws's aws_iam_user destroy enumerates
+		// the user's group memberships so it can detach them before
+		// deleting. fakeaws doesn't model IAM groups (no scenario
+		// uses them); return an empty <Groups/> list rather than a
+		// 404 so the destroy can proceed.
+		app.iamListGroupsForUser(w, account, req)
+	case "AttachUserPolicy":
+		// User-level analogue of AttachRolePolicy. We don't persist
+		// the attachment (no scenario reads back); a 200 is enough
+		// to unblock apply. Auto-seed managed-ARN policies the same
+		// way AttachRolePolicy does.
+		app.iamAttachUserPolicy(w, account, req)
+	case "DetachUserPolicy":
+		app.iamNoOpSuccess(w, "DetachUserPolicy")
+	case "PutUserPolicy":
+		app.iamNoOpSuccess(w, "PutUserPolicy")
+	case "DeleteUserPolicy":
+		app.iamNoOpSuccess(w, "DeleteUserPolicy")
+	case "GetUserPolicy":
+		app.iamGetUserPolicyEmpty(w, account, req)
+	case "ListUserPolicies":
+		// Inline-policy enumeration during destroy. Same pattern —
+		// empty list lets the destroy walk to completion.
+		app.iamListUserPolicies(w, account, req)
+	case "ListAttachedUserPolicies":
+		// Attached managed-policy enumeration during destroy. Same
+		// pattern — empty list, no scenario uses these.
+		app.iamListAttachedUserPolicies(w, account, req)
 
 	// ----- Access Keys -----
 	case "CreateAccessKey":
@@ -109,6 +138,19 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		app.iamListAttachedRolePolicies(w, account, req)
 	case "ListRolePolicies":
 		app.iamListRolePolicies(w, account, req)
+	case "PutRolePolicy":
+		// Inline policy attachment. terraform-provider-aws's
+		// aws_iam_role_policy resource uses this. We don't persist
+		// inline policies (no scenario reads them back); a 200 envelope
+		// is enough to unblock the apply.
+		app.iamNoOpSuccess(w, "PutRolePolicy")
+	case "DeleteRolePolicy":
+		// Companion to PutRolePolicy on destroy. Idempotent no-op.
+		app.iamNoOpSuccess(w, "DeleteRolePolicy")
+	case "GetRolePolicy":
+		// Refresh-path read. With no persisted inline state, return
+		// an empty document.
+		app.iamGetRolePolicyEmpty(w, account, req)
 	case "ListRoleTags":
 		app.iamListRoleTags(w, account, req)
 	case "ListInstanceProfilesForRole":
@@ -651,6 +693,32 @@ func (app *Application) iamDeleteUser(w http.ResponseWriter, account string, req
 	awsproto.WriteQueryRPCResponse(w, "DeleteUser", nil)
 }
 
+// iamListGroupsForUser returns an empty <Groups/> list. fakeaws
+// doesn't model IAM Groups — terraform-provider-aws's aws_iam_user
+// destroy walks this endpoint to detach group memberships before
+// DeleteUser, and a 404 here stops the destroy mid-flight.
+func (app *Application) iamListGroupsForUser(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteQueryRPCResponse(w, "ListGroupsForUser", &struct {
+		Groups []string `xml:"Groups>member,omitempty"`
+	}{})
+}
+
+// iamListUserPolicies returns an empty inline-policy list. Same
+// "destroy preflight" rationale as iamListGroupsForUser.
+func (app *Application) iamListUserPolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteQueryRPCResponse(w, "ListUserPolicies", &struct {
+		PolicyNames []string `xml:"PolicyNames>member,omitempty"`
+	}{})
+}
+
+// iamListAttachedUserPolicies returns an empty managed-policy
+// attachment list. Same "destroy preflight" rationale.
+func (app *Application) iamListAttachedUserPolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteQueryRPCResponse(w, "ListAttachedUserPolicies", &struct {
+		AttachedPolicies []string `xml:"AttachedPolicies>member,omitempty"`
+	}{})
+}
+
 type iamAccessKeyXML struct {
 	XMLName         xml.Name `xml:"AccessKey"`
 	UserName        string   `xml:"UserName"`
@@ -714,12 +782,70 @@ func (app *Application) iamDeleteAccessKey(w http.ResponseWriter, account string
 // ----- Role/Policy attachments -----
 
 func (app *Application) iamAttachRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.AttachRolePolicy(account,
-		req.Params.Get("RoleName"), req.Params.Get("PolicyArn")); err != nil {
+	roleName := req.Params.Get("RoleName")
+	policyARN := req.Params.Get("PolicyArn")
+	// AWS-managed policies (arn:aws:iam::aws:policy/X) are pre-created
+	// by AWS in real accounts — customers can attach them without
+	// ever calling CreatePolicy. fakeaws's repo only knows about
+	// customer-created policies, so a managed-ARN attach fails 404
+	// even though it's legal usage. Lazy-seed the managed policy
+	// here on first reference, mirroring the AMI auto-seed pattern.
+	if strings.HasPrefix(policyARN, "arn:aws:iam::aws:policy/") {
+		_ = app.repo.SeedManagedPolicy(account, policyARN)
+	}
+	if err := app.repo.AttachRolePolicy(account, roleName, policyARN); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "AttachRolePolicy", nil)
+}
+
+// iamNoOpSuccess returns a minimal 200 for IAM actions we accept but
+// don't persist (PutRolePolicy / DeleteRolePolicy). Real AWS returns
+// an action-named envelope; the provider just needs successful parse.
+func (app *Application) iamNoOpSuccess(w http.ResponseWriter, action string) {
+	awsproto.WriteQueryRPCResponse(w, action, nil)
+}
+
+// iamAttachUserPolicy attaches a managed policy to a user. Auto-seeds
+// AWS-managed policy ARNs the same way AttachRolePolicy does. We
+// don't persist the attachment (no scenario reads it back via
+// ListAttachedUserPolicies — that handler already returns empty).
+func (app *Application) iamAttachUserPolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	policyARN := req.Params.Get("PolicyArn")
+	if strings.HasPrefix(policyARN, "arn:aws:iam::aws:policy/") {
+		_ = app.repo.SeedManagedPolicy(account, policyARN)
+	}
+	awsproto.WriteQueryRPCResponse(w, "AttachUserPolicy", nil)
+}
+
+// iamGetUserPolicyEmpty mirrors iamGetRolePolicyEmpty for users.
+func (app *Application) iamGetUserPolicyEmpty(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteQueryRPCResponse(w, "GetUserPolicy", &struct {
+		UserName       string `xml:"UserName"`
+		PolicyName     string `xml:"PolicyName"`
+		PolicyDocument string `xml:"PolicyDocument"`
+	}{
+		UserName:       req.Params.Get("UserName"),
+		PolicyName:     req.Params.Get("PolicyName"),
+		PolicyDocument: `{"Version":"2012-10-17","Statement":[]}`,
+	})
+}
+
+// iamGetRolePolicyEmpty returns an empty inline-policy document for
+// the refresh path. Since PutRolePolicy is a no-op, there's nothing
+// to read back; the empty document avoids a 404 that would break the
+// provider's refresh.
+func (app *Application) iamGetRolePolicyEmpty(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	awsproto.WriteQueryRPCResponse(w, "GetRolePolicy", &struct {
+		RoleName       string `xml:"RoleName"`
+		PolicyName     string `xml:"PolicyName"`
+		PolicyDocument string `xml:"PolicyDocument"`
+	}{
+		RoleName:       req.Params.Get("RoleName"),
+		PolicyName:     req.Params.Get("PolicyName"),
+		PolicyDocument: `{"Version":"2012-10-17","Statement":[]}`,
+	})
 }
 
 func (app *Application) iamDetachRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {

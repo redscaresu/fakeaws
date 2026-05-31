@@ -25,9 +25,9 @@ import (
 //   - iam: IAM handler set landed in S43-T6 (fakeaws@474edd3).
 //   - s3:  S3 handler set landed in S43-T8 (fakeaws@7a08ff3).
 //   - ec2: EC2 networking handler set started landing in S44-T4
-//         (handlers/ec2.go: VPC + Subnet). Security groups (S44-T5),
-//         instances (S44-T7), and the rest follow incrementally;
-//         regression tests gain real assertions in S44-T9.
+//     (handlers/ec2.go: VPC + Subnet). Security groups (S44-T5),
+//     instances (S44-T7), and the rest follow incrementally;
+//     regression tests gain real assertions in S44-T9.
 //
 // Service tickets append to this list in their landing PR. The audit
 // (TestRegressionSeedAuditManifestMatchesHandlers) asserts every entry
@@ -38,6 +38,7 @@ var LandedServices = []string{
 	"ec2",
 	"eks",
 	"iam",
+	"kms",
 	"rds",
 	"route53",
 	"s3",

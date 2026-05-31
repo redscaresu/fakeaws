@@ -99,6 +99,7 @@ func (app *Application) RegisterRoutes(r chi.Router) {
 	app.registerSQSRoutes(r)
 	app.registerRoute53Routes(r)
 	app.registerSecretsManagerRoutes(r)
+	app.registerKMSRoutes(r)
 	// Everything else 501s with an UNIMPLEMENTED log line so the next
 	// caller sees what's missing — no Moto-style silent fallback.
 	r.NotFound(unimplementedHandler)

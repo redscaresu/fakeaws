@@ -51,6 +51,14 @@ func (app *Application) handleDynamoDB(w http.ResponseWriter, r *http.Request) {
 		app.ddbScanOrQuery(w, account, region, req, "Query")
 	case "Scan":
 		app.ddbScanOrQuery(w, account, region, req, "Scan")
+	// DescribeContinuousBackups + DescribeTimeToLive are read on every
+	// aws_dynamodb_table refresh by terraform-provider-aws. We don't
+	// track the underlying feature state — synthesise the AWS default
+	// "disabled" answer so the provider read path succeeds.
+	case "DescribeContinuousBackups":
+		app.ddbDescribeContinuousBackups(w, account, region, req)
+	case "DescribeTimeToLive":
+		app.ddbDescribeTimeToLive(w, account, region, req)
 	default:
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
 			fmt.Errorf("DynamoDB operation %q not yet implemented in fakeaws v1: %w", req.Operation, models.ErrNotFound))
@@ -60,10 +68,10 @@ func (app *Application) handleDynamoDB(w http.ResponseWriter, r *http.Request) {
 // ----- Table operations -----
 
 type ddbCreateTableInput struct {
-	TableName            string                  `json:"TableName"`
-	AttributeDefinitions []ddbAttributeDef       `json:"AttributeDefinitions"`
-	KeySchema            []ddbKeySchemaElem      `json:"KeySchema"`
-	BillingMode          string                  `json:"BillingMode,omitempty"`
+	TableName            string             `json:"TableName"`
+	AttributeDefinitions []ddbAttributeDef  `json:"AttributeDefinitions"`
+	KeySchema            []ddbKeySchemaElem `json:"KeySchema"`
+	BillingMode          string             `json:"BillingMode,omitempty"`
 }
 
 type ddbAttributeDef struct {
@@ -77,12 +85,12 @@ type ddbKeySchemaElem struct {
 }
 
 type ddbTableDescription struct {
-	TableName            string             `json:"TableName"`
-	TableStatus          string             `json:"TableStatus"`
-	AttributeDefinitions []ddbAttributeDef  `json:"AttributeDefinitions"`
-	KeySchema            []ddbKeySchemaElem `json:"KeySchema"`
+	TableName            string                 `json:"TableName"`
+	TableStatus          string                 `json:"TableStatus"`
+	AttributeDefinitions []ddbAttributeDef      `json:"AttributeDefinitions"`
+	KeySchema            []ddbKeySchemaElem     `json:"KeySchema"`
 	BillingModeSummary   *ddbBillingModeSummary `json:"BillingModeSummary,omitempty"`
-	TableArn             string             `json:"TableArn"`
+	TableArn             string                 `json:"TableArn"`
 }
 
 type ddbBillingModeSummary struct {
@@ -91,9 +99,9 @@ type ddbBillingModeSummary struct {
 
 func ddbTableToDescription(t *repository.DynamoDBTable) ddbTableDescription {
 	d := ddbTableDescription{
-		TableName:   t.Name,
-		TableStatus: t.Status,
-		TableArn:    t.ARN,
+		TableName:          t.Name,
+		TableStatus:        t.Status,
+		TableArn:           t.ARN,
 		BillingModeSummary: &ddbBillingModeSummary{BillingMode: t.BillingMode},
 	}
 	for _, a := range t.Attributes {
@@ -142,8 +150,8 @@ func (app *Application) ddbCreateTable(w http.ResponseWriter, account, region st
 	tab := &repository.DynamoDBTable{
 		Name: in.TableName, HashKey: hashKey, RangeKey: rangeKey,
 		Attributes: attrs, BillingMode: billing, Status: "ACTIVE",
-		Region: region,
-		ARN:    awsproto.BuildDynamoDBTableARN(region, in.TableName),
+		Region:    region,
+		ARN:       awsproto.BuildDynamoDBTableARN(region, in.TableName),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateDynamoDBTable(account, tab); err != nil {
@@ -170,6 +178,57 @@ func (app *Application) ddbDescribeTable(w http.ResponseWriter, account, region 
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
 		"Table": ddbTableToDescription(tab),
+	})
+}
+
+// ddbDescribeContinuousBackups returns the AWS default "DISABLED"
+// status. terraform-provider-aws reads this on every aws_dynamodb_table
+// refresh to populate point_in_time_recovery state; fakeaws doesn't
+// track that feature flag, so the default-disabled answer is the
+// correct stand-in. Real AWS also still returns 200 + DISABLED when
+// PITR was never enabled, so the wire shape matches.
+func (app *Application) ddbDescribeContinuousBackups(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		TableName string `json:"TableName"`
+	}
+	if err := json.Unmarshal(req.Body, &in); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		return
+	}
+	if _, err := app.repo.GetDynamoDBTable(account, region, in.TableName); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
+		"ContinuousBackupsDescription": map[string]any{
+			"ContinuousBackupsStatus": "DISABLED",
+			"PointInTimeRecoveryDescription": map[string]any{
+				"PointInTimeRecoveryStatus": "DISABLED",
+			},
+		},
+	})
+}
+
+// ddbDescribeTimeToLive returns the AWS default "DISABLED" TTL status.
+// Same justification as DescribeContinuousBackups — refresh-path call
+// the provider always makes; we don't model the feature, default-disabled
+// matches real AWS behaviour when TTL was never enabled.
+func (app *Application) ddbDescribeTimeToLive(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		TableName string `json:"TableName"`
+	}
+	if err := json.Unmarshal(req.Body, &in); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		return
+	}
+	if _, err := app.repo.GetDynamoDBTable(account, region, in.TableName); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
+		"TimeToLiveDescription": map[string]any{
+			"TimeToLiveStatus": "DISABLED",
+		},
 	})
 }
 
@@ -214,7 +273,7 @@ func extractKeyValue(av map[string]json.RawMessage) string {
 
 func (app *Application) ddbPutItem(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
-		TableName string                                  `json:"TableName"`
+		TableName string                                `json:"TableName"`
 		Item      map[string]map[string]json.RawMessage `json:"Item"`
 	}
 	if err := json.Unmarshal(req.Body, &in); err != nil {
@@ -244,7 +303,7 @@ func (app *Application) ddbPutItem(w http.ResponseWriter, account, region string
 
 func (app *Application) ddbGetItem(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
-		TableName string                                  `json:"TableName"`
+		TableName string                                `json:"TableName"`
 		Key       map[string]map[string]json.RawMessage `json:"Key"`
 	}
 	if err := json.Unmarshal(req.Body, &in); err != nil {
@@ -282,7 +341,7 @@ func (app *Application) ddbGetItem(w http.ResponseWriter, account, region string
 
 func (app *Application) ddbDeleteItem(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
-		TableName string                                  `json:"TableName"`
+		TableName string                                `json:"TableName"`
 		Key       map[string]map[string]json.RawMessage `json:"Key"`
 	}
 	if err := json.Unmarshal(req.Body, &in); err != nil {
@@ -310,7 +369,7 @@ func (app *Application) ddbDeleteItem(w http.ResponseWriter, account, region str
 // supported — concepts.md flags them as out-of-scope at v1.
 func (app *Application) ddbUpdateItem(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
-		TableName        string                                  `json:"TableName"`
+		TableName        string                                `json:"TableName"`
 		Key              map[string]map[string]json.RawMessage `json:"Key"`
 		AttributeUpdates map[string]map[string]json.RawMessage `json:"AttributeUpdates"`
 	}

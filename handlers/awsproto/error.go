@@ -87,6 +87,14 @@ func WriteServiceError(w http.ResponseWriter, shape WireShape, status int, code,
 		writeXMLError(w, m)
 	case ShapeQueryRPC:
 		writeQueryRPCError(w, m)
+	case ShapeEC2Query:
+		// Without this case ShapeEC2Query callers (the SG/RouteTable
+		// destroy-wait error-code fixes) fell into the JSON-11 fallback
+		// below, which the EC2 SDK couldn't parse → "UnknownError:
+		// UnknownError" at the provider boundary and the destroy
+		// wait-loop bailed instead of treating the response as
+		// "resource is gone, deletion complete."
+		writeEC2QueryError(w, m)
 	case ShapeJSON10:
 		writeJSON10Error(w, m)
 	case ShapeJSON11:
@@ -113,6 +121,8 @@ func WriteAWSError(w http.ResponseWriter, shape WireShape, err error) {
 		writeXMLError(w, mapping)
 	case ShapeQueryRPC:
 		writeQueryRPCError(w, mapping)
+	case ShapeEC2Query:
+		writeEC2QueryError(w, mapping)
 	case ShapeJSON10:
 		writeJSON10Error(w, mapping)
 	case ShapeJSON11:
@@ -132,12 +142,19 @@ func WriteAWSError(w http.ResponseWriter, shape WireShape, err error) {
 type WireShape int
 
 const (
-	ShapeUnknown WireShape = iota
-	ShapeXML               // S3, Route53
-	ShapeQueryRPC          // EC2, RDS, IAM
-	ShapeJSON10            // SQS
-	ShapeJSON11            // DynamoDB, SecretsManager
-	ShapeJSONREST          // EKS
+	ShapeUnknown  WireShape = iota
+	ShapeXML                // S3, Route53
+	ShapeQueryRPC           // RDS, IAM (ErrorResponse envelope)
+	ShapeJSON10             // SQS
+	ShapeJSON11             // DynamoDB, SecretsManager
+	ShapeJSONREST           // EKS
+	// ShapeEC2Query — EC2 uses Query Protocol like RDS/IAM but its error
+	// envelope is <Response><Errors><Error>...</Error></Errors></Response>
+	// rather than <ErrorResponse><Error>...</Error></ErrorResponse>.
+	// terraform-provider-aws's EC2 error parser keys off this exact
+	// shape; sending the RDS/IAM envelope makes the SDK surface a
+	// useless "UnknownError: UnknownError" because no fields parse.
+	ShapeEC2Query
 )
 
 // String returns the human-readable shape name (test fixture friendly).
@@ -147,6 +164,8 @@ func (s WireShape) String() string {
 		return "xml"
 	case ShapeQueryRPC:
 		return "queryrpc"
+	case ShapeEC2Query:
+		return "ec2query"
 	case ShapeJSON10:
 		return "json10"
 	case ShapeJSON11:
@@ -203,6 +222,42 @@ func writeQueryRPCError(w http.ResponseWriter, m errorMapping) {
 			Code:    m.Code,
 			Message: m.Message,
 		},
+		RequestID: "fakeaws-synthetic",
+	}, "", "  ")
+	_, _ = w.Write([]byte(xml.Header))
+	_, _ = w.Write(body)
+}
+
+// ec2QueryErrorEnvelope wraps the error in EC2's distinctive
+// <Response><Errors><Error>...</Error></Errors><RequestID>...</RequestID></Response>
+// shape — different from the IAM/RDS <ErrorResponse><Error>...</ErrorResponse>
+// shape the rest of the Query Protocol clients expect. The AWS SDK for
+// EC2 has its own XML decoder that only recognises this shape; sending
+// the RDS shape produces "UnknownError: UnknownError" at the SDK
+// boundary because no field path matches.
+type ec2QueryErrorEnvelope struct {
+	XMLName   xml.Name          `xml:"Response"`
+	Errors    ec2QueryErrorList `xml:"Errors"`
+	RequestID string            `xml:"RequestID"`
+}
+
+type ec2QueryErrorList struct {
+	Error ec2QueryErrorPayload `xml:"Error"`
+}
+
+type ec2QueryErrorPayload struct {
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
+}
+
+func writeEC2QueryError(w http.ResponseWriter, m errorMapping) {
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(m.Status)
+	body, _ := xml.MarshalIndent(ec2QueryErrorEnvelope{
+		Errors: ec2QueryErrorList{Error: ec2QueryErrorPayload{
+			Code:    m.Code,
+			Message: m.Message,
+		}},
 		RequestID: "fakeaws-synthetic",
 	}, "", "  ")
 	_, _ = w.Write([]byte(xml.Header))
@@ -271,7 +326,7 @@ type captureWriter struct {
 	status  int
 }
 
-func newCapture() *captureWriter { return &captureWriter{headers: http.Header{}} }
+func newCapture() *captureWriter             { return &captureWriter{headers: http.Header{}} }
 func (c *captureWriter) Header() http.Header { return c.headers }
 func (c *captureWriter) Write(b []byte) (int, error) {
 	c.body = append(c.body, b...)

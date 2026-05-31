@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,19 +41,34 @@ func (app *Application) registerRoute53Routes(r chi.Router) {
 		r.Post("/hostedzone", app.r53CreateHostedZone)
 		r.Get("/hostedzone/{id}", app.r53GetHostedZone)
 		r.Delete("/hostedzone/{id}", app.r53DeleteHostedZone)
+		// The AWS SDK posts to `/rrset` (no trailing slash); chi treats
+		// trailing/no-trailing as distinct routes so register both
+		// to match the SDK in either shape.
+		r.Post("/hostedzone/{id}/rrset", app.r53ChangeResourceRecordSets)
 		r.Post("/hostedzone/{id}/rrset/", app.r53ChangeResourceRecordSets)
 		r.Get("/hostedzone/{id}/rrset", app.r53ListResourceRecordSets)
+		r.Get("/hostedzone/{id}/rrset/", app.r53ListResourceRecordSets)
 		r.Get("/change/{id}", app.r53GetChange)
+		// terraform-provider-aws's aws_route53_zone read path calls
+		// ListTagsForResource on every refresh — we don't model tag
+		// storage on hosted zones (yet), so return an empty tag set
+		// which is the correct "no tags here" answer real AWS gives.
+		r.Get("/tags/{resourceType}/{resourceID}", app.r53ListTagsForResource)
+		// terraform-provider-aws's aws_route53_zone read path calls
+		// GetDNSSEC after refresh. We don't model DNSSEC; return the
+		// AWS "NOT_SIGNING" default so the provider sees a valid
+		// not-enabled answer instead of a 501.
+		r.Get("/hostedzone/{id}/dnssec", app.r53GetDNSSEC)
 	})
 }
 
 // ----- Hosted Zone -----
 
 type r53CreateHostedZoneRequest struct {
-	XMLName          xml.Name              `xml:"CreateHostedZoneRequest"`
-	Name             string                `xml:"Name"`
-	CallerReference  string                `xml:"CallerReference"`
-	HostedZoneConfig *r53HostedZoneConfig  `xml:"HostedZoneConfig,omitempty"`
+	XMLName          xml.Name             `xml:"CreateHostedZoneRequest"`
+	Name             string               `xml:"Name"`
+	CallerReference  string               `xml:"CallerReference"`
+	HostedZoneConfig *r53HostedZoneConfig `xml:"HostedZoneConfig,omitempty"`
 }
 
 type r53HostedZoneConfig struct {
@@ -61,17 +77,18 @@ type r53HostedZoneConfig struct {
 }
 
 type r53HostedZoneXML struct {
-	Id              string `xml:"Id"`
-	Name            string `xml:"Name"`
-	CallerReference string `xml:"CallerReference,omitempty"`
-	Config          *r53HostedZoneConfig `xml:"Config,omitempty"`
-	ResourceRecordSetCount int `xml:"ResourceRecordSetCount,omitempty"`
+	Id                     string               `xml:"Id"`
+	Name                   string               `xml:"Name"`
+	CallerReference        string               `xml:"CallerReference,omitempty"`
+	Config                 *r53HostedZoneConfig `xml:"Config,omitempty"`
+	ResourceRecordSetCount int                  `xml:"ResourceRecordSetCount,omitempty"`
 }
 
 type r53CreateHostedZoneResponse struct {
-	XMLName    xml.Name         `xml:"CreateHostedZoneResponse"`
-	HostedZone r53HostedZoneXML `xml:"HostedZone"`
-	ChangeInfo r53ChangeInfoXML `xml:"ChangeInfo"`
+	XMLName       xml.Name            `xml:"CreateHostedZoneResponse"`
+	HostedZone    r53HostedZoneXML    `xml:"HostedZone"`
+	ChangeInfo    r53ChangeInfoXML    `xml:"ChangeInfo"`
+	DelegationSet r53DelegationSetXML `xml:"DelegationSet"`
 }
 
 type r53ChangeInfoXML struct {
@@ -80,9 +97,33 @@ type r53ChangeInfoXML struct {
 	SubmittedAt string `xml:"SubmittedAt"`
 }
 
+// r53DelegationSetXML is the NS-records block that real Route53
+// returns on CreateHostedZone / GetHostedZone. terraform-provider-aws
+// reads NameServers from this block to populate the zone's
+// `name_servers` attribute; omitting the block makes the provider
+// nil-deref on plan.(*GRPCProvider).ApplyResourceChange, which
+// surfaces as the opaque "Plugin did not respond" error rather than
+// a structured AWS-shaped failure.
+type r53DelegationSetXML struct {
+	NameServers []string `xml:"NameServers>NameServer"`
+}
+
 type r53GetHostedZoneResponse struct {
-	XMLName    xml.Name         `xml:"GetHostedZoneResponse"`
-	HostedZone r53HostedZoneXML `xml:"HostedZone"`
+	XMLName       xml.Name            `xml:"GetHostedZoneResponse"`
+	HostedZone    r53HostedZoneXML    `xml:"HostedZone"`
+	DelegationSet r53DelegationSetXML `xml:"DelegationSet"`
+}
+
+// synthDelegationSet returns a deterministic NS-record set per zone.
+// Real AWS returns 4 NS records under a `*.awsdns-*.{com,net,org,co.uk}`
+// rotation; the provider just needs the count + recognisable shape.
+func synthDelegationSet(zoneID string) r53DelegationSetXML {
+	return r53DelegationSetXML{NameServers: []string{
+		"ns-1." + zoneID + ".awsdns-01.com",
+		"ns-2." + zoneID + ".awsdns-02.net",
+		"ns-3." + zoneID + ".awsdns-03.org",
+		"ns-4." + zoneID + ".awsdns-04.co.uk",
+	}}
 }
 
 type r53ListHostedZonesResponse struct {
@@ -139,8 +180,9 @@ func (app *Application) r53CreateHostedZone(w http.ResponseWriter, r *http.Reque
 	}
 	app.repo.RecordChange(account, change)
 	awsproto.WriteXMLResponse(w, http.StatusOK, &r53CreateHostedZoneResponse{
-		HostedZone: r53ZoneToXML(z),
-		ChangeInfo: r53ChangeInfoXML{Id: "/change/" + change.ID, Status: change.Status, SubmittedAt: change.SubmittedAt},
+		HostedZone:    r53ZoneToXML(z),
+		ChangeInfo:    r53ChangeInfoXML{Id: "/change/" + change.ID, Status: change.Status, SubmittedAt: change.SubmittedAt},
+		DelegationSet: synthDelegationSet(zoneID),
 	})
 }
 
@@ -152,7 +194,10 @@ func (app *Application) r53GetHostedZone(w http.ResponseWriter, r *http.Request)
 		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
 		return
 	}
-	awsproto.WriteXMLResponse(w, http.StatusOK, &r53GetHostedZoneResponse{HostedZone: r53ZoneToXML(z)})
+	awsproto.WriteXMLResponse(w, http.StatusOK, &r53GetHostedZoneResponse{
+		HostedZone:    r53ZoneToXML(z),
+		DelegationSet: synthDelegationSet(z.ID),
+	})
 }
 
 func (app *Application) r53ListHostedZones(w http.ResponseWriter, r *http.Request) {
@@ -192,8 +237,8 @@ func (app *Application) r53DeleteHostedZone(w http.ResponseWriter, r *http.Reque
 // ----- Record Set Changes (transactional) -----
 
 type r53ChangeBatchRequest struct {
-	XMLName     xml.Name        `xml:"ChangeResourceRecordSetsRequest"`
-	ChangeBatch r53ChangeBatch  `xml:"ChangeBatch"`
+	XMLName     xml.Name       `xml:"ChangeResourceRecordSetsRequest"`
+	ChangeBatch r53ChangeBatch `xml:"ChangeBatch"`
 }
 
 type r53ChangeBatch struct {
@@ -201,17 +246,17 @@ type r53ChangeBatch struct {
 }
 
 type r53Change struct {
-	Action            string             `xml:"Action"` // CREATE | UPSERT | DELETE
-	ResourceRecordSet r53RecordSetXML    `xml:"ResourceRecordSet"`
+	Action            string          `xml:"Action"` // CREATE | UPSERT | DELETE
+	ResourceRecordSet r53RecordSetXML `xml:"ResourceRecordSet"`
 }
 
 type r53RecordSetXML struct {
-	Name             string             `xml:"Name"`
-	Type             string             `xml:"Type"`
-	TTL              int                `xml:"TTL,omitempty"`
-	ResourceRecords  []r53ResourceRecord `xml:"ResourceRecords>ResourceRecord,omitempty"`
-	SetIdentifier    string             `xml:"SetIdentifier,omitempty"`
-	AliasTarget      *r53AliasTarget    `xml:"AliasTarget,omitempty"`
+	Name            string              `xml:"Name"`
+	Type            string              `xml:"Type"`
+	TTL             int                 `xml:"TTL,omitempty"`
+	ResourceRecords []r53ResourceRecord `xml:"ResourceRecords>ResourceRecord,omitempty"`
+	SetIdentifier   string              `xml:"SetIdentifier,omitempty"`
+	AliasTarget     *r53AliasTarget     `xml:"AliasTarget,omitempty"`
 }
 
 type r53ResourceRecord struct {
@@ -276,6 +321,17 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 		for _, rr := range rs.ResourceRecords {
 			records = append(records, rr.Value)
 		}
+		// Real Route53 normalises every record name to a trailing-dot
+		// FQDN on storage. terraform-provider-aws sometimes sends
+		// "foo.example.com" and sometimes "foo.example.com." depending
+		// on whether the user wrote the dot in HCL. Without normalising
+		// at write time, a later DELETE that uses the opposite shape
+		// silently misses the record → records linger → DeleteHostedZone
+		// rejects with 409 because the zone "still has records."
+		normalisedName := rs.Name
+		if normalisedName != "" && !strings.HasSuffix(normalisedName, ".") {
+			normalisedName += "."
+		}
 		switch ch.Action {
 		case "CREATE", "UPSERT":
 			alias := ""
@@ -287,7 +343,7 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 				}
 			}
 			if err := app.repo.PutRecordSet(account, &repository.Route53RecordSet{
-				ZoneID: zoneID, Name: rs.Name, Type: rs.Type, TTL: rs.TTL,
+				ZoneID: zoneID, Name: normalisedName, Type: rs.Type, TTL: rs.TTL,
 				Records: records, AliasTarget: alias, SetIdentifier: rs.SetIdentifier,
 			}); err != nil {
 				awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
@@ -295,7 +351,7 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 			}
 		case "DELETE":
 			// DELETE is idempotent at AWS; ignore not-found.
-			_ = app.repo.DeleteRecordSet(account, zoneID, rs.Name, rs.Type, rs.SetIdentifier)
+			_ = app.repo.DeleteRecordSet(account, zoneID, normalisedName, rs.Type, rs.SetIdentifier)
 		}
 	}
 
@@ -320,14 +376,66 @@ func (app *Application) r53ListResourceRecordSets(w http.ResponseWriter, r *http
 		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
 		return
 	}
+
+	// Honour the AWS SDK's filter query params. terraform-provider-aws
+	// reads individual records by calling with StartRecordName/Type +
+	// MaxItems=1 and expecting the response to start at the matching
+	// record. Returning the unfiltered insertion-order list collapses
+	// into "empty result" at the provider boundary when MaxItems=1.
+	q := r.URL.Query()
+	startName := q.Get("name")
+	startType := q.Get("type")
+	startSetID := q.Get("identifier")
+	maxItems := 0
+	if v := q.Get("maxitems"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			maxItems = n
+		}
+	}
+
+	// Filter to records at-or-after the start key. AWS Route53 orders
+	// by name, then type, then SetIdentifier. We normalise the name
+	// for comparison so a missing trailing dot on either side doesn't
+	// cause a miss (provider sometimes sends without the dot).
+	matches := rsets[:0:0]
+	for _, rs := range rsets {
+		if startName != "" {
+			if r53NormaliseName(rs.Name) < r53NormaliseName(startName) {
+				continue
+			}
+			if r53NormaliseName(rs.Name) == r53NormaliseName(startName) {
+				if startType != "" && rs.Type < startType {
+					continue
+				}
+				if startType != "" && rs.Type == startType && startSetID != "" && rs.SetIdentifier < startSetID {
+					continue
+				}
+			}
+		}
+		matches = append(matches, rs)
+	}
+	if maxItems > 0 && len(matches) > maxItems {
+		matches = matches[:maxItems]
+	}
+
 	type listResult struct {
 		XMLName            xml.Name          `xml:"ListResourceRecordSetsResponse"`
 		ResourceRecordSets []r53RecordSetXML `xml:"ResourceRecordSets>ResourceRecordSet"`
 		IsTruncated        bool              `xml:"IsTruncated"`
 	}
 	out := listResult{}
-	for _, rs := range rsets {
-		x := r53RecordSetXML{Name: rs.Name, Type: rs.Type, TTL: rs.TTL, SetIdentifier: rs.SetIdentifier}
+	for _, rs := range matches {
+		// Real Route53 always emits FQDN names with a trailing dot,
+		// regardless of how the caller stored them. terraform-provider-
+		// aws's read path matches `*rs.Name == startRecordName` exactly,
+		// so a stored "foo.example.com" returned verbatim against an
+		// SDK query for "foo.example.com." silently misses → "empty
+		// result". Force the trailing dot on the wire.
+		emittedName := rs.Name
+		if !strings.HasSuffix(emittedName, ".") {
+			emittedName += "."
+		}
+		x := r53RecordSetXML{Name: emittedName, Type: rs.Type, TTL: rs.TTL, SetIdentifier: rs.SetIdentifier}
 		for _, v := range rs.Records {
 			x.ResourceRecords = append(x.ResourceRecords, r53ResourceRecord{Value: v})
 		}
@@ -344,6 +452,13 @@ func (app *Application) r53ListResourceRecordSets(w http.ResponseWriter, r *http
 	awsproto.WriteXMLResponse(w, http.StatusOK, &out)
 }
 
+// r53NormaliseName makes record-name comparison tolerant of trailing
+// dots so the provider's filter matches storage regardless of whether
+// the FQDN was passed with or without one.
+func r53NormaliseName(name string) string {
+	return strings.TrimSuffix(strings.ToLower(name), ".")
+}
+
 func (app *Application) r53GetChange(w http.ResponseWriter, r *http.Request) {
 	const account = awsproto.FakeAccountID
 	id := strings.TrimPrefix(chi.URLParam(r, "id"), "/change/")
@@ -357,6 +472,52 @@ func (app *Application) r53GetChange(w http.ResponseWriter, r *http.Request) {
 		ChangeInfo r53ChangeInfoXML `xml:"ChangeInfo"`
 	}{
 		ChangeInfo: r53ChangeInfoXML{Id: "/change/" + c.ID, Status: c.Status, SubmittedAt: c.SubmittedAt},
+	})
+}
+
+// r53GetDNSSEC returns the AWS default "NOT_SIGNING" DNSSEC status.
+// We don't model DNSSEC; terraform-provider-aws calls this on every
+// aws_route53_zone refresh to read the current key-signing config,
+// and the not-signing default matches real AWS when DNSSEC was
+// never enabled.
+func (app *Application) r53GetDNSSEC(w http.ResponseWriter, r *http.Request) {
+	awsproto.WriteXMLResponse(w, http.StatusOK, &struct {
+		XMLName xml.Name `xml:"GetDNSSECResponse"`
+		Status  struct {
+			ServeSignature string `xml:"ServeSignature"`
+		} `xml:"Status"`
+		KeySigningKeys []string `xml:"KeySigningKeys>KeySigningKey,omitempty"`
+	}{
+		Status: struct {
+			ServeSignature string `xml:"ServeSignature"`
+		}{ServeSignature: "NOT_SIGNING"},
+	})
+}
+
+// r53ListTagsForResource returns an empty <Tags/> set for any
+// resourceType + resourceID. fakeaws doesn't model Route53 tag
+// storage (no scenario sets them); the empty set matches the real
+// AWS response shape when nothing's been tagged. terraform-provider-aws
+// calls this on every aws_route53_zone refresh.
+func (app *Application) r53ListTagsForResource(w http.ResponseWriter, r *http.Request) {
+	resourceType := chi.URLParam(r, "resourceType")
+	resourceID := chi.URLParam(r, "resourceID")
+	awsproto.WriteXMLResponse(w, http.StatusOK, &struct {
+		XMLName        xml.Name `xml:"ListTagsForResourceResponse"`
+		ResourceTagSet struct {
+			ResourceType string   `xml:"ResourceType"`
+			ResourceId   string   `xml:"ResourceId"`
+			Tags         []string `xml:"Tags>Tag,omitempty"`
+		} `xml:"ResourceTagSet"`
+	}{
+		ResourceTagSet: struct {
+			ResourceType string   `xml:"ResourceType"`
+			ResourceId   string   `xml:"ResourceId"`
+			Tags         []string `xml:"Tags>Tag,omitempty"`
+		}{
+			ResourceType: resourceType,
+			ResourceId:   resourceID,
+		},
 	})
 }
 

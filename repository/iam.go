@@ -8,21 +8,21 @@
 //
 // Schema:
 //
-//   iam_roles              (account_id, name)               — top-level
-//   iam_policies           (account_id, name)               — top-level
-//   iam_instance_profiles  (account_id, name)               — top-level,
-//                                                              optional role attachment
-//   iam_users              (account_id, name)               — top-level
-//   iam_access_keys        (account_id, user_name, id)      — child of iam_users,
-//                                                              ON DELETE CASCADE
-//   role_policy_attachments(account_id, role_name, policy_arn)
-//                          — many-to-many between roles and policies,
-//                            ON DELETE CASCADE on role,
-//                            FK-blocked on policy delete (per real IAM:
-//                            you cannot delete an attached policy).
-//   instance_profile_roles (account_id, profile_name, role_name)
-//                          — single role per profile (real IAM allows 1),
-//                            ON DELETE CASCADE on profile.
+//	iam_roles              (account_id, name)               — top-level
+//	iam_policies           (account_id, name)               — top-level
+//	iam_instance_profiles  (account_id, name)               — top-level,
+//	                                                           optional role attachment
+//	iam_users              (account_id, name)               — top-level
+//	iam_access_keys        (account_id, user_name, id)      — child of iam_users,
+//	                                                           ON DELETE CASCADE
+//	role_policy_attachments(account_id, role_name, policy_arn)
+//	                       — many-to-many between roles and policies,
+//	                         ON DELETE CASCADE on role,
+//	                         FK-blocked on policy delete (per real IAM:
+//	                         you cannot delete an attached policy).
+//	instance_profile_roles (account_id, profile_name, role_name)
+//	                       — single role per profile (real IAM allows 1),
+//	                         ON DELETE CASCADE on profile.
 package repository
 
 import (
@@ -30,6 +30,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/redscaresu/fakeaws/models"
 )
@@ -127,26 +129,26 @@ func init() {
 // returns it; handlers translate to the AWS-spec response shape via
 // awsproto.WriteQueryRPCResponse.
 type IAMRole struct {
-	Name                     string                 `json:"role_name"`
-	Path                     string                 `json:"path"`
-	ARN                      string                 `json:"arn"`
-	AssumeRolePolicyDocument string                 `json:"assume_role_policy_document"`
-	Description              string                 `json:"description,omitempty"`
-	MaxSessionDuration       int                    `json:"max_session_duration,omitempty"`
-	Tags                     map[string]string      `json:"tags,omitempty"`
-	CreatedAt                string                 `json:"created_at"`
-	Extra                    map[string]any         `json:"extra,omitempty"` // for forward-compat
+	Name                     string            `json:"role_name"`
+	Path                     string            `json:"path"`
+	ARN                      string            `json:"arn"`
+	AssumeRolePolicyDocument string            `json:"assume_role_policy_document"`
+	Description              string            `json:"description,omitempty"`
+	MaxSessionDuration       int               `json:"max_session_duration,omitempty"`
+	Tags                     map[string]string `json:"tags,omitempty"`
+	CreatedAt                string            `json:"created_at"`
+	Extra                    map[string]any    `json:"extra,omitempty"` // for forward-compat
 }
 
 // IAMPolicy mirrors iam_policies.data.
 type IAMPolicy struct {
-	Name           string                 `json:"policy_name"`
-	Path           string                 `json:"path"`
-	ARN            string                 `json:"arn"`
-	PolicyDocument string                 `json:"policy_document"`
-	Description    string                 `json:"description,omitempty"`
-	CreatedAt      string                 `json:"created_at"`
-	Extra          map[string]any         `json:"extra,omitempty"`
+	Name           string         `json:"policy_name"`
+	Path           string         `json:"path"`
+	ARN            string         `json:"arn"`
+	PolicyDocument string         `json:"policy_document"`
+	Description    string         `json:"description,omitempty"`
+	CreatedAt      string         `json:"created_at"`
+	Extra          map[string]any `json:"extra,omitempty"`
 }
 
 // IAMInstanceProfile mirrors iam_instance_profiles.data; AttachedRole
@@ -278,6 +280,31 @@ func (r *Repository) DeleteRole(account, name string) error {
 }
 
 // ----- Policies -----
+
+// SeedManagedPolicy idempotently inserts an AWS-managed policy stub
+// keyed by its `arn:aws:iam::aws:policy/<Name>` ARN. Used by the
+// AttachRolePolicy handler to lazy-seed any managed ARN the caller
+// references — real AWS pre-creates these; fakeaws creates them on
+// first contact rather than enumerating the (large + growing) set
+// upfront. Re-entry is harmless (INSERT OR IGNORE via the unique
+// constraint on arn).
+func (r *Repository) SeedManagedPolicy(account, policyARN string) error {
+	const prefix = "arn:aws:iam::aws:policy/"
+	if !strings.HasPrefix(policyARN, prefix) {
+		return nil
+	}
+	name := strings.TrimPrefix(policyARN, prefix)
+	p := &IAMPolicy{
+		Name: name, Path: "/", ARN: policyARN,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	body, _ := json.Marshal(p)
+	_, _ = r.db.Exec(
+		`INSERT OR IGNORE INTO iam_policies (account_id, name, path, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		account, p.Name, p.Path, p.ARN, string(body), p.CreatedAt,
+	)
+	return nil
+}
 
 func (r *Repository) CreatePolicy(account string, p *IAMPolicy) error {
 	body, _ := json.Marshal(p)

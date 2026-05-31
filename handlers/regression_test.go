@@ -765,12 +765,23 @@ func TestRegressionStateGatherAccountWide(t *testing.T) {
 	}
 }
 
-// TestRegressionRunInstancesRejectsUnknownAMI pins Codex pass 9
-// BLOCKING #1: RunInstances must reject a typoed/unsupported
-// ImageId rather than silently inserting an instance row that
-// references a nonexistent AMI. Mirrors real EC2 semantics for
-// invalid AMI references.
-func TestRegressionRunInstancesRejectsUnknownAMI(t *testing.T) {
+// TestRegressionRunInstancesAutoSeedsUnknownAMI pins the
+// 2026-05-30 policy reversal: RunInstances now auto-seeds any
+// well-formed `ami-*` reference instead of rejecting unknown AMIs.
+//
+// Why the change: the LLM picks example AMI IDs from AWS docs
+// (`ami-0c55b159cbfafe1f0`, `ami-0abc1234...`) and gating the test
+// loop on whether each exact ID is pre-seeded produced noise without
+// catching real bugs. Per the feedback_mock_design principle (mocks
+// optimize for fast feedback, not realism), AMI-existence checking
+// has been demoted from a hard error to a lazy auto-vivify. Reject
+// only obviously malformed inputs (no `ami-` prefix, or empty).
+//
+// Real EC2 semantics are preserved for the malformed-input path —
+// that's still where a real bug would be (a typo'd argument or
+// missing variable interpolation), and rejecting it gives the LLM a
+// clean error to act on.
+func TestRegressionRunInstancesAutoSeedsUnknownAMI(t *testing.T) {
 	srv := newTestServerForRegression(t)
 	const region = "us-east-1"
 
@@ -785,14 +796,53 @@ func TestRegressionRunInstancesRejectsUnknownAMI(t *testing.T) {
 	})
 	subnetID := xmlExtract(body, "subnetId")
 
+	// Well-formed but unknown ami-* → auto-seeded, RunInstances succeeds.
 	resp, body := ec2PostRegression(t, srv, region, "RunInstances", url.Values{
 		"SubnetId":     {subnetID},
-		"ImageId":      {"ami-does-not-exist"},
+		"ImageId":      {"ami-not-yet-seeded"},
+		"InstanceType": {"t3.micro"},
+		"MinCount":     {"1"}, "MaxCount": {"1"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("RunInstances with well-formed unknown AMI: got %d, want 200 (auto-seed) body=%s", resp.StatusCode, body)
+	}
+
+	// Malformed AMI (no `ami-` prefix) → still rejected, the typo case.
+	resp, body = ec2PostRegression(t, srv, region, "RunInstances", url.Values{
+		"SubnetId":     {subnetID},
+		"ImageId":      {"not-an-ami-id"},
 		"InstanceType": {"t3.micro"},
 		"MinCount":     {"1"}, "MaxCount": {"1"},
 	})
 	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("RunInstances unknown AMI: got %d, want 404 body=%s", resp.StatusCode, body)
+		t.Errorf("RunInstances with malformed AMI: got %d, want 404 body=%s", resp.StatusCode, body)
+	}
+}
+
+// TestRegressionDescribeInstanceTypesSynthesizesForAnyType pins the
+// 2026-05-30 addition of the DescribeInstanceTypes handler. The
+// terraform-provider-aws read path calls this after RunInstances to
+// populate `aws_instance` capacity fields (memory/vcpu/hypervisor);
+// without the handler the apply fails AFTER successful create with a
+// confusing "DescribeInstanceTypes: 404 ResourceNotFoundException."
+// Implementation synthesises a plausible fixture for any well-formed
+// instance type rather than enumerating the (very large) real-world
+// set.
+func TestRegressionDescribeInstanceTypesSynthesizesForAnyType(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+
+	for _, name := range []string{"t3.micro", "t3.small", "m5.xlarge", "unknown.future.type"} {
+		resp, body := ec2PostRegression(t, srv, region, "DescribeInstanceTypes", url.Values{
+			"InstanceType.1": {name},
+		})
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("DescribeInstanceTypes %s: got %d, want 200 body=%s", name, resp.StatusCode, body)
+			continue
+		}
+		if got := xmlExtract(body, "instanceType"); got != name {
+			t.Errorf("DescribeInstanceTypes %s: response missing instanceType, got %q in body=%s", name, got, body)
+		}
 	}
 }
 
