@@ -104,6 +104,21 @@ var iamMigrations = []string{
 		FOREIGN KEY (account_id, profile_name) REFERENCES iam_instance_profiles(account_id, name) ON DELETE CASCADE,
 		FOREIGN KEY (account_id, role_name)    REFERENCES iam_roles(account_id, name)              ON DELETE RESTRICT
 	)`,
+	`CREATE TABLE IF NOT EXISTS user_policy_attachments (
+		account_id TEXT NOT NULL,
+		user_name  TEXT NOT NULL,
+		policy_arn TEXT NOT NULL,
+		PRIMARY KEY (account_id, user_name, policy_arn),
+		FOREIGN KEY (account_id, user_name) REFERENCES iam_users(account_id, name) ON DELETE CASCADE
+	)`,
+	`CREATE TABLE IF NOT EXISTS user_inline_policies (
+		account_id TEXT NOT NULL,
+		user_name  TEXT NOT NULL,
+		name       TEXT NOT NULL,
+		document   TEXT NOT NULL,
+		PRIMARY KEY (account_id, user_name, name),
+		FOREIGN KEY (account_id, user_name) REFERENCES iam_users(account_id, name) ON DELETE CASCADE
+	)`,
 }
 
 // init registers IAM tables with the universal migrate() loop and
@@ -115,6 +130,8 @@ func init() {
 	// that runs FK-ON works. Universal bookkeeping (operations, audit)
 	// stays last.
 	prependResetTables([]string{
+		"user_inline_policies",
+		"user_policy_attachments",
 		"role_policy_attachments",
 		"instance_profile_roles",
 		"iam_access_keys",
@@ -694,6 +711,147 @@ func (r *Repository) ListAttachedRolePolicies(account, role string) ([]string, e
 			return nil, err
 		}
 		out = append(out, arn)
+	}
+	return out, rows.Err()
+}
+
+// ----- User / Policy attachments + inline policies -----
+//
+// Mirror the role-attachment + role-inline machinery for users. The
+// provider's aws_iam_user_policy_attachment and aws_iam_user_policy
+// Read paths enumerate ListAttachedUserPolicies / GetUserPolicy after
+// Create — without persistence the Read returns empty and the Create
+// is reported as drifted-or-gone, terminating the apply.
+
+// AttachUserPolicy inserts a row into user_policy_attachments. FK-
+// validates user existence; policy existence is asserted via ARN
+// lookup so callers can attach managed policies via ARN. Mirrors
+// AttachRolePolicy.
+func (r *Repository) AttachUserPolicy(account, user, policyARN string) error {
+	if _, err := r.GetUser(account, user); err != nil {
+		return err
+	}
+	var n int
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM iam_policies WHERE account_id = ? AND arn = ?`, account, policyARN).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return models.ErrNotFound
+	}
+	_, err := r.db.Exec(
+		`INSERT INTO user_policy_attachments (account_id, user_name, policy_arn) VALUES (?, ?, ?)`,
+		account, user, policyARN,
+	)
+	if err != nil {
+		return mapInsertError(err)
+	}
+	return nil
+}
+
+// DetachUserPolicy removes an attachment. Returns ErrNotFound when no
+// row matches.
+func (r *Repository) DetachUserPolicy(account, user, policyARN string) error {
+	res, err := r.db.Exec(
+		`DELETE FROM user_policy_attachments WHERE account_id = ? AND user_name = ? AND policy_arn = ?`,
+		account, user, policyARN,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return models.ErrNotFound
+	}
+	return nil
+}
+
+// ListAttachedUserPolicies returns the policy ARNs attached to a user.
+func (r *Repository) ListAttachedUserPolicies(account, user string) ([]string, error) {
+	rows, err := r.db.Query(
+		`SELECT policy_arn FROM user_policy_attachments WHERE account_id = ? AND user_name = ? ORDER BY policy_arn`,
+		account, user,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var arn string
+		if err := rows.Scan(&arn); err != nil {
+			return nil, err
+		}
+		out = append(out, arn)
+	}
+	return out, rows.Err()
+}
+
+// PutUserPolicy inserts-or-replaces an inline policy. The provider's
+// aws_iam_user_policy resource issues PutUserPolicy on Create + Update
+// and GetUserPolicy on Read; the document must round-trip verbatim.
+func (r *Repository) PutUserPolicy(account, user, name, document string) error {
+	if _, err := r.GetUser(account, user); err != nil {
+		return err
+	}
+	_, err := r.db.Exec(
+		`INSERT INTO user_inline_policies (account_id, user_name, name, document) VALUES (?, ?, ?, ?)
+		 ON CONFLICT (account_id, user_name, name) DO UPDATE SET document = excluded.document`,
+		account, user, name, document,
+	)
+	return err
+}
+
+// GetUserPolicy returns the inline-policy document or ErrNotFound.
+func (r *Repository) GetUserPolicy(account, user, name string) (string, error) {
+	var doc string
+	err := r.db.QueryRow(
+		`SELECT document FROM user_inline_policies WHERE account_id = ? AND user_name = ? AND name = ?`,
+		account, user, name,
+	).Scan(&doc)
+	if err == sql.ErrNoRows {
+		return "", models.ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return doc, nil
+}
+
+// DeleteUserPolicy removes an inline policy. Returns ErrNotFound when
+// no row matches.
+func (r *Repository) DeleteUserPolicy(account, user, name string) error {
+	res, err := r.db.Exec(
+		`DELETE FROM user_inline_policies WHERE account_id = ? AND user_name = ? AND name = ?`,
+		account, user, name,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return models.ErrNotFound
+	}
+	return nil
+}
+
+// ListUserPolicies returns the inline-policy names for a user, ordered
+// for deterministic round-trip.
+func (r *Repository) ListUserPolicies(account, user string) ([]string, error) {
+	rows, err := r.db.Query(
+		`SELECT name FROM user_inline_policies WHERE account_id = ? AND user_name = ? ORDER BY name`,
+		account, user,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
 	}
 	return out, rows.Err()
 }

@@ -99,26 +99,29 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		// 404 so the destroy can proceed.
 		app.iamListGroupsForUser(w, account, req)
 	case "AttachUserPolicy":
-		// User-level analogue of AttachRolePolicy. We don't persist
-		// the attachment (no scenario reads back); a 200 is enough
-		// to unblock apply. Auto-seed managed-ARN policies the same
-		// way AttachRolePolicy does.
+		// User-level analogue of AttachRolePolicy. Persisted now
+		// (Ticket 1 closeout): aws_iam_user_policy_attachment Read
+		// enumerates the user's attachments and the prior no-op
+		// stub returned empty, causing apply to report drift on
+		// every refresh and ultimately fail aws-full-stack.
 		app.iamAttachUserPolicy(w, account, req)
 	case "DetachUserPolicy":
-		app.iamNoOpSuccess(w, "DetachUserPolicy")
+		app.iamDetachUserPolicy(w, account, req)
 	case "PutUserPolicy":
-		app.iamNoOpSuccess(w, "PutUserPolicy")
+		app.iamPutUserPolicy(w, account, req)
 	case "DeleteUserPolicy":
-		app.iamNoOpSuccess(w, "DeleteUserPolicy")
+		app.iamDeleteUserPolicy(w, account, req)
 	case "GetUserPolicy":
-		app.iamGetUserPolicyEmpty(w, account, req)
+		app.iamGetUserPolicy(w, account, req)
 	case "ListUserPolicies":
-		// Inline-policy enumeration during destroy. Same pattern —
-		// empty list lets the destroy walk to completion.
+		// Inline-policy enumeration: drives destroy preflight and
+		// also the Read path on aws_iam_user_policy. Backed by
+		// user_inline_policies.
 		app.iamListUserPolicies(w, account, req)
 	case "ListAttachedUserPolicies":
-		// Attached managed-policy enumeration during destroy. Same
-		// pattern — empty list, no scenario uses these.
+		// Attached managed-policy enumeration. Backed by
+		// user_policy_attachments so the resource Read sees the
+		// state it just wrote.
 		app.iamListAttachedUserPolicies(w, account, req)
 
 	// ----- Access Keys -----
@@ -703,20 +706,53 @@ func (app *Application) iamListGroupsForUser(w http.ResponseWriter, account stri
 	}{})
 }
 
-// iamListUserPolicies returns an empty inline-policy list. Same
-// "destroy preflight" rationale as iamListGroupsForUser.
+// iamListUserPolicies returns the inline-policy names attached to a
+// user. Read-side of PutUserPolicy.
 func (app *Application) iamListUserPolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	awsproto.WriteQueryRPCResponse(w, "ListUserPolicies", &struct {
-		PolicyNames []string `xml:"PolicyNames>member,omitempty"`
-	}{})
+	user := req.Params.Get("UserName")
+	names, err := app.repo.ListUserPolicies(account, user)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "ListUserPolicies", &iamListUserPoliciesResult{PolicyNames: names})
 }
 
-// iamListAttachedUserPolicies returns an empty managed-policy
-// attachment list. Same "destroy preflight" rationale.
+// iamListAttachedUserPolicies returns the managed-policy attachments
+// for a user, backed by user_policy_attachments so the resource's
+// Read sees state it just wrote.
 func (app *Application) iamListAttachedUserPolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	awsproto.WriteQueryRPCResponse(w, "ListAttachedUserPolicies", &struct {
-		AttachedPolicies []string `xml:"AttachedPolicies>member,omitempty"`
-	}{})
+	user := req.Params.Get("UserName")
+	arns, err := app.repo.ListAttachedUserPolicies(account, user)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	members := make([]iamAttachedPolicy, 0, len(arns))
+	for _, arn := range arns {
+		name := arn
+		if i := strings.LastIndex(arn, "/"); i >= 0 {
+			name = arn[i+1:]
+		}
+		members = append(members, iamAttachedPolicy{PolicyName: name, PolicyArn: arn})
+	}
+	awsproto.WriteQueryRPCResponse(w, "ListAttachedUserPolicies", &iamListAttachedUserPoliciesResult{AttachedPolicies: members})
+}
+
+// iamListUserPoliciesResult — XML wrapper for the inline-policy name
+// list. The anonymous-struct version that previously held this shape
+// marshalled fine for the empty-list path; the persistence path needs
+// a named type so xml.Encoder doesn't trip on a nil slice.
+type iamListUserPoliciesResult struct {
+	PolicyNames []string `xml:"PolicyNames>member"`
+	IsTruncated bool     `xml:"IsTruncated"`
+}
+
+// iamListAttachedUserPoliciesResult — XML wrapper symmetric with
+// iamListAttachedRolePoliciesResult.
+type iamListAttachedUserPoliciesResult struct {
+	AttachedPolicies []iamAttachedPolicy `xml:"AttachedPolicies>member"`
+	IsTruncated      bool                `xml:"IsTruncated"`
 }
 
 type iamAccessKeyXML struct {
@@ -808,28 +844,90 @@ func (app *Application) iamNoOpSuccess(w http.ResponseWriter, action string) {
 }
 
 // iamAttachUserPolicy attaches a managed policy to a user. Auto-seeds
-// AWS-managed policy ARNs the same way AttachRolePolicy does. We
-// don't persist the attachment (no scenario reads it back via
-// ListAttachedUserPolicies — that handler already returns empty).
+// AWS-managed policy ARNs the same way AttachRolePolicy does and
+// persists into user_policy_attachments so subsequent
+// ListAttachedUserPolicies sees the write.
 func (app *Application) iamAttachUserPolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	user := req.Params.Get("UserName")
 	policyARN := req.Params.Get("PolicyArn")
 	if strings.HasPrefix(policyARN, "arn:aws:iam::aws:policy/") {
 		_ = app.repo.SeedManagedPolicy(account, policyARN)
 	}
+	if err := app.repo.AttachUserPolicy(account, user, policyARN); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
 	awsproto.WriteQueryRPCResponse(w, "AttachUserPolicy", nil)
 }
 
-// iamGetUserPolicyEmpty mirrors iamGetRolePolicyEmpty for users.
-func (app *Application) iamGetUserPolicyEmpty(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	awsproto.WriteQueryRPCResponse(w, "GetUserPolicy", &struct {
-		UserName       string `xml:"UserName"`
-		PolicyName     string `xml:"PolicyName"`
-		PolicyDocument string `xml:"PolicyDocument"`
-	}{
-		UserName:       req.Params.Get("UserName"),
-		PolicyName:     req.Params.Get("PolicyName"),
-		PolicyDocument: `{"Version":"2012-10-17","Statement":[]}`,
+// iamDetachUserPolicy removes the (user, ARN) attachment.
+func (app *Application) iamDetachUserPolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	user := req.Params.Get("UserName")
+	policyARN := req.Params.Get("PolicyArn")
+	if err := app.repo.DetachUserPolicy(account, user, policyARN); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "DetachUserPolicy", nil)
+}
+
+// iamPutUserPolicy stores an inline policy verbatim. The provider
+// expects the same document back from GetUserPolicy (the policy is
+// state-tracked by hash) so round-trip fidelity matters.
+func (app *Application) iamPutUserPolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	user := req.Params.Get("UserName")
+	name := req.Params.Get("PolicyName")
+	doc := req.Params.Get("PolicyDocument")
+	if err := app.repo.PutUserPolicy(account, user, name, doc); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "PutUserPolicy", nil)
+}
+
+// iamDeleteUserPolicy removes the inline policy. Idempotent w.r.t.
+// the provider's destroy flow.
+func (app *Application) iamDeleteUserPolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	user := req.Params.Get("UserName")
+	name := req.Params.Get("PolicyName")
+	if err := app.repo.DeleteUserPolicy(account, user, name); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "DeleteUserPolicy", nil)
+}
+
+// iamGetUserPolicy reads back the inline policy. Returns the verbatim
+// document so the provider's hash matches between Create and Read.
+// The named iamGetUserPolicyResult wrapper exists because the
+// awsproto encoder rejects anonymous structs (see queryrpc.go
+// marshalInnerXML — element-name detection trips on Go's anonymous-
+// struct synthesised name).
+func (app *Application) iamGetUserPolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	user := req.Params.Get("UserName")
+	name := req.Params.Get("PolicyName")
+	doc, err := app.repo.GetUserPolicy(account, user, name)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "GetUserPolicy", &iamGetUserPolicyResult{
+		UserName:       user,
+		PolicyName:     name,
+		PolicyDocument: doc,
 	})
+}
+
+// iamGetUserPolicyResult — named wrapper for GetUserPolicy. NO
+// XMLName field, so marshalInnerXML's outer-element detection sees
+// the lowercase Go type name and strips the wrapper — preventing
+// the double-nested <GetUserPolicyResult><GetUserPolicyResult>...</...>...</...>
+// that would otherwise break terraform-provider-aws's XML parser
+// (aws-full-stack iter 4 "empty result" wait-loop).
+type iamGetUserPolicyResult struct {
+	UserName       string `xml:"UserName"`
+	PolicyName     string `xml:"PolicyName"`
+	PolicyDocument string `xml:"PolicyDocument"`
 }
 
 // iamGetRolePolicyEmpty returns an empty inline-policy document for

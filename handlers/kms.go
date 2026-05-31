@@ -164,16 +164,22 @@ func (app *Application) kmsScheduleKeyDeletion(w http.ResponseWriter, account, r
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
 		"KeyId":        k.KeyID,
-		"DeletionDate": deletionDate.Format(time.RFC3339),
+		"DeletionDate": float64(deletionDate.Unix()),
 	})
 }
 
 func kmsKeyMetadata(k *kmsKey) map[string]any {
+	// CreationDate is `DateType` in the KMS smithy spec which the AWS
+	// SDK decodes as a Unix epoch number (seconds + fractional). The
+	// terraform-provider-aws kms.CreateKey wait-loop deserializes the
+	// response with that strict numeric expectation; returning an
+	// RFC3339 string surfaces as "expected DateType to be a JSON
+	// Number, got string instead" and apply fails on aws-full-stack.
 	return map[string]any{
 		"AWSAccountId":          awsproto.FakeAccountID,
 		"KeyId":                 k.KeyID,
 		"Arn":                   k.ARN,
-		"CreationDate":          k.Created.Format(time.RFC3339),
+		"CreationDate":          float64(k.Created.Unix()),
 		"Enabled":               true,
 		"Description":           "",
 		"KeyUsage":              "ENCRYPT_DECRYPT",

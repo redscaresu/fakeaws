@@ -312,6 +312,101 @@ func TestIAM_AttachDetachRolePolicy(t *testing.T) {
 	}
 }
 
+// TestIAM_AttachDetachUserPolicy pins the Ticket 1 closeout: user
+// policy attachments persist into user_policy_attachments, so the
+// provider's aws_iam_user_policy_attachment Read enumerates them
+// instead of the pre-fix empty list (which made every refresh report
+// drift on aws-full-stack).
+func TestIAM_AttachDetachUserPolicy(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	_, _ = iamCall(t, srv, "CreateUser", url.Values{"UserName": {"alice"}})
+	_, _ = iamCall(t, srv, "CreatePolicy", url.Values{"PolicyName": {"p"}})
+	policyArn := "arn:aws:iam::000000000000:policy/p"
+
+	resp, _ := iamCall(t, srv, "AttachUserPolicy", url.Values{
+		"UserName": {"alice"}, "PolicyArn": {policyArn},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("AttachUserPolicy: %d", resp.StatusCode)
+	}
+
+	resp, body := iamCall(t, srv, "ListAttachedUserPolicies", url.Values{"UserName": {"alice"}})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("ListAttachedUserPolicies: %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), policyArn) {
+		t.Errorf("ListAttachedUserPolicies missing %q: %s", policyArn, body)
+	}
+
+	resp, _ = iamCall(t, srv, "DetachUserPolicy", url.Values{
+		"UserName": {"alice"}, "PolicyArn": {policyArn},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("DetachUserPolicy: %d", resp.StatusCode)
+	}
+
+	resp, body = iamCall(t, srv, "ListAttachedUserPolicies", url.Values{"UserName": {"alice"}})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("ListAttachedUserPolicies post-detach: %d", resp.StatusCode)
+	}
+	if strings.Contains(string(body), policyArn) {
+		t.Errorf("post-detach still contains ARN: %s", body)
+	}
+}
+
+// TestIAM_PutGetDeleteUserPolicy pins the inline-policy round-trip:
+// PutUserPolicy → GetUserPolicy returns the verbatim document; provider
+// hashes match so no diff on plan.
+func TestIAM_PutGetDeleteUserPolicy(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	_, _ = iamCall(t, srv, "CreateUser", url.Values{"UserName": {"alice"}})
+	doc := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}`
+
+	resp, _ := iamCall(t, srv, "PutUserPolicy", url.Values{
+		"UserName":       {"alice"},
+		"PolicyName":     {"all-s3"},
+		"PolicyDocument": {doc},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("PutUserPolicy: %d", resp.StatusCode)
+	}
+
+	resp, body := iamCall(t, srv, "GetUserPolicy", url.Values{
+		"UserName":   {"alice"},
+		"PolicyName": {"all-s3"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GetUserPolicy: %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "s3:*") {
+		t.Errorf("GetUserPolicy missing document: %s", body)
+	}
+
+	resp, body = iamCall(t, srv, "ListUserPolicies", url.Values{"UserName": {"alice"}})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("ListUserPolicies: %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "all-s3") {
+		t.Errorf("ListUserPolicies missing name: %s", body)
+	}
+
+	resp, _ = iamCall(t, srv, "DeleteUserPolicy", url.Values{
+		"UserName":   {"alice"},
+		"PolicyName": {"all-s3"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("DeleteUserPolicy: %d", resp.StatusCode)
+	}
+
+	resp, _ = iamCall(t, srv, "GetUserPolicy", url.Values{
+		"UserName":   {"alice"},
+		"PolicyName": {"all-s3"},
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GetUserPolicy post-delete: %d want 404", resp.StatusCode)
+	}
+}
+
 func TestIAM_AttachRolePolicyMissingPolicyIs404(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	_, _ = iamCall(t, srv, "CreateRole", url.Values{"RoleName": {"r"}})
@@ -387,7 +482,6 @@ func TestIAM_MockStateAccessKeysSurfaced(t *testing.T) {
 		t.Errorf("/mock/state/iam.access_keys missing user_name=alice: %s", state)
 	}
 }
-
 
 // ----- Wire-shape sanity: response decodes as XML -----
 
