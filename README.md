@@ -19,25 +19,30 @@ fork story alive — narrow in coverage, deep in the few services we ship.
 
 ## Status
 
-Nine services across five wire formats. The S43–S48 codex review loop
+Ten services across five wire formats. The S43–S48 codex review loop
 closed at pass 17 with zero allowlist entries; post-S48 polish landed
 the M51 Query-RPC envelope rewrite, M57 per-resource field parity, M61
-full RDS lifecycle (`aws_db_instance` apply → plan no-op → destroy
-clean), and M62 full Secrets Manager lifecycle. The 17 review passes
-are archived under `docs/review-passes/passN.md`. Aggregate handlers
-coverage 77.2% on the `total:` line (`handlers` 79.4% + `handlers/awsproto` 53.4%).
+full RDS lifecycle, M62 full Secrets Manager lifecycle, and the
+2026-05-30/31 self-learning-sweep coverage burst — ~17 missing
+endpoints + envelope/error-code mismatches resolved (EC2 wire shape
+correction, DescribeInstanceTypes / DescribeTags / DescribeInstanceAttribute
+/ DescribeRouteTables routeSet+associationSet / ModifySubnetAttribute,
+DynamoDB DescribeContinuousBackups + DescribeTimeToLive, eight Route53
+fixes, IAM destroy preflight + managed-ARN auto-seed, full KMS handler).
+The 17 review passes are archived under `docs/review-passes/passN.md`.
 
 | Service | Wire format | Endpoint | TF lifecycle |
 | ------- | ----------- | -------- | ------------ |
-| IAM | Query-RPC + XML | `POST /iam` | apply / plan-no-op / destroy ✓ |
+| IAM | Query-RPC + XML | `POST /iam` | apply / plan-no-op / destroy ✓ — managed-ARN auto-seed, user/role inline policies, attached-policy preflight |
 | S3 | XML REST | `/s3/<bucket>/<key>?<sub-resource>` | apply / plan-no-op / destroy ✓ (S3 bucket sub-resource reads are limited — for `terraform-provider-aws`'s full Read flow infrafactory pairs fakeaws with SeaweedFS, see M59) |
-| EC2 | Query-RPC + XML | `POST /ec2/region/<region>` | VPC + Subnet + IGW + RouteTable + Route + EIP + SG + Instance + KeyPair + AMI fixture; full lifecycle ✓ |
+| EC2 | Query-RPC + XML (`ShapeEC2Query` envelope) | `POST /ec2/region/<region>` | VPC + Subnet + IGW + RouteTable + Route + EIP + SG + Instance + KeyPair + AMI fixture; full lifecycle ✓ — InvalidGroup.NotFound / InvalidInstanceID.NotFound / InvalidRouteTableID.NotFound destroy-wait codes, AMI auto-seed, terminated-instance GC on subnet delete |
 | RDS | Query-RPC + XML | `POST /rds/region/<region>` | DB Instance + Subnet/Parameter/Cluster Groups + Clusters; full lifecycle ✓ (M61: DbiResourceId stability, service-specific 404 codes, DeleteDBInstance envelope, user-field persistence) |
-| DynamoDB | JSON 1.1 + X-Amz-Target | `POST /dynamodb/region/<region>` | apply / plan-no-op / destroy ✓ |
+| DynamoDB | JSON 1.1 + X-Amz-Target | `POST /dynamodb/region/<region>` | apply / plan-no-op / destroy ✓ — refresh-path DescribeContinuousBackups + DescribeTimeToLive |
 | EKS | JSON-REST | `/eks/region/<region>/clusters/...` | cluster + node group; full lifecycle ✓ |
 | SQS | JSON 1.0 + X-Amz-Target | `POST /sqs/region/<region>` | apply / plan-no-op / destroy ✓ |
-| Route53 | XML REST | `/route53/2013-04-01/...` | hosted zone + record set; full lifecycle ✓ |
+| Route53 | XML REST | `/route53/2013-04-01/...` | hosted zone + record set; full lifecycle ✓ — DelegationSet/NameServers, ListTagsForResource, GetDNSSEC, rrset filter + trailing-dot normalisation |
 | Secrets Manager | JSON 1.1 + X-Amz-Target | `POST /secretsmanager/region/<region>` | apply / plan-no-op / destroy ✓ (M62: ARN-or-name SecretId, epoch timestamps, VersionIdsToStages, GetResourcePolicy + ListSecretVersionIds) |
+| KMS | JSON 1.1 + X-Amz-Target | `POST /kms/region/<region>` | apply / plan-no-op / destroy ✓ — CreateKey / DescribeKey / GetKeyPolicy / ListAliases / ListResourceTags / EnableKeyRotation / GetKeyRotationStatus / TagResource / ScheduleKeyDeletion / CancelKeyDeletion / EnableKey / DisableKey; in-memory keyed state, hard-delete on schedule |
 
 Per-resource details + load-bearing FK contracts live in `PLAN.md`;
 the M61/M62 wire-shape lessons are documented in `AGENTS.md` under
