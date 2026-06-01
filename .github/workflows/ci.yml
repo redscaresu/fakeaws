@@ -82,7 +82,7 @@ jobs:
           path: infrafactory
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: fakeaws/go.mod
       - working-directory: fakeaws
         run: go test ./internal/audit/ -run TestFullCoverageAudit
 
