@@ -32,6 +32,12 @@ type kmsKey struct {
 	// resource Update wait-loop times out after 10m otherwise. Persisting
 	// this field across the Update/Get cycle closes the gap.
 	RotationEnabled bool
+	// Tags mirrors the AWS KMS resource tag set. terraform-provider-aws
+	// calls TagResource / UntagResource on Update and polls
+	// ListResourceTags waiting for the set to converge; without
+	// persistence the resource Update wait-loop diverges and apply
+	// times out. Same fix shape as RotationEnabled (S77).
+	Tags map[string]string
 }
 
 type kmsState struct {
@@ -72,9 +78,11 @@ func (app *Application) handleKMS(w http.ResponseWriter, r *http.Request) {
 	case "DisableKeyRotation":
 		app.kmsSetKeyRotation(w, req, false)
 	case "ListResourceTags":
-		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Tags": []any{}})
-	case "TagResource", "UntagResource":
-		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+		app.kmsListResourceTags(w, req)
+	case "TagResource":
+		app.kmsTagResource(w, req)
+	case "UntagResource":
+		app.kmsUntagResource(w, req)
 	case "ListAliases":
 		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Aliases": []any{}})
 	case "CreateAlias", "UpdateAlias", "DeleteAlias":
@@ -92,6 +100,14 @@ func (app *Application) handleKMS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *Application) kmsCreateKey(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		Tags []struct {
+			TagKey   string `json:"TagKey"`
+			TagValue string `json:"TagValue"`
+		} `json:"Tags"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	keyID := hex.EncodeToString(b[:4]) + "-" + hex.EncodeToString(b[4:6]) + "-" + hex.EncodeToString(b[6:8]) + "-" + hex.EncodeToString(b[8:10]) + "-" + hex.EncodeToString(b[10:16])
@@ -101,6 +117,10 @@ func (app *Application) kmsCreateKey(w http.ResponseWriter, account, region stri
 		ARN:     arn,
 		State:   "Enabled",
 		Created: time.Now().UTC(),
+		Tags:    map[string]string{},
+	}
+	for _, t := range in.Tags {
+		k.Tags[t.TagKey] = t.TagValue
 	}
 	kmsStore.mu.Lock()
 	kmsStore.keys[keyID] = k
@@ -217,6 +237,96 @@ func (app *Application) kmsSetKeyRotation(w http.ResponseWriter, req awsproto.XA
 	k, ok := kmsStore.keys[in.KeyId]
 	if ok {
 		k.RotationEnabled = enable
+	}
+	kmsStore.mu.Unlock()
+	if !ok {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
+			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+}
+
+// kmsListResourceTags returns the persisted tag set for the requested
+// key. Real AWS pairs each tag as {TagKey, TagValue}; the
+// terraform-provider-aws Read flow rebuilds the resource Tags map
+// from this shape. Before this handler was state-aware the response
+// was a hard-coded empty list and aws_kms_key.tags Update wait-loops
+// timed out after a few minutes.
+//
+// Returns NotFoundException for unknown key ids — matches AWS KMS.
+func (app *Application) kmsListResourceTags(w http.ResponseWriter, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		KeyId string `json:"KeyId"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+	kmsStore.mu.Lock()
+	k, ok := kmsStore.keys[in.KeyId]
+	var tags []map[string]string
+	if ok {
+		for kk, vv := range k.Tags {
+			tags = append(tags, map[string]string{"TagKey": kk, "TagValue": vv})
+		}
+	}
+	kmsStore.mu.Unlock()
+	if !ok {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
+			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
+		return
+	}
+	if tags == nil {
+		tags = []map[string]string{}
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
+		"Tags": tags,
+	})
+}
+
+// kmsTagResource adds or overwrites tags on the requested key.
+// AWS allows the same TagKey to appear multiple times in a single
+// request (last write wins); we mirror that by iterating in order.
+func (app *Application) kmsTagResource(w http.ResponseWriter, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		KeyId string `json:"KeyId"`
+		Tags  []struct {
+			TagKey   string `json:"TagKey"`
+			TagValue string `json:"TagValue"`
+		} `json:"Tags"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+	kmsStore.mu.Lock()
+	k, ok := kmsStore.keys[in.KeyId]
+	if ok {
+		if k.Tags == nil {
+			k.Tags = map[string]string{}
+		}
+		for _, t := range in.Tags {
+			k.Tags[t.TagKey] = t.TagValue
+		}
+	}
+	kmsStore.mu.Unlock()
+	if !ok {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
+			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+}
+
+// kmsUntagResource removes the listed tag keys. Real AWS silently
+// ignores unknown keys; we mirror that.
+func (app *Application) kmsUntagResource(w http.ResponseWriter, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		KeyId   string   `json:"KeyId"`
+		TagKeys []string `json:"TagKeys"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+	kmsStore.mu.Lock()
+	k, ok := kmsStore.keys[in.KeyId]
+	if ok {
+		for _, kk := range in.TagKeys {
+			delete(k.Tags, kk)
+		}
 	}
 	kmsStore.mu.Unlock()
 	if !ok {
