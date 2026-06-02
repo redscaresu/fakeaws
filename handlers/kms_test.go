@@ -111,3 +111,110 @@ func TestKMS_KeyRotation_UnknownKeyReturns404(t *testing.T) {
 		t.Errorf("EnableKeyRotation on missing key should not return 200, got %d", resp.StatusCode)
 	}
 }
+
+// TestKMS_TagPersistence pins S79's fix for the aws_kms_key tags
+// update timeout. Before this fix, ListResourceTags always returned
+// {Tags: []} and TagResource / UntagResource were no-ops. The
+// terraform-provider-aws Update wait-loop polled ListResourceTags
+// waiting for the tag set to converge to the configured value, then
+// timed out.
+//
+// With the fix: CreateKey-with-tags → ListResourceTags returns
+// initial set → TagResource adds → UntagResource removes → all
+// changes visible in subsequent List calls.
+func TestKMS_TagPersistence(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	// Create a key with initial tags.
+	resp, body := kmsCall(t, srv, region, "CreateKey",
+		`{"Tags":[{"TagKey":"env","TagValue":"prod"},{"TagKey":"team","TagValue":"platform"}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateKey: %d %s", resp.StatusCode, body)
+	}
+	var created struct {
+		KeyMetadata struct {
+			KeyId string
+		}
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("decode CreateKey: %v\nbody=%s", err, body)
+	}
+	keyID := created.KeyMetadata.KeyId
+
+	// ListResourceTags should return both initial tags.
+	resp, body = kmsCall(t, srv, region, "ListResourceTags", `{"KeyId":"`+keyID+`"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ListResourceTags: %d %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), `"TagKey":"env"`) || !strings.Contains(string(body), `"TagValue":"prod"`) {
+		t.Errorf("expected env=prod tag in initial list, got: %s", body)
+	}
+	if !strings.Contains(string(body), `"TagKey":"team"`) || !strings.Contains(string(body), `"TagValue":"platform"`) {
+		t.Errorf("expected team=platform tag in initial list, got: %s", body)
+	}
+
+	// Add a third tag + overwrite env.
+	resp, body = kmsCall(t, srv, region, "TagResource",
+		`{"KeyId":"`+keyID+`","Tags":[{"TagKey":"env","TagValue":"staging"},{"TagKey":"owner","TagValue":"sre"}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("TagResource: %d %s", resp.StatusCode, body)
+	}
+
+	resp, body = kmsCall(t, srv, region, "ListResourceTags", `{"KeyId":"`+keyID+`"}`)
+	if !strings.Contains(string(body), `"TagValue":"staging"`) {
+		t.Errorf("expected env=staging after TagResource overwrite, got: %s", body)
+	}
+	if !strings.Contains(string(body), `"TagKey":"owner"`) {
+		t.Errorf("expected owner tag after TagResource add, got: %s", body)
+	}
+	if strings.Contains(string(body), `"TagValue":"prod"`) {
+		t.Errorf("expected old env=prod gone after overwrite, got: %s", body)
+	}
+
+	// Remove env and owner; keep team.
+	resp, body = kmsCall(t, srv, region, "UntagResource",
+		`{"KeyId":"`+keyID+`","TagKeys":["env","owner"]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("UntagResource: %d %s", resp.StatusCode, body)
+	}
+
+	resp, body = kmsCall(t, srv, region, "ListResourceTags", `{"KeyId":"`+keyID+`"}`)
+	if strings.Contains(string(body), `"TagKey":"env"`) || strings.Contains(string(body), `"TagKey":"owner"`) {
+		t.Errorf("expected env+owner removed after UntagResource, got: %s", body)
+	}
+	if !strings.Contains(string(body), `"TagKey":"team"`) {
+		t.Errorf("expected team tag to survive UntagResource, got: %s", body)
+	}
+
+	// UntagResource on an unknown key — real AWS silently ignores; we mirror.
+	resp, body = kmsCall(t, srv, region, "UntagResource",
+		`{"KeyId":"`+keyID+`","TagKeys":["does-not-exist"]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("UntagResource of unknown key should silently 200, got %d %s", resp.StatusCode, body)
+	}
+}
+
+// TestKMS_Tag_UnknownKeyReturns404 guards the not-found path for
+// the three tag handlers.
+func TestKMS_Tag_UnknownKeyReturns404(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	resp, _ := kmsCall(t, srv, region, "ListResourceTags", `{"KeyId":"nonexistent"}`)
+	if resp.StatusCode == http.StatusOK {
+		t.Errorf("ListResourceTags on missing key should not return 200, got %d", resp.StatusCode)
+	}
+
+	resp, _ = kmsCall(t, srv, region, "TagResource",
+		`{"KeyId":"nonexistent","Tags":[{"TagKey":"a","TagValue":"b"}]}`)
+	if resp.StatusCode == http.StatusOK {
+		t.Errorf("TagResource on missing key should not return 200, got %d", resp.StatusCode)
+	}
+
+	resp, _ = kmsCall(t, srv, region, "UntagResource",
+		`{"KeyId":"nonexistent","TagKeys":["a"]}`)
+	if resp.StatusCode == http.StatusOK {
+		t.Errorf("UntagResource on missing key should not return 200, got %d", resp.StatusCode)
+	}
+}
