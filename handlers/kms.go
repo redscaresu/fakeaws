@@ -26,6 +26,12 @@ type kmsKey struct {
 	State   string
 	Created time.Time
 	Deleted *time.Time
+	// RotationEnabled mirrors the AWS KMS GetKeyRotationStatus field.
+	// terraform-provider-aws calls EnableKeyRotation / DisableKeyRotation
+	// then polls GetKeyRotationStatus waiting for the state to flip; the
+	// resource Update wait-loop times out after 10m otherwise. Persisting
+	// this field across the Update/Get cycle closes the gap.
+	RotationEnabled bool
 }
 
 type kmsState struct {
@@ -60,9 +66,11 @@ func (app *Application) handleKMS(w http.ResponseWriter, r *http.Request) {
 	case "PutKeyPolicy":
 		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
 	case "GetKeyRotationStatus":
-		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"KeyRotationEnabled": false})
-	case "EnableKeyRotation", "DisableKeyRotation":
-		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+		app.kmsGetKeyRotationStatus(w, req)
+	case "EnableKeyRotation":
+		app.kmsSetKeyRotation(w, req, true)
+	case "DisableKeyRotation":
+		app.kmsSetKeyRotation(w, req, false)
 	case "ListResourceTags":
 		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Tags": []any{}})
 	case "TagResource", "UntagResource":
@@ -166,6 +174,57 @@ func (app *Application) kmsScheduleKeyDeletion(w http.ResponseWriter, account, r
 		"KeyId":        k.KeyID,
 		"DeletionDate": float64(deletionDate.Unix()),
 	})
+}
+
+// kmsGetKeyRotationStatus returns the persisted RotationEnabled flag
+// for the requested key. The terraform-provider-aws Update wait-loop
+// polls this endpoint waiting for the value to flip after an
+// Enable/Disable call; before this handler was state-aware the polled
+// value was hard-coded to false and apply timed out after 10m.
+//
+// Returns NotFoundException for unknown key ids — matches AWS KMS.
+func (app *Application) kmsGetKeyRotationStatus(w http.ResponseWriter, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		KeyId string `json:"KeyId"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+	kmsStore.mu.Lock()
+	k, ok := kmsStore.keys[in.KeyId]
+	enabled := false
+	if ok {
+		enabled = k.RotationEnabled
+	}
+	kmsStore.mu.Unlock()
+	if !ok {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
+			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
+		"KeyRotationEnabled": enabled,
+	})
+}
+
+// kmsSetKeyRotation handles both EnableKeyRotation (enable=true) and
+// DisableKeyRotation (enable=false). Persists the change so the next
+// GetKeyRotationStatus reflects it.
+func (app *Application) kmsSetKeyRotation(w http.ResponseWriter, req awsproto.XAmzTargetRequest, enable bool) {
+	var in struct {
+		KeyId string `json:"KeyId"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+	kmsStore.mu.Lock()
+	k, ok := kmsStore.keys[in.KeyId]
+	if ok {
+		k.RotationEnabled = enable
+	}
+	kmsStore.mu.Unlock()
+	if !ok {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
+			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
 }
 
 func kmsKeyMetadata(k *kmsKey) map[string]any {
