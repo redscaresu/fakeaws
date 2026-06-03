@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +55,18 @@ func (app *Application) registerRoute53Routes(r chi.Router) {
 		// storage on hosted zones (yet), so return an empty tag set
 		// which is the correct "no tags here" answer real AWS gives.
 		r.Get("/tags/{resourceType}/{resourceID}", app.r53ListTagsForResource)
+		// terraform-provider-aws's aws_route53_zone with `tags = {...}`
+		// POSTs to ChangeTagsForResource on Create/Update. We don't
+		// model tag storage on hosted zones yet, so accept the request
+		// and return success — terraform's tag drift detection just
+		// checks that the change went through, then ListTagsForResource
+		// (above) returns empty, which the provider's later Read
+		// reconciles as "tags removed" without an error. S96 (2026-06-03):
+		// surfaced by aws-route53 sweep-3 flake — the missing POST route
+		// 404'd and the LLM oscillated between adding tags (to satisfy
+		// the scenario) and dropping them (because the 404 looked like
+		// "tags not supported").
+		r.Post("/tags/{resourceType}/{resourceID}", app.r53ChangeTagsForResource)
 		// terraform-provider-aws's aws_route53_zone read path calls
 		// GetDNSSEC after refresh. We don't model DNSSEC; return the
 		// AWS "NOT_SIGNING" default so the provider sees a valid
@@ -377,6 +390,28 @@ func (app *Application) r53ListResourceRecordSets(w http.ResponseWriter, r *http
 		return
 	}
 
+	// S96 (2026-06-03): Sort records by (normalised name, type,
+	// setIdentifier) BEFORE filtering. Real Route 53 returns records
+	// in lexicographic order — and terraform-provider-aws's
+	// per-record Read sends `StartRecordName=<name>&StartRecordType=<type>
+	// &MaxItems=1` expecting the FIRST record at-or-after that key.
+	// Without sorting, fakeaws walks records in insertion order, so
+	// auto-inserted NS records can sit BEFORE the A record the LLM
+	// just created — `MaxItems=1` then returns the NS record and the
+	// provider's A-record Read surfaces as "empty result", looping
+	// the run forever. Surfaced by aws-route53 sweep-3 flake
+	// 2026-06-03.
+	sort.SliceStable(rsets, func(i, j int) bool {
+		ni, nj := r53NormaliseName(rsets[i].Name), r53NormaliseName(rsets[j].Name)
+		if ni != nj {
+			return ni < nj
+		}
+		if rsets[i].Type != rsets[j].Type {
+			return rsets[i].Type < rsets[j].Type
+		}
+		return rsets[i].SetIdentifier < rsets[j].SetIdentifier
+	})
+
 	// Honour the AWS SDK's filter query params. terraform-provider-aws
 	// reads individual records by calling with StartRecordName/Type +
 	// MaxItems=1 and expecting the response to start at the matching
@@ -544,6 +579,20 @@ func r53IsApex(recordName, zoneName string) bool {
 // Codex pass 3 BLOCKING #2 fix: hosted zones now also surface their
 // non-default record sets (was previously only emitting zones).
 // NS+SOA defaults are excluded so the count reflects user records only.
+// r53ChangeTagsForResource accepts the terraform-provider-aws tag-
+// change POST and returns success. We don't model tag storage on
+// hosted zones (yet); the canonical "no tags" response from
+// ListTagsForResource matches what real AWS returns post-clear, so
+// the provider's drift detection reconciles cleanly. S96 (2026-06-03):
+// the missing handler 404'd, causing aws-route53 to oscillate.
+func (app *Application) r53ChangeTagsForResource(w http.ResponseWriter, r *http.Request) {
+	// Drain the body so the SDK doesn't think we hung up mid-request.
+	_, _ = io.Copy(io.Discard, r.Body)
+	awsproto.WriteXMLResponse(w, http.StatusOK, &struct {
+		XMLName xml.Name `xml:"ChangeTagsForResourceResponse"`
+	}{})
+}
+
 func (app *Application) gatherRoute53StateReal() map[string]any {
 	const account = awsproto.FakeAccountID
 	out := map[string]any{
