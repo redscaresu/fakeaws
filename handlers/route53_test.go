@@ -177,3 +177,72 @@ func TestRoute53_BatchAtomicityOnInvalidChange(t *testing.T) {
 		t.Errorf("transactional violation: www record applied despite batch failure: %s", body)
 	}
 }
+
+// TestRoute53_ListSortsLexicographically pins S96's fix for the
+// aws-route53 sweep-3 flake. terraform-provider-aws's per-record Read
+// sends `?name=<n>&type=<t>&maxitems=1` expecting the FIRST record
+// at-or-after that key in lexicographic order. Without sorting,
+// fakeaws walked storage order — the auto-inserted NS record could
+// sit before the user's A record, so MaxItems=1 returned the NS
+// record and the provider's A-record Read surfaced as "empty result".
+//
+// After fix: records are sorted by (normalised name, type,
+// setIdentifier) before filtering. NS sorts AFTER A alphabetically,
+// so the A record wins.
+func TestRoute53_ListSortsLexicographically(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+
+	_, body := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest><Name>test.example.invalid.</Name><CallerReference>x</CallerReference></CreateHostedZoneRequest>`)
+	idStart := strings.Index(string(body), "<Id>/hostedzone/") + len("<Id>/hostedzone/")
+	idEnd := strings.Index(string(body)[idStart:], "</Id>") + idStart
+	zoneID := string(body)[idStart:idEnd]
+
+	// Zone creation auto-inserts NS records. Now add an apex A record
+	// — this is the shape the aws-route53 scenario produces.
+	apex := `<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>
+		<Change><Action>CREATE</Action><ResourceRecordSet>
+			<Name>test.example.invalid.</Name><Type>A</Type><TTL>300</TTL>
+			<ResourceRecords><ResourceRecord><Value>192.0.2.1</Value></ResourceRecord></ResourceRecords>
+		</ResourceRecordSet></Change>
+	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
+	r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", apex)
+
+	// terraform-provider-aws per-record Read shape.
+	_, body = r53Request(t, srv, http.MethodGet,
+		"/route53/2013-04-01/hostedzone/"+zoneID+"/rrset?name=test.example.invalid&type=A&maxitems=1", "")
+	if !strings.Contains(string(body), `<Type>A</Type>`) {
+		t.Errorf("expected A record first (lex order), got: %s", body)
+	}
+	if strings.Contains(string(body), `<Type>NS</Type>`) {
+		t.Errorf("expected ONLY A record (maxitems=1), NS record leaked: %s", body)
+	}
+}
+
+// TestRoute53_ChangeTagsForResourceAccepts pins S96's second fix.
+// terraform-provider-aws's aws_route53_zone with `tags = {...}` POSTs
+// to /tags/<type>/<id>. Without the handler, fakeaws 404'd and the
+// LLM oscillated between adding + removing tags. Accept-and-ignore
+// is fine — we don't model zone tag storage, so the existing
+// ListTagsForResource (empty) round-trips correctly.
+func TestRoute53_ChangeTagsForResourceAccepts(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	_, body := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest><Name>example.com.</Name><CallerReference>x</CallerReference></CreateHostedZoneRequest>`)
+	idStart := strings.Index(string(body), "<Id>/hostedzone/") + len("<Id>/hostedzone/")
+	idEnd := strings.Index(string(body)[idStart:], "</Id>") + idStart
+	zoneID := string(body)[idStart:idEnd]
+
+	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/tags/hostedzone/"+zoneID,
+		`<ChangeTagsForResourceRequest><AddTags><Tag><Key>Owner</Key><Value>platform</Value></Tag></AddTags></ChangeTagsForResourceRequest>`)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("ChangeTagsForResource: %d, want 200", resp.StatusCode)
+	}
+
+	// ListTagsForResource still returns empty (we don't model storage).
+	resp, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/tags/hostedzone/"+zoneID, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("ListTagsForResource after change: %d, want 200", resp.StatusCode)
+	}
+	_ = body
+}
