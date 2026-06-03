@@ -60,7 +60,9 @@ func (app *Application) handleSecretsManager(w http.ResponseWriter, r *http.Requ
 		// No-ops in v1 — accept the request and reply with the
 		// minimal envelope the SDK expects so subsequent reads
 		// don't error.
-		var in struct{ SecretId string `json:"SecretId"` }
+		var in struct {
+			SecretId string `json:"SecretId"`
+		}
 		_ = json.Unmarshal(req.Body, &in)
 		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
 			"Name": in.SecretId, "ARN": in.SecretId,
@@ -90,10 +92,10 @@ func secretRandSuffix() string {
 
 func (app *Application) smCreateSecret(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
-		Name         string            `json:"Name"`
-		Description  string            `json:"Description,omitempty"`
-		KmsKeyId     string            `json:"KmsKeyId,omitempty"`
-		SecretString string            `json:"SecretString,omitempty"`
+		Name         string                        `json:"Name"`
+		Description  string                        `json:"Description,omitempty"`
+		KmsKeyId     string                        `json:"KmsKeyId,omitempty"`
+		SecretString string                        `json:"SecretString,omitempty"`
 		Tags         []struct{ Key, Value string } `json:"Tags,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &in); err != nil {
@@ -232,9 +234,9 @@ func (app *Application) smListSecrets(w http.ResponseWriter, account, region str
 
 func (app *Application) smDeleteSecret(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
-		SecretId                  string `json:"SecretId"`
-		RecoveryWindowInDays      int    `json:"RecoveryWindowInDays,omitempty"`
-		ForceDeleteWithoutRecovery bool  `json:"ForceDeleteWithoutRecovery,omitempty"`
+		SecretId                   string `json:"SecretId"`
+		RecoveryWindowInDays       int    `json:"RecoveryWindowInDays,omitempty"`
+		ForceDeleteWithoutRecovery bool   `json:"ForceDeleteWithoutRecovery,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &in); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, fmt.Errorf("%w: %v", models.ErrConflict, err))
@@ -280,8 +282,8 @@ func (app *Application) smRestoreSecret(w http.ResponseWriter, account, region s
 
 func (app *Application) smPutSecretValue(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
-		SecretId     string `json:"SecretId"`
-		SecretString string `json:"SecretString,omitempty"`
+		SecretId      string   `json:"SecretId"`
+		SecretString  string   `json:"SecretString,omitempty"`
 		VersionStages []string `json:"VersionStages,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &in); err != nil {
@@ -306,9 +308,9 @@ func (app *Application) smPutSecretValue(w http.ResponseWriter, account, region 
 
 func (app *Application) smGetSecretValue(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
-		SecretId      string `json:"SecretId"`
-		VersionId     string `json:"VersionId,omitempty"`
-		VersionStage  string `json:"VersionStage,omitempty"`
+		SecretId     string `json:"SecretId"`
+		VersionId    string `json:"VersionId,omitempty"`
+		VersionStage string `json:"VersionStage,omitempty"`
 	}
 	json.Unmarshal(req.Body, &in)
 	v, err := app.repo.GetSecretValue(account, region, in.SecretId, in.VersionStage, in.VersionId)
@@ -376,10 +378,10 @@ func (app *Application) smListSecretVersionIds(w http.ResponseWriter, account, r
 			stages = []string{}
 		}
 		out = append(out, map[string]any{
-			"VersionId":          v.VersionID,
-			"VersionStages":      stages,
-			"CreatedDate":        secretEpoch(v.CreatedAt),
-			"LastAccessedDate":   secretEpoch(v.CreatedAt),
+			"VersionId":        v.VersionID,
+			"VersionStages":    stages,
+			"CreatedDate":      secretEpoch(v.CreatedAt),
+			"LastAccessedDate": secretEpoch(v.CreatedAt),
 		})
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
@@ -396,6 +398,21 @@ func (app *Application) smListSecretVersionIds(w http.ResponseWriter, account, r
 //
 // Codex pass 3 BLOCKING #2 fix: secrets now also surface their
 // version stage labels (was previously only emitting secrets).
+//
+// S89 (2026-06-03): filter out PendingDeletion + Destroyed states.
+// terraform-provider-aws's default DeleteSecret call sets a 30-day
+// recovery window, which leaves the row in PendingDeletion. The
+// infrafactory orphan-check reads /mock/state.secretsmanager.secrets
+// and treats any non-empty entry as a leftover — but a
+// PendingDeletion or Destroyed secret IS gone from the user's
+// perspective (DescribeSecret returns 404). Filtering them out of
+// /mock/state mirrors the "fully-deleted" contract the orphan-check
+// expects. The Active-state retention is unchanged.
+//
+// Handler/repository behavior unchanged — RestoreSecret on
+// PendingDeletion still works, the existing
+// TestSecretsManager_PendingDeletionRoundTrip + tests pinning the
+// 404 contract for Destroyed secrets still pass.
 func (app *Application) gatherSecretsManagerStateReal() map[string]any {
 	const account = awsproto.FakeAccountID
 	out := map[string]any{
@@ -409,6 +426,11 @@ func (app *Application) gatherSecretsManagerStateReal() map[string]any {
 	// outside it).
 	secrets, _ := app.repo.ListSecrets(account, "")
 	for _, s := range secrets {
+		// S89: skip non-Active states. PendingDeletion + Destroyed
+		// secrets are post-delete from the orphan-check perspective.
+		if s.State != repository.SecretStateActive {
+			continue
+		}
 		allSecrets = append(allSecrets, map[string]any{
 			"name": s.Name, "arn": s.ARN, "state": s.State,
 			"recovery_window_in_days": s.RecoveryWindowInDays,

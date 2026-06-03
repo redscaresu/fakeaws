@@ -116,6 +116,64 @@ func TestSecretsManager_DestroyedNotFoundContract(t *testing.T) {
 	}
 }
 
+// TestSecretsManager_MockStateFiltersDeleted pins S89's fix for the
+// aws-full-stack LLMSoftDelete orphan_check failure. terraform-
+// provider-aws's default DeleteSecret call sets a 30-day recovery
+// window, which leaves the row in PendingDeletion. The orphan_check
+// reads /mock/state.secretsmanager.secrets and treated any non-empty
+// entry as a leftover, so the scenario stalled even though the
+// secret IS gone from the user's perspective (DescribeSecret returns
+// 404 on Destroyed; PendingDeletion is post-delete).
+//
+// Filter: PendingDeletion + Destroyed are excluded from
+// gatherSecretsManagerStateReal. Active stays.
+func TestSecretsManager_MockStateFiltersDeleted(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+
+	// Active secret should appear in /mock/state.
+	smCall(t, srv, "CreateSecret", `{"Name":"keep","SecretString":"s"}`)
+	resp, err := http.Get(srv.URL + "/mock/state")
+	if err != nil {
+		t.Fatalf("GET /mock/state: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !strings.Contains(string(body), `"name":"keep"`) {
+		t.Errorf("expected Active secret in /mock/state, got: %s", body)
+	}
+
+	// PendingDeletion (default 30-day recovery window) must NOT appear.
+	smCall(t, srv, "CreateSecret", `{"Name":"pending","SecretString":"s"}`)
+	smCall(t, srv, "DeleteSecret", `{"SecretId":"pending","RecoveryWindowInDays":30}`)
+	resp, err = http.Get(srv.URL + "/mock/state")
+	if err != nil {
+		t.Fatalf("GET /mock/state: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if strings.Contains(string(body), `"name":"pending"`) {
+		t.Errorf("expected PendingDeletion secret filtered from /mock/state, got: %s", body)
+	}
+
+	// Destroyed (ForceDeleteWithoutRecovery) must NOT appear either.
+	smCall(t, srv, "CreateSecret", `{"Name":"destroyed","SecretString":"s"}`)
+	smCall(t, srv, "DeleteSecret", `{"SecretId":"destroyed","ForceDeleteWithoutRecovery":true}`)
+	resp, err = http.Get(srv.URL + "/mock/state")
+	if err != nil {
+		t.Fatalf("GET /mock/state: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if strings.Contains(string(body), `"name":"destroyed"`) {
+		t.Errorf("expected Destroyed secret filtered from /mock/state, got: %s", body)
+	}
+
+	// Active "keep" should still be there after the other operations.
+	if !strings.Contains(string(body), `"name":"keep"`) {
+		t.Errorf("expected Active secret to survive, got: %s", body)
+	}
+}
+
 func TestSecretsManager_VersionStages(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	smCall(t, srv, "CreateSecret", `{"Name":"x","SecretString":"v1"}`)
