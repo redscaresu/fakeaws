@@ -156,6 +156,12 @@ mockway and fakegcp use an `examples/known_broken.yaml` ratchet for examples who
   alongside the implementation history.
 - [`examples/README.md`](examples/README.md) — quickstart for running
   the auto-discovered example tree against a live fakeaws.
+- [`infrafactory's auto-learning loop`](https://github.com/redscaresu/infrafactory/blob/main/docs/auto-learning-loop.md)
+  — deep-dive on how infrafactory turns fakeaws failures (and its
+  own LLM-generated HCL mistakes) into durable pitfalls that improve
+  future runs. Worked example: the `aws_subnet
+  map_public_ip_on_launch` pitfall was auto-learned from an
+  iter-pair diff against fakeaws's EC2 surface.
 
 ## Non-goals
 
