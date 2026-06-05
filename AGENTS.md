@@ -69,7 +69,24 @@ fakeaws/
   `UNIMPLEMENTED` log line. Discovery surface for the next caller.
 - **Examples are auto-discovered**: dropping a directory under
   `examples/{working,misconfigured,updates}/` registers it for the
-  smoke gate (S43-T12). No per-service smoke ticket.
+  smoke gate (S43-T12). No per-service smoke ticket. Detail in
+  **Provider smoke harness** below.
+
+## Provider smoke harness
+
+`examples/provider_smoke_test.go` is the canonical wire-fidelity gate. Every directory under `examples/{working,misconfigured,updates}/` is auto-discovered and run through a per-tree contract. **No real AWS credentials needed** — the real `hashicorp/aws` provider binary runs against this fake; if the provider's CRUD lifecycle works, the wire shape is correct by construction.
+
+| Tree | Contract |
+|---|---|
+| `examples/working/<svc>/` | `tofu apply → plan -detailed-exitcode (no diff) → destroy` |
+| `examples/misconfigured/<svc>/` | `tofu apply` MUST fail; failure output MUST contain the string in `expected.txt` (the documented AWS error code) |
+| `examples/updates/<svc>/` | `tofu apply -var-file=v1.tfvars → plan no-op → apply -var-file=v2.tfvars → plan no-op → destroy` (idempotency under change) |
+
+Adding a directory to any of the three trees auto-registers — no per-example test wiring. Each subdirectory is its own `t.Run` sub-test.
+
+Gating: `INFRAFACTORY_ENABLE_E2E=1` + a reachable fakeaws at the default port (`http://127.0.0.1:8082`). Without the env var, the test `t.Skip`s with a clear message — mirroring the gating pattern infrafactory uses for tofu-driven e2e tests.
+
+**When you add a new resource handler**: add an `examples/working/<resource>/` config that exercises CRUD. If your handler models a documented error path, add an `examples/misconfigured/<resource>/` config + `expected.txt` pinning the AWS error code. If your handler has Update semantics distinct from Create, add an `examples/updates/<resource>/` v1→v2 pair.
 
 ## Provider-wait-state-machine debugging (M61/M62 lessons)
 
