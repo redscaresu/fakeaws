@@ -140,10 +140,6 @@ func (app *Application) kmsDescribeKey(w http.ResponseWriter, account, region st
 	k, ok := kmsStore.keys[in.KeyId]
 	kmsStore.mu.Unlock()
 	if !ok {
-		// Real KMS returns NotFoundException for unknown key ids.
-		// terraform-provider-aws's destroy wait treats this as
-		// "key is gone, deletion complete," which is what we want
-		// after ScheduleKeyDeletion.
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
 			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
 		return
@@ -170,25 +166,28 @@ func (app *Application) kmsScheduleKeyDeletion(w http.ResponseWriter, account, r
 		PendingWindowInDays int    `json:"PendingWindowInDays"`
 	}
 	_ = json.Unmarshal(req.Body, &in)
+	deletionDate := time.Now().UTC().Add(time.Duration(in.PendingWindowInDays) * 24 * time.Hour)
+	if in.PendingWindowInDays == 0 {
+		deletionDate = time.Now().UTC().Add(7 * 24 * time.Hour)
+	}
 	kmsStore.mu.Lock()
 	k, ok := kmsStore.keys[in.KeyId]
 	if ok {
-		// Hard-delete immediately — the provider's destroy path is
-		// done with the key once ScheduleKeyDeletion returns. Real
-		// AWS leaves the key in PendingDeletion for 7-30 days; for
-		// the mock we drop it now so re-runs don't trip on stale
-		// state.
-		delete(kmsStore.keys, in.KeyId)
+		// Soft-delete: real AWS keeps the key visible in PendingDeletion
+		// state for 7-30 days. terraform-provider-aws's destroy wait
+		// polls DescribeKey expecting KeyState="PendingDeletion" — if
+		// we hard-delete and return 404, the wait-loop errors with
+		// ResourceNotFoundException. Persist the state transition so
+		// DescribeKey can report it. /mock/reset purges everything for
+		// clean re-runs.
+		k.State = "PendingDeletion"
+		k.Deleted = &deletionDate
 	}
 	kmsStore.mu.Unlock()
 	if !ok {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
 			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
 		return
-	}
-	deletionDate := time.Now().UTC().Add(time.Duration(in.PendingWindowInDays) * 24 * time.Hour)
-	if in.PendingWindowInDays == 0 {
-		deletionDate = time.Now().UTC().Add(7 * 24 * time.Hour)
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
 		"KeyId":        k.KeyID,
@@ -344,12 +343,12 @@ func kmsKeyMetadata(k *kmsKey) map[string]any {
 	// response with that strict numeric expectation; returning an
 	// RFC3339 string surfaces as "expected DateType to be a JSON
 	// Number, got string instead" and apply fails on aws-full-stack.
-	return map[string]any{
+	md := map[string]any{
 		"AWSAccountId":          awsproto.FakeAccountID,
 		"KeyId":                 k.KeyID,
 		"Arn":                   k.ARN,
 		"CreationDate":          float64(k.Created.Unix()),
-		"Enabled":               true,
+		"Enabled":               k.State == "Enabled",
 		"Description":           "",
 		"KeyUsage":              "ENCRYPT_DECRYPT",
 		"KeyState":              k.State,
@@ -360,4 +359,8 @@ func kmsKeyMetadata(k *kmsKey) map[string]any {
 		"MultiRegion":           false,
 		"EncryptionAlgorithms":  []string{"SYMMETRIC_DEFAULT"},
 	}
+	if k.Deleted != nil {
+		md["DeletionDate"] = float64(k.Deleted.Unix())
+	}
+	return md
 }

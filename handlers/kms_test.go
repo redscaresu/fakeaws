@@ -218,3 +218,69 @@ func TestKMS_Tag_UnknownKeyReturns404(t *testing.T) {
 		t.Errorf("UntagResource on missing key should not return 200, got %d", resp.StatusCode)
 	}
 }
+
+// TestKMS_ScheduleDeletion_SoftDelete pins the fix for the
+// aws-secrets-manager destroy timeout surfaced by infrafactory S105.
+// Before this fix, ScheduleKeyDeletion hard-deleted the key from the
+// in-process store; the subsequent DescribeKey poll returned 404
+// NotFoundException, and terraform-provider-aws's destroy wait-loop
+// errored out.
+//
+// With the fix: ScheduleKeyDeletion sets KeyState=PendingDeletion,
+// and DescribeKey returns 200 with that state — matching real AWS,
+// where keys remain visible for 7-30 days post-schedule.
+func TestKMS_ScheduleDeletion_SoftDelete(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	// Create a key.
+	resp, body := kmsCall(t, srv, region, "CreateKey", `{}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateKey: %d %s", resp.StatusCode, body)
+	}
+	var created struct {
+		KeyMetadata struct {
+			KeyId string
+		}
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("decode CreateKey: %v\nbody=%s", err, body)
+	}
+	keyID := created.KeyMetadata.KeyId
+
+	// Schedule deletion.
+	resp, body = kmsCall(t, srv, region, "ScheduleKeyDeletion",
+		`{"KeyId":"`+keyID+`","PendingWindowInDays":7}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ScheduleKeyDeletion: %d %s", resp.StatusCode, body)
+	}
+
+	// DescribeKey must still return 200 with KeyState=PendingDeletion
+	// (mirrors real AWS; the provider's destroy wait-loop polls this).
+	resp, body = kmsCall(t, srv, region, "DescribeKey",
+		`{"KeyId":"`+keyID+`"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DescribeKey after ScheduleKeyDeletion: %d %s (expected 200 with PendingDeletion)",
+			resp.StatusCode, body)
+	}
+	var described struct {
+		KeyMetadata struct {
+			KeyId        string
+			KeyState     string
+			Enabled      bool
+			DeletionDate float64
+		}
+	}
+	if err := json.Unmarshal(body, &described); err != nil {
+		t.Fatalf("decode DescribeKey: %v\nbody=%s", err, body)
+	}
+	if described.KeyMetadata.KeyState != "PendingDeletion" {
+		t.Errorf("KeyState=%q, want PendingDeletion", described.KeyMetadata.KeyState)
+	}
+	if described.KeyMetadata.Enabled {
+		t.Errorf("Enabled=true after ScheduleKeyDeletion, want false")
+	}
+	if described.KeyMetadata.DeletionDate == 0 {
+		t.Errorf("DeletionDate not set in DescribeKey response after ScheduleKeyDeletion")
+	}
+}
