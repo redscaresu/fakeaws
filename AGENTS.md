@@ -126,6 +126,20 @@ patterns regression seed prevents from re-landing.
 14. Reverse fidelity — don't over-correct (if real API silently accepts,
     we accept).
 
+## Fidelity strategy
+
+fakeaws is **reactive**: declined Smithy codegen (see `concepts.md` § "Why no Smithy codegen") in favor of hand-written handlers. Wire shapes are discovered through:
+
+1. Reading `terraform-provider-aws/internal/service/<svc>/` source (see "Where to find AWS resource shapes" below).
+2. `TF_LOG=DEBUG tofu apply` capture when the provider's wait loops surface an unexpected request (see "Provider-wait-state-machine debugging" above).
+3. AWS SDK Go source for typed error code lookups.
+
+**Cost**: ~1-2hr per service to discover the wire shape before a handler can be written confidently. The 17-pass codex review loop (`docs/review-passes/`) is partly the cost of this reactive discovery — issues that would surface upfront from a spec instead surface during review.
+
+**Tradeoff was explicit**: AWS doesn't publish Smithy specs publicly; integrating an internal-only model was rejected as high upfront cost with no incremental ramp. The decision is revisitable per `concepts.md`.
+
+**Comparison with sibling fakes**: mockway is fully spec-driven (`specs/` tree of Scaleway OpenAPI YAML); fakegcp uses GCP discovery docs informally. See `../infrafactory/AGENTS.md` § "Sibling-fake fidelity strategies" for the full comparison.
+
 ## Where to find AWS resource shapes
 
 1. `$GOPATH/src/github.com/redscaresu/terraform-provider-aws`
