@@ -42,7 +42,7 @@ The 17 review passes are archived under `docs/review-passes/passN.md`.
 | SQS | JSON 1.0 + X-Amz-Target | `POST /sqs/region/<region>` | apply / plan-no-op / destroy ✓ |
 | Route53 | XML REST | `/route53/2013-04-01/...` | hosted zone + record set; full lifecycle ✓ — DelegationSet/NameServers, ListTagsForResource, GetDNSSEC, rrset filter + trailing-dot normalisation |
 | Secrets Manager | JSON 1.1 + X-Amz-Target | `POST /secretsmanager/region/<region>` | apply / plan-no-op / destroy ✓ (M62: ARN-or-name SecretId, epoch timestamps, VersionIdsToStages, GetResourcePolicy + ListSecretVersionIds) |
-| KMS | JSON 1.1 + X-Amz-Target | `POST /kms/region/<region>` | apply / plan-no-op / destroy ✓ — CreateKey / DescribeKey / GetKeyPolicy / ListAliases / ListResourceTags / EnableKeyRotation / GetKeyRotationStatus / TagResource / ScheduleKeyDeletion / CancelKeyDeletion / EnableKey / DisableKey; in-memory keyed state, hard-delete on schedule |
+| KMS | JSON 1.1 + X-Amz-Target | `POST /kms/region/<region>` | apply / plan-no-op / destroy ✓ — CreateKey / DescribeKey / GetKeyPolicy / ListAliases / ListResourceTags / EnableKeyRotation / GetKeyRotationStatus / TagResource / ScheduleKeyDeletion / CancelKeyDeletion / EnableKey / DisableKey; in-memory keyed state, **soft-delete** on schedule (KeyState transitions to `PendingDeletion`; DescribeKey returns 200 with that state — matches real AWS lifecycle so `terraform-provider-aws`'s destroy wait-loop completes cleanly) |
 
 Per-resource details + load-bearing FK contracts live in `PLAN.md`;
 the M61/M62 wire-shape lessons are documented in `AGENTS.md` under
