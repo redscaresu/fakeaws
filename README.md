@@ -5,8 +5,9 @@
 [![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go)](go.mod)
 
 A local Go-based mock of the AWS HTTP API surface, sibling to
-[mockway](https://github.com/redscaresu/mockway) (Scaleway) and
-[fakegcp](https://github.com/redscaresu/fakegcp) (GCP).
+[mockway](https://github.com/redscaresu/mockway) (Scaleway),
+[fakegcp](https://github.com/redscaresu/fakegcp) (GCP), and
+[fakegenesys](https://github.com/redscaresu/fakegenesys) (Genesys Cloud CCaaS).
 
 The goal: give `terraform-provider-aws` an HTTP server it can hit during
 `tofu apply`, so [infrafactory](https://github.com/redscaresu/infrafactory)
@@ -68,7 +69,7 @@ in action is via [`infrafactory`](https://github.com/redscaresu/infrafactory)'s
 `make up`:
 
 ```bash
-cd ~/dev && for r in infrafactory fakeaws fakegcp mockway; do git clone https://github.com/redscaresu/$r.git; done
+cd ~/dev && for r in infrafactory fakeaws fakegcp fakegenesys mockway; do git clone https://github.com/redscaresu/$r.git; done
 cd infrafactory && make up
 ./bin/infrafactory run scenarios/training/aws-s3.yaml --config infrafactory.yaml   # drives fakeaws end-to-end
 make down
