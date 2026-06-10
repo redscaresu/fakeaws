@@ -229,7 +229,7 @@ func TestKMS_Tag_UnknownKeyReturns404(t *testing.T) {
 // With the fix: ScheduleKeyDeletion sets KeyState=PendingDeletion,
 // and DescribeKey returns 200 with that state — matching real AWS,
 // where keys remain visible for 7-30 days post-schedule.
-func TestKMS_ScheduleDeletion_SoftDelete(t *testing.T) {
+func TestContract_kms_soft_delete_state_pending_deletion(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	const region = "us-east-1"
 

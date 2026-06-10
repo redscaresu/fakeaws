@@ -160,6 +160,14 @@ func (app *Application) kmsGetKeyPolicy(w http.ResponseWriter, account, region s
 	})
 }
 
+// CRITICAL[kms-soft-delete-state-pending-deletion]: ScheduleKeyDeletion
+// MUST flip the key's state to "PendingDeletion" without removing the
+// row — real AWS retains the key for the configured PendingWindowInDays
+// (7–30 days). The provider's destroy reads DescribeKey AFTER calling
+// ScheduleKeyDeletion and expects 200 with KeyMetadata.KeyState ==
+// "PendingDeletion". A hard delete here makes DescribeKey 404 and
+// breaks the provider's destroy contract. Locked in by
+// TestContract_kms_soft_delete_state_pending_deletion (S106 fix).
 func (app *Application) kmsScheduleKeyDeletion(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
 		KeyId               string `json:"KeyId"`

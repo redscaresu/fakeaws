@@ -198,3 +198,7 @@ func TestRDS_ParameterGroupCRUD(t *testing.T) {
 		t.Errorf("DeleteDBParameterGroup: %d", resp.StatusCode)
 	}
 }
+
+// TestContract_rds_dbi_resource_id_distinct_from_identifier lives in
+// handlers/rds_internal_test.go because it exercises the unexported
+// dbiResourceIDFor helper directly.

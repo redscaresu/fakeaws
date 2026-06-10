@@ -232,6 +232,15 @@ func (app *Application) smListSecrets(w http.ResponseWriter, account, region str
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"SecretList": out})
 }
 
+// CRITICAL[secretsmanager-soft-delete-state-pending-deletion]:
+// DeleteSecret MUST set state=PendingDeletion (NOT remove the row)
+// unless ForceDeleteWithoutRecovery is true. Real Secrets Manager
+// retains the secret for RecoveryWindowInDays (default 30). The
+// provider's destroy reads DescribeSecret AFTER DeleteSecret and
+// expects the soft-deleted state. List operations filter
+// PendingDeletion + Destroyed out by default (handled in smListSecrets).
+// Locked in by TestContract_secretsmanager_soft_delete_state_pending_deletion
+// (S89 fix).
 func (app *Application) smDeleteSecret(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
 		SecretId                   string `json:"SecretId"`
