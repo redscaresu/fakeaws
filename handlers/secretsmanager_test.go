@@ -66,7 +66,7 @@ func TestSecretsManager_TerminalStateRefusesRestore(t *testing.T) {
 	}
 }
 
-func TestSecretsManager_PendingDeletionRoundTrip(t *testing.T) {
+func TestContract_secretsmanager_soft_delete_state_pending_deletion(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	smCall(t, srv, "CreateSecret", `{"Name":"x","SecretString":"s"}`)
 

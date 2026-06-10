@@ -381,6 +381,14 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 	})
 }
 
+// CRITICAL[route53-records-sorted-lexicographically]:
+// ListResourceRecordSets MUST sort records by (normalised name, type,
+// setIdentifier) BEFORE applying any maxitems/start-key filter — real
+// Route 53 returns records in this sort order. The provider's drift
+// detection compares the sorted list against state; if our order
+// drifts, every record's plan shows phantom diff and the apply loop
+// never converges. Locked in by
+// TestContract_route53_records_sorted_lexicographically (S96 fix).
 func (app *Application) r53ListResourceRecordSets(w http.ResponseWriter, r *http.Request) {
 	const account = awsproto.FakeAccountID
 	zoneID := strings.TrimPrefix(chi.URLParam(r, "id"), "/hostedzone/")

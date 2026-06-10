@@ -189,7 +189,7 @@ func TestRoute53_BatchAtomicityOnInvalidChange(t *testing.T) {
 // After fix: records are sorted by (normalised name, type,
 // setIdentifier) before filtering. NS sorts AFTER A alphabetically,
 // so the A record wins.
-func TestRoute53_ListSortsLexicographically(t *testing.T) {
+func TestContract_route53_records_sorted_lexicographically(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 
 	_, body := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",

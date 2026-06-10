@@ -20,10 +20,17 @@ import (
 // instance identifier. Real AWS DbiResourceId is a random 21-char
 // "db-<hex>" string with no relationship to the user-given
 // DBInstanceIdentifier; terraform-provider-aws's Read flow uses it
-// as a lookup key in some Describe* paths, so it MUST NOT be derived
-// in a way that collides with the identifier. We hash the ID and
-// take the first 16 hex chars after the "db-" prefix — stable
+// as a lookup key in some Describe* paths.
+//
+// CRITICAL[rds-dbi-resource-id-distinct-from-identifier]: this MUST
+// NOT be derived in a way that collides with the user-given
+// DBInstanceIdentifier — if `dbiResourceIDFor("mydb")` returned
+// "mydb" verbatim, the provider's lookup-by-DbiResourceId would
+// accidentally match the lookup-by-identifier path and conflate two
+// distinct AWS lookups, causing apply-loop misbehaviour. We hash the
+// ID and take the first 16 hex chars after the "db-" prefix — stable
 // across reads, visibly distinct from any plausible user identifier.
+// Locked in by TestContract_rds_dbi_resource_id_distinct_from_identifier.
 func dbiResourceIDFor(instanceID string) string {
 	h := sha1.Sum([]byte(instanceID))
 	return "db-" + strings.ToUpper(hex.EncodeToString(h[:])[:16])
@@ -234,10 +241,10 @@ type rdsParamGroupXML struct {
 }
 
 type rdsClusterParamGroupXML struct {
-	DBClusterParameterGroupName   string `xml:"DBClusterParameterGroupName"`
-	DBParameterGroupFamily        string `xml:"DBParameterGroupFamily"`
-	Description                   string `xml:"Description"`
-	DBClusterParameterGroupArn    string `xml:"DBClusterParameterGroupArn"`
+	DBClusterParameterGroupName string `xml:"DBClusterParameterGroupName"`
+	DBParameterGroupFamily      string `xml:"DBParameterGroupFamily"`
+	Description                 string `xml:"Description"`
+	DBClusterParameterGroupArn  string `xml:"DBClusterParameterGroupArn"`
 }
 
 type rdsCreateParamGroupResult struct {
@@ -266,8 +273,8 @@ func (app *Application) rdsCreateDBParameterGroup(w http.ResponseWriter, account
 	}
 	pg := &repository.RDSParameterGroup{
 		Name: name, Family: family, Description: req.Params.Get("Description"),
-		Region: region,
-		ARN:    awsproto.BuildRDSParameterGroupARN(region, name),
+		Region:    region,
+		ARN:       awsproto.BuildRDSParameterGroupARN(region, name),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateDBParameterGroup(account, pg); err != nil {
@@ -322,8 +329,8 @@ func (app *Application) rdsCreateDBClusterParameterGroup(w http.ResponseWriter, 
 	}
 	pg := &repository.RDSClusterParameterGroup{
 		Name: name, Family: family, Description: req.Params.Get("Description"),
-		Region: region,
-		ARN:    awsproto.BuildRDSClusterParameterGroupARN(region, name),
+		Region:    region,
+		ARN:       awsproto.BuildRDSClusterParameterGroupARN(region, name),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateDBClusterParameterGroup(account, pg); err != nil {
@@ -371,15 +378,15 @@ func (app *Application) rdsDeleteDBClusterParameterGroup(w http.ResponseWriter, 
 // ----- DB Cluster -----
 
 type rdsClusterXML struct {
-	DBClusterIdentifier         string `xml:"DBClusterIdentifier"`
-	Engine                      string `xml:"Engine"`
-	EngineVersion               string `xml:"EngineVersion,omitempty"`
-	Status                      string `xml:"Status"`
-	DBSubnetGroup               string `xml:"DBSubnetGroup,omitempty"`
-	DBClusterParameterGroup     string `xml:"DBClusterParameterGroup,omitempty"`
-	MasterUsername              string `xml:"MasterUsername,omitempty"`
-	DeletionProtection          bool   `xml:"DeletionProtection"`
-	DBClusterArn                string `xml:"DBClusterArn"`
+	DBClusterIdentifier     string `xml:"DBClusterIdentifier"`
+	Engine                  string `xml:"Engine"`
+	EngineVersion           string `xml:"EngineVersion,omitempty"`
+	Status                  string `xml:"Status"`
+	DBSubnetGroup           string `xml:"DBSubnetGroup,omitempty"`
+	DBClusterParameterGroup string `xml:"DBClusterParameterGroup,omitempty"`
+	MasterUsername          string `xml:"MasterUsername,omitempty"`
+	DeletionProtection      bool   `xml:"DeletionProtection"`
+	DBClusterArn            string `xml:"DBClusterArn"`
 }
 
 type rdsCreateClusterResult struct {
@@ -539,24 +546,24 @@ func (app *Application) rdsInstanceToXML(account string, inst *repository.RDSIns
 		port = 5432
 	}
 	x := rdsInstanceXML{
-		DBInstanceIdentifier:                  inst.ID,
-		Engine:                                inst.Engine,
-		EngineVersion:                         inst.EngineVersion,
-		DBInstanceClass:                       inst.InstanceClass,
-		DBInstanceStatus:                      inst.State,
-		MasterUsername:                        masterUser,
-		AllocatedStorage:                      allocated,
-		StorageType:                           storageType,
-		StorageEncrypted:                      inst.StorageEncrypted,
-		InstanceCreateTime:                    inst.CreatedAt,
-		PreferredBackupWindow:                 "07:00-08:00",
-		BackupRetentionPeriod:                 inst.BackupRetentionPeriod,
-		PreferredMaintenanceWindow:            "sun:08:00-sun:09:00",
-		MultiAZ:                               inst.MultiAZ,
-		AvailabilityZone:                      inst.Region + "a",
-		PubliclyAccessible:                    inst.PubliclyAccessible,
-		AutoMinorVersionUpgrade:               true,
-		LicenseModel:                          "postgresql-license",
+		DBInstanceIdentifier:       inst.ID,
+		Engine:                     inst.Engine,
+		EngineVersion:              inst.EngineVersion,
+		DBInstanceClass:            inst.InstanceClass,
+		DBInstanceStatus:           inst.State,
+		MasterUsername:             masterUser,
+		AllocatedStorage:           allocated,
+		StorageType:                storageType,
+		StorageEncrypted:           inst.StorageEncrypted,
+		InstanceCreateTime:         inst.CreatedAt,
+		PreferredBackupWindow:      "07:00-08:00",
+		BackupRetentionPeriod:      inst.BackupRetentionPeriod,
+		PreferredMaintenanceWindow: "sun:08:00-sun:09:00",
+		MultiAZ:                    inst.MultiAZ,
+		AvailabilityZone:           inst.Region + "a",
+		PubliclyAccessible:         inst.PubliclyAccessible,
+		AutoMinorVersionUpgrade:    true,
+		LicenseModel:               "postgresql-license",
 		// DbiResourceId must NOT be a derivative of DBInstanceIdentifier.
 		// terraform-provider-aws's aws_db_instance Read flow has a code
 		// path that uses DbiResourceId as a lookup key in some Describe
@@ -570,7 +577,7 @@ func (app *Application) rdsInstanceToXML(account string, inst *repository.RDSIns
 		// user-given DBInstanceIdentifier. We synthesise the same shape
 		// from the SHA-1 of the instance ID so it's stable across reads
 		// but visibly distinct from the identifier.
-		DbiResourceId: dbiResourceIDFor(inst.ID),
+		DbiResourceId:                         dbiResourceIDFor(inst.ID),
 		CACertificateIdentifier:               "rds-ca-rsa2048-g1",
 		CopyTagsToSnapshot:                    false,
 		IAMDatabaseAuthenticationEnabled:      false,
@@ -604,16 +611,16 @@ func (app *Application) rdsCreateDBInstance(w http.ResponseWriter, account, regi
 	}
 	inst := &repository.RDSInstance{
 		ID: id, Engine: engine, EngineVersion: req.Params.Get("EngineVersion"),
-		InstanceClass:       class,
-		SubnetGroupName:     req.Params.Get("DBSubnetGroupName"),
-		ClusterID:           req.Params.Get("DBClusterIdentifier"),
-		ParameterGroupName:  req.Params.Get("DBParameterGroupName"),
-		ReplicateSourceDB:   req.Params.Get("ReplicateSourceDB"),
-		DeletionProtection:  req.Params.Get("DeletionProtection") == "true",
-		SkipFinalSnapshot:   req.Params.Get("SkipFinalSnapshot") != "false",
-		Region:              region,
-		ARN:                 awsproto.BuildRDSDBARN(region, id),
-		CreatedAt:           time.Now().UTC().Format(time.RFC3339),
+		InstanceClass:      class,
+		SubnetGroupName:    req.Params.Get("DBSubnetGroupName"),
+		ClusterID:          req.Params.Get("DBClusterIdentifier"),
+		ParameterGroupName: req.Params.Get("DBParameterGroupName"),
+		ReplicateSourceDB:  req.Params.Get("ReplicateSourceDB"),
+		DeletionProtection: req.Params.Get("DeletionProtection") == "true",
+		SkipFinalSnapshot:  req.Params.Get("SkipFinalSnapshot") != "false",
+		Region:             region,
+		ARN:                awsproto.BuildRDSDBARN(region, id),
+		CreatedAt:          time.Now().UTC().Format(time.RFC3339),
 		// Persist user-supplied values so Read echoes them back
 		// verbatim — see rdsInstanceToXML's comment about plan
 		// drift / replacement.
