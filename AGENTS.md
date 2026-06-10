@@ -138,7 +138,11 @@ fakeaws is **reactive**: declined Smithy codegen (see `concepts.md` § "Why no S
 
 **Tradeoff was explicit**: AWS doesn't publish Smithy specs publicly; integrating an internal-only model was rejected as high upfront cost with no incremental ramp. The decision is revisitable per `concepts.md`.
 
-**Comparison with sibling fakes**: mockway is fully spec-driven (`specs/` tree of Scaleway OpenAPI YAML); fakegcp uses GCP discovery docs informally. See `../infrafactory/AGENTS.md` § "Sibling-fake fidelity strategies" for the full comparison.
+**Comparison with sibling fakes**: mockway is fully spec-driven (`specs/` tree of Scaleway OpenAPI YAML); fakegcp uses GCP discovery docs informally; fakegenesys mirrors mockway's spec-driven approach via a filtered Genesys Cloud OpenAPI doc. See `../infrafactory/AGENTS.md` § "Sibling-fake fidelity strategies" for the full comparison.
+
+## Contract-coverage convention (canonical across all 4 sibling fakes)
+
+`handlers/contract_audit_test.go` enforces the `CRITICAL[<id>]:` / `MUST[<id>]:` docstring → `TestContract_<id>` test pairing across `handlers/*.go`. A wire-shape invariant the consuming `terraform-provider-aws` depends on must NOT live as a comment alone — drift becomes a failed `go test`, not a missed code review. Current contracts (as of S130 fakeaws sibling rollout): `rds-dbi-resource-id-distinct-from-identifier`, `kms-soft-delete-state-pending-deletion`, `secretsmanager-soft-delete-state-pending-deletion`, `route53-records-sorted-lexicographically`. Same convention live across mockway/fakegcp/fakegenesys.
 
 ## Where to find AWS resource shapes
 
