@@ -105,6 +105,33 @@ every `prompts/aws/*.md` template, and the e2e harness's provider
 config — together. Single source of truth for the constraint string is
 `coverage_matrix.yaml`'s header comment.
 
+## Testing examples
+
+The canonical entry point for end-to-end example coverage is `go test ./examples/...`:
+
+```bash
+# Run every example end-to-end (apply → plan-no-op → destroy)
+INFRAFACTORY_ENABLE_E2E=1 go test ./examples/...
+
+# Run one specific example, with verbose output
+INFRAFACTORY_ENABLE_E2E=1 go test ./examples/... -v -run TestProviderSmokeWorking/<dir>
+
+# Filter to a single sub-tree
+INFRAFACTORY_ENABLE_E2E=1 go test ./examples/... -run TestProviderSmokeMisconfigured
+```
+
+The harness assumes a fakeaws server is reachable at `FAKEAWS_URL`
+(default `http://127.0.0.1:8082`); CI runs it after `make fakeaws-up`
+from the infrafactory Makefile. fakeaws is the canonical
+implementation of the in-test apply-matrix pattern across the family
+— `mockway`, `fakegcp`, and `fakegenesys` all mirror this shape.
+
+The same in-test pattern is canonical across all four sibling fakes
+([mockway](https://github.com/redscaresu/mockway),
+[fakegcp](https://github.com/redscaresu/fakegcp),
+[fakegenesys](https://github.com/redscaresu/fakegenesys)) — `go test`
+against the smoke harness works identically in each.
+
 ## API compatibility
 
 The point of fakeaws is to be wire-shape compatible with the real `hashicorp/aws` provider — every byte the provider sends or expects to receive must match what real AWS would do, or the provider detects "drift" and the apply loop fails. Three guardrails enforce this; they're identical across [`mockway`](https://github.com/redscaresu/mockway) (Scaleway), [`fakegcp`](https://github.com/redscaresu/fakegcp) (GCP), and [`fakeaws`](https://github.com/redscaresu/fakeaws) (AWS).
