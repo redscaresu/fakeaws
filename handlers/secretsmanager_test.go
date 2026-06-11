@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func smCall(t *testing.T, srv *httptest.Server, op, body string) (*http.Response, []byte) {
@@ -72,21 +75,16 @@ func TestContract_secretsmanager_soft_delete_state_pending_deletion(t *testing.T
 
 	// Schedule with 30-day window → PendingDeletion.
 	resp, _ := smCall(t, srv, "DeleteSecret", `{"SecretId":"x","RecoveryWindowInDays":30}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("DeleteSecret: %d", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteSecret")
 
 	// Restore.
 	resp, _ = smCall(t, srv, "RestoreSecret", `{"SecretId":"x"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("RestoreSecret on PendingDeletion: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "RestoreSecret on PendingDeletion")
 
 	// Re-Get works after restore.
 	resp, body := smCall(t, srv, "GetSecretValue", `{"SecretId":"x"}`)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"s"`) {
-		t.Errorf("GetSecretValue after restore: %d %s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "GetSecretValue after restore: %s", body)
+	assert.Contains(t, string(body), `"s"`, "GetSecretValue body should contain restored secret")
 }
 
 // TestSecretsManager_DestroyedNotFoundContract pins the Codex pass 2
