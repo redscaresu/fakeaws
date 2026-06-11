@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/redscaresu/fakeaws/handlers"
+	"github.com/stretchr/testify/require"
 )
 
 // TestRegressionSeedAuditManifestMatchesHandlers walks the manifest
@@ -70,9 +71,7 @@ func TestRegressionSeedAuditNoVacuousPasses(t *testing.T) {
 	dir := handlersDir(t)
 
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read handlers/: %v", err)
-	}
+	require.NoError(t, err, "read handlers/")
 	fset := token.NewFileSet()
 	for _, ent := range entries {
 		if !strings.HasSuffix(ent.Name(), "_test.go") {
@@ -84,9 +83,7 @@ func TestRegressionSeedAuditNoVacuousPasses(t *testing.T) {
 		}
 		path := filepath.Join(dir, ent.Name())
 		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
+		require.NoError(t, err, "parse %s", path)
 		ast.Inspect(file, func(n ast.Node) bool {
 			fn, ok := n.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
@@ -168,9 +165,7 @@ func TestRegressionSeedAuditNoVacuousPasses(t *testing.T) {
 func TestRegressionSeedAuditHasPatterns(t *testing.T) {
 	dir := handlersDir(t)
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read handlers/: %v", err)
-	}
+	require.NoError(t, err, "read handlers/")
 	fset := token.NewFileSet()
 	count := 0
 	for _, ent := range entries {
@@ -179,9 +174,7 @@ func TestRegressionSeedAuditHasPatterns(t *testing.T) {
 		}
 		path := filepath.Join(dir, ent.Name())
 		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
+		require.NoError(t, err, "parse %s", path)
 		ast.Inspect(file, func(n ast.Node) bool {
 			fn, ok := n.(*ast.FuncDecl)
 			if !ok || fn.Name == nil {
@@ -209,18 +202,14 @@ func handlersDir(t *testing.T) string {
 	t.Helper()
 	// Tests run from the package directory; handlers/ is the package itself.
 	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
+	require.NoError(t, err, "getwd")
 	return wd
 }
 
 func matchHandlerFile(t *testing.T, dir, id string) bool {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read handlers/: %v", err)
-	}
+	require.NoError(t, err, "read handlers/")
 	for _, ent := range entries {
 		name := ent.Name()
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -249,9 +238,7 @@ var knownNonServiceFiles = map[string]bool{
 func serviceFilePrefixes(t *testing.T, dir string) map[string]bool {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read handlers/: %v", err)
-	}
+	require.NoError(t, err, "read handlers/")
 	out := map[string]bool{}
 	for _, ent := range entries {
 		name := ent.Name()

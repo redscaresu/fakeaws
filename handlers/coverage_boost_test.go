@@ -12,6 +12,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCoverage_EC2DeleteSubnetAndRouteTable(t *testing.T) {
@@ -28,14 +31,10 @@ func TestCoverage_EC2DeleteSubnetAndRouteTable(t *testing.T) {
 
 	// DeleteSubnet (covers the un-tested handler path).
 	resp, _ := ec2Call(t, srv, region, "DeleteSubnet", url.Values{"SubnetId": {subnetID}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteSubnet: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteSubnet")
 	// DeleteRouteTable.
 	resp, _ = ec2Call(t, srv, region, "DeleteRouteTable", url.Values{"RouteTableId": {rtbID}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteRouteTable: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteRouteTable")
 }
 
 func TestCoverage_EC2InstanceModifyAttribute(t *testing.T) {
@@ -51,15 +50,11 @@ func TestCoverage_EC2InstanceModifyAttribute(t *testing.T) {
 	instID := extractEC2Tag(body, "instanceId")
 
 	resp, _ := ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {instID}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("ModifyInstanceAttribute: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "ModifyInstanceAttribute")
 
 	// Missing instance → 404.
 	resp, _ = ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {"i-missing"}})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("ModifyInstanceAttribute missing: %d, want 404", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ModifyInstanceAttribute missing")
 }
 
 func TestCoverage_EC2DetachInternetGateway(t *testing.T) {
@@ -73,9 +68,7 @@ func TestCoverage_EC2DetachInternetGateway(t *testing.T) {
 		"InternetGatewayId": {igwID}, "VpcId": {vpcID},
 	})
 	resp, _ := ec2Call(t, srv, region, "DetachInternetGateway", url.Values{"InternetGatewayId": {igwID}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DetachInternetGateway: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DetachInternetGateway")
 }
 
 func TestCoverage_EC2DeleteRoute(t *testing.T) {
@@ -91,9 +84,7 @@ func TestCoverage_EC2DeleteRoute(t *testing.T) {
 	resp, _ := ec2Call(t, srv, region, "DeleteRoute", url.Values{
 		"RouteTableId": {rtbID}, "DestinationCidrBlock": {"0.0.0.0/0"},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteRoute: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteRoute")
 }
 
 func TestCoverage_DynamoDBUpdateItem(t *testing.T) {
@@ -110,15 +101,11 @@ func TestCoverage_DynamoDBUpdateItem(t *testing.T) {
 		"Key":{"id":{"S":"a"}},
 		"AttributeUpdates":{"v":{"Action":"PUT","Value":{"N":"2"}}}
 	}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("UpdateItem: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "UpdateItem")
 
 	// Verify update applied.
 	_, body := ddbCall(t, srv, "us-east-1", "GetItem", `{"TableName":"Users","Key":{"id":{"S":"a"}}}`)
-	if !strings.Contains(string(body), `"2"`) {
-		t.Errorf("UpdateItem didn't apply: %s", body)
-	}
+	assert.Contains(t, string(body), `"2"`, "UpdateItem didn't apply: %s", body)
 }
 
 func TestCoverage_RDSParameterGroupDescribe(t *testing.T) {
@@ -130,13 +117,11 @@ func TestCoverage_RDSParameterGroupDescribe(t *testing.T) {
 		"DBClusterParameterGroupName": {"aurora-pg"}, "DBParameterGroupFamily": {"aurora-postgresql15"}, "Description": {"d"},
 	})
 	resp, body := rdsCall(t, srv, "us-east-1", "DescribeDBParameterGroups", url.Values{"DBParameterGroupName": {"pg15"}})
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "pg15") {
-		t.Errorf("DescribeDBParameterGroups: %s", body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeDBParameterGroups status")
+	assert.Contains(t, string(body), "pg15", "DescribeDBParameterGroups: %s", body)
 	resp, body = rdsCall(t, srv, "us-east-1", "DescribeDBClusterParameterGroups", url.Values{"DBClusterParameterGroupName": {"aurora-pg"}})
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "aurora-pg") {
-		t.Errorf("DescribeDBClusterParameterGroups: %s", body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeDBClusterParameterGroups status")
+	assert.Contains(t, string(body), "aurora-pg", "DescribeDBClusterParameterGroups: %s", body)
 	rdsCall(t, srv, "us-east-1", "DeleteDBClusterParameterGroup", url.Values{"DBClusterParameterGroupName": {"aurora-pg"}})
 }
 
@@ -154,17 +139,11 @@ func TestCoverage_RDSCluster(t *testing.T) {
 		"DBClusterIdentifier": {"aurora-1"}, "Engine": {"aurora-postgresql"},
 		"DBSubnetGroupName": {"default"}, "MasterUsername": {"admin"},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateDBCluster: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateDBCluster: %s", body)
 	resp, _ = rdsCall(t, srv, region, "DescribeDBClusters", url.Values{"DBClusterIdentifier": {"aurora-1"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DescribeDBClusters: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeDBClusters")
 	resp, _ = rdsCall(t, srv, region, "DeleteDBCluster", url.Values{"DBClusterIdentifier": {"aurora-1"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteDBCluster: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteDBCluster")
 }
 
 func TestCoverage_RDSModifyAndDescribeAll(t *testing.T) {
@@ -184,33 +163,24 @@ func TestCoverage_RDSModifyAndDescribeAll(t *testing.T) {
 
 	// ModifyDBInstance.
 	resp, _ := rdsCall(t, srv, region, "ModifyDBInstance", url.Values{"DBInstanceIdentifier": {"db1"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("ModifyDBInstance: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "ModifyDBInstance")
 	// ModifyDBInstance on missing → 404.
 	resp, _ = rdsCall(t, srv, region, "ModifyDBInstance", url.Values{"DBInstanceIdentifier": {"missing"}})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("ModifyDBInstance missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ModifyDBInstance missing")
 
 	// DescribeDBSubnetGroups by name.
 	resp, body := rdsCall(t, srv, region, "DescribeDBSubnetGroups", url.Values{"DBSubnetGroupName": {"default"}})
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "default") {
-		t.Errorf("DescribeDBSubnetGroups: %s", body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeDBSubnetGroups status")
+	assert.Contains(t, string(body), "default", "DescribeDBSubnetGroups: %s", body)
 
 	// DescribeDBInstances unfiltered (covers ListDBInstances path).
 	_, body = rdsCall(t, srv, region, "DescribeDBInstances", nil)
-	if !strings.Contains(string(body), "db1") {
-		t.Errorf("DescribeDBInstances unfiltered missing db1: %s", body)
-	}
+	assert.Contains(t, string(body), "db1", "DescribeDBInstances unfiltered missing db1: %s", body)
 
 	// DeleteDBInstance + DeleteDBSubnetGroup + DeleteDBParameterGroup tail.
 	rdsCall(t, srv, region, "DeleteDBInstance", url.Values{"DBInstanceIdentifier": {"db1"}})
 	resp, _ = rdsCall(t, srv, region, "DeleteDBSubnetGroup", url.Values{"DBSubnetGroupName": {"default"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteDBSubnetGroup: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteDBSubnetGroup")
 }
 
 func TestCoverage_EKSNodeGroupAndDescribe(t *testing.T) {
@@ -223,17 +193,11 @@ func TestCoverage_EKSNodeGroupAndDescribe(t *testing.T) {
 	resp, _ := eksRequest(t, srv, http.MethodPost, "/eks/region/"+region+"/clusters/demo/node-groups", `{
 		"nodegroupName":"ng1","nodeRole":"`+nodeRole+`","subnets":["`+sa+`"]
 	}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateNodeGroup: %d", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateNodeGroup")
 	resp, _ = eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters/demo/node-groups/ng1", "")
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DescribeNodeGroup: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeNodeGroup")
 	resp, _ = eksRequest(t, srv, http.MethodDelete, "/eks/region/"+region+"/clusters/demo/node-groups/ng1", "")
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteNodeGroup: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteNodeGroup")
 }
 
 func TestCoverage_IAMInstanceProfileAndUser(t *testing.T) {
@@ -241,44 +205,30 @@ func TestCoverage_IAMInstanceProfileAndUser(t *testing.T) {
 
 	// Instance profile lifecycle.
 	resp, _ := iamCall(t, srv, "CreateInstanceProfile", url.Values{"InstanceProfileName": {"prof"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateInstanceProfile: %d", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateInstanceProfile")
 	resp, _ = iamCall(t, srv, "ListInstanceProfiles", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("ListInstanceProfiles: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "ListInstanceProfiles")
 	resp, _ = iamCall(t, srv, "DeleteInstanceProfile", url.Values{"InstanceProfileName": {"prof"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteInstanceProfile: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteInstanceProfile")
 
 	// User lifecycle.
 	resp, _ = iamCall(t, srv, "CreateUser", url.Values{"UserName": {"alice"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateUser: %d", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateUser")
 	resp, body := iamCall(t, srv, "GetUser", url.Values{"UserName": {"alice"}})
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "alice") {
-		t.Errorf("GetUser: %s", body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "GetUser status")
+	assert.Contains(t, string(body), "alice", "GetUser: %s", body)
 	resp, body = iamCall(t, srv, "ListUsers", nil)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "alice") {
-		t.Errorf("ListUsers: %s", body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "ListUsers status")
+	assert.Contains(t, string(body), "alice", "ListUsers: %s", body)
 
 	// Access key lifecycle.
 	resp, body = iamCall(t, srv, "CreateAccessKey", url.Values{"UserName": {"alice"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateAccessKey: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateAccessKey: %s", body)
 	idStart := strings.Index(string(body), "<AccessKeyId>") + len("<AccessKeyId>")
 	idEnd := strings.Index(string(body)[idStart:], "</AccessKeyId>") + idStart
 	keyID := string(body)[idStart:idEnd]
 	resp, _ = iamCall(t, srv, "DeleteAccessKey", url.Values{"UserName": {"alice"}, "AccessKeyId": {keyID}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteAccessKey: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteAccessKey")
 }
 
 // readBody is used by SQS tests in this file. Re-exposing the helper.
@@ -291,22 +241,17 @@ func readBody(t *testing.T, resp *http.Response) string {
 func TestCoverage_SQSQueueAttributesAndDelete(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, body := sqsCall(t, srv, "CreateQueue", `{"QueueName":"q","Attributes":{"VisibilityTimeout":"60"}}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateQueue: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateQueue: %s", body)
 	urlStart := strings.Index(string(body), `"QueueUrl":"`) + len(`"QueueUrl":"`)
 	urlEnd := strings.Index(string(body)[urlStart:], `"`) + urlStart
 	queueURL := string(body)[urlStart:urlEnd]
 
 	resp, body = sqsCall(t, srv, "GetQueueAttributes", `{"QueueUrl":"`+queueURL+`"}`)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "VisibilityTimeout") {
-		t.Errorf("GetQueueAttributes: %s", body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "GetQueueAttributes status")
+	assert.Contains(t, string(body), "VisibilityTimeout", "GetQueueAttributes: %s", body)
 
 	resp, _ = sqsCall(t, srv, "DeleteQueue", `{"QueueUrl":"`+queueURL+`"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteQueue: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteQueue")
 }
 
 func TestCoverage_SQSDeleteMessage(t *testing.T) {
@@ -322,9 +267,7 @@ func TestCoverage_SQSDeleteMessage(t *testing.T) {
 	rhEnd := strings.Index(string(rb)[rhStart:], `"`) + rhStart
 	rh := string(rb)[rhStart:rhEnd]
 	resp, _ := sqsCall(t, srv, "DeleteMessage", `{"QueueUrl":"`+queueURL+`","ReceiptHandle":"`+rh+`"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteMessage: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteMessage")
 }
 
 func TestCoverage_Route53GetChange(t *testing.T) {
@@ -335,22 +278,19 @@ func TestCoverage_Route53GetChange(t *testing.T) {
 	idEnd := strings.Index(string(body)[idStart:], "</Id>") + idStart
 	changeID := string(body)[idStart:idEnd]
 	resp, body := r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/change/"+changeID, "")
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "INSYNC") {
-		t.Errorf("GetChange: %s", body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "GetChange status")
+	assert.Contains(t, string(body), "INSYNC", "GetChange: %s", body)
 }
 
 func TestCoverage_SecretsManagerListAndDescribe(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	smCall(t, srv, "CreateSecret", `{"Name":"s","SecretString":"x"}`)
 	resp, body := smCall(t, srv, "DescribeSecret", `{"SecretId":"s"}`)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "s") {
-		t.Errorf("DescribeSecret: %s", body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeSecret status")
+	assert.Contains(t, string(body), "s", "DescribeSecret: %s", body)
 	resp, body = smCall(t, srv, "ListSecrets", `{}`)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "s") {
-		t.Errorf("ListSecrets: %s", body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "ListSecrets status")
+	assert.Contains(t, string(body), "s", "ListSecrets: %s", body)
 }
 
 // silence unused-import in the few cases readBody isn't called.
@@ -389,102 +329,70 @@ func TestCoverage_EC2ErrorPaths(t *testing.T) {
 			params.Set("VpcId", "vpc-x")
 		}
 		resp, _ := ec2Call(t, srv, region, op, params)
-		if resp.StatusCode != http.StatusNotFound {
-			t.Errorf("%s missing id: got %d, want 404", op, resp.StatusCode)
-		}
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, "%s missing id", op)
 	}
 
 	// CreateRoute on missing route table → 404.
 	resp, _ := ec2Call(t, srv, region, "CreateRoute", url.Values{
 		"RouteTableId": {"rtb-missing"}, "DestinationCidrBlock": {"0.0.0.0/0"},
 	})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("CreateRoute missing rt: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "CreateRoute missing rt")
 
 	// DescribeKeyPairs on a missing name → 404.
 	resp, _ = ec2Call(t, srv, region, "DescribeKeyPairs", url.Values{"KeyName.1": {"missing"}})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DescribeKeyPairs missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeKeyPairs missing")
 
 	// DeleteKeyPair on missing → 404.
 	resp, _ = ec2Call(t, srv, region, "DeleteKeyPair", url.Values{"KeyName": {"missing"}})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DeleteKeyPair missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteKeyPair missing")
 
 	// DescribeSecurityGroups missing GroupId.<n> filter → 409.
 	resp, _ = ec2Call(t, srv, region, "DescribeSecurityGroups", nil)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("DescribeSecurityGroups no filter: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DescribeSecurityGroups no filter")
 
 	// Authorize on missing GroupId → 409 (no body).
 	resp, _ = ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", nil)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("AuthorizeSecurityGroupIngress no GroupId: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AuthorizeSecurityGroupIngress no GroupId")
 
 	// Authorize with no IpPermissions → 409.
 	resp, _ = ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{"GroupId": {"sg-x"}})
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("Authorize no rules: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "Authorize no rules")
 
 	// CreateRouteTable missing VpcId → 409.
 	resp, _ = ec2Call(t, srv, region, "CreateRouteTable", nil)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateRouteTable no vpc: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateRouteTable no vpc")
 
 	// AssociateRouteTable missing args → 409.
 	resp, _ = ec2Call(t, srv, region, "AssociateRouteTable", nil)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("AssociateRouteTable no args: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AssociateRouteTable no args")
 
 	// DisassociateRouteTable missing → 404.
 	resp, _ = ec2Call(t, srv, region, "DisassociateRouteTable", url.Values{"AssociationId": {"missing"}})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DisassociateRouteTable missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DisassociateRouteTable missing")
 
 	// AllocateAddress with bad domain → 409.
 	resp, _ = ec2Call(t, srv, region, "AllocateAddress", url.Values{"Domain": {"standard"}})
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("AllocateAddress bad domain: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AllocateAddress bad domain")
 
 	// ReleaseAddress missing → 404.
 	resp, _ = ec2Call(t, srv, region, "ReleaseAddress", url.Values{"AllocationId": {"missing"}})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("ReleaseAddress missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ReleaseAddress missing")
 
 	// RunInstances missing required fields → 409.
 	resp, _ = ec2Call(t, srv, region, "RunInstances", nil)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("RunInstances no args: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "RunInstances no args")
 
 	// TerminateInstances missing InstanceId.<n> → 409.
 	resp, _ = ec2Call(t, srv, region, "TerminateInstances", nil)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("TerminateInstances no ids: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "TerminateInstances no ids")
 
 	// ImportKeyPair missing → 409.
 	resp, _ = ec2Call(t, srv, region, "ImportKeyPair", nil)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("ImportKeyPair no args: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "ImportKeyPair no args")
 
 	// DescribeImages with unknown ImageId → 404.
 	resp, _ = ec2Call(t, srv, region, "DescribeImages", url.Values{"ImageId.1": {"ami-not-real"}})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DescribeImages unknown: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeImages unknown")
 }
 
 func TestCoverage_DynamoDBErrorPaths(t *testing.T) {
@@ -492,93 +400,57 @@ func TestCoverage_DynamoDBErrorPaths(t *testing.T) {
 
 	// CreateTable missing args → 409.
 	resp, _ := ddbCall(t, srv, "us-east-1", "CreateTable", `{}`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateTable no args: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateTable no args")
 	// CreateTable missing HASH → 409.
 	resp, _ = ddbCall(t, srv, "us-east-1", "CreateTable", `{"TableName":"t","KeySchema":[]}`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateTable no HASH: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateTable no HASH")
 	// DeleteTable on missing → 404.
 	resp, _ = ddbCall(t, srv, "us-east-1", "DeleteTable", `{"TableName":"missing"}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DeleteTable missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteTable missing")
 	// DeleteItem on missing table → 404.
 	resp, _ = ddbCall(t, srv, "us-east-1", "DeleteItem", `{"TableName":"missing","Key":{"id":{"S":"x"}}}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DeleteItem missing table: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteItem missing table")
 	// UpdateItem on missing table → 404.
 	resp, _ = ddbCall(t, srv, "us-east-1", "UpdateItem", `{"TableName":"missing","Key":{"id":{"S":"x"}}}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("UpdateItem missing table: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "UpdateItem missing table")
 }
 
 func TestCoverage_RDSErrorPaths(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, _ := rdsCall(t, srv, "us-east-1", "CreateDBSubnetGroup", url.Values{"DBSubnetGroupName": {"x"}, "DBSubnetGroupDescription": {"d"}})
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateDBSubnetGroup <2 subnets: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateDBSubnetGroup <2 subnets")
 	resp, _ = rdsCall(t, srv, "us-east-1", "CreateDBSubnetGroup", nil)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateDBSubnetGroup empty: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateDBSubnetGroup empty")
 	resp, _ = rdsCall(t, srv, "us-east-1", "DescribeDBSubnetGroups", url.Values{"DBSubnetGroupName": {"missing"}})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("Describe missing subnet group: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "Describe missing subnet group")
 	resp, _ = rdsCall(t, srv, "us-east-1", "DescribeDBClusters", url.Values{"DBClusterIdentifier": {"missing"}})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("Describe missing cluster: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "Describe missing cluster")
 	resp, _ = rdsCall(t, srv, "us-east-1", "CreateDBCluster", nil)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateDBCluster no args: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateDBCluster no args")
 	resp, _ = rdsCall(t, srv, "us-east-1", "CreateDBInstance", nil)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateDBInstance no args: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateDBInstance no args")
 	resp, _ = rdsCall(t, srv, "us-east-1", "DescribeDBInstances", url.Values{"DBInstanceIdentifier": {"missing"}})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("Describe missing instance: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "Describe missing instance")
 	resp, _ = rdsCall(t, srv, "us-east-1", "BogusOperation", nil)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("RDS unknown op: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "RDS unknown op")
 }
 
 func TestCoverage_SQSErrorPaths(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, _ := sqsCall(t, srv, "CreateQueue", `{}`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateQueue no name: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateQueue no name")
 	resp, _ = sqsCall(t, srv, "DeleteQueue", `{"QueueUrl":"http://x.fakeaws.local/000000000000/missing"}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DeleteQueue missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteQueue missing")
 	resp, _ = sqsCall(t, srv, "GetQueueAttributes", `{"QueueUrl":"http://x.fakeaws.local/000000000000/missing"}`)
 	// M68 fix: GetQueueAttributes against a missing queue returns
 	// 400 AWS.SimpleQueueService.NonExistentQueue (the service-
 	// specific code terraform-provider-aws's delete-wait checks for),
 	// not the generic 404 ResourceNotFoundException.
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("GetQueueAttributes missing: got %d, want 400 (NonExistentQueue)", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "GetQueueAttributes missing: want 400 (NonExistentQueue)")
 	resp, _ = sqsCall(t, srv, "SendMessage", `{"QueueUrl":"http://x.fakeaws.local/000000000000/missing","MessageBody":"x"}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("SendMessage missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "SendMessage missing")
 	resp, _ = sqsCall(t, srv, "ReceiveMessage", `{"QueueUrl":"http://x.fakeaws.local/000000000000/missing"}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("ReceiveMessage missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ReceiveMessage missing")
 }
 
 func TestCoverage_EKSErrorPaths(t *testing.T) {
@@ -586,80 +458,48 @@ func TestCoverage_EKSErrorPaths(t *testing.T) {
 	const region = "us-east-1"
 	// CreateCluster missing required → 409.
 	resp, _ := eksRequest(t, srv, http.MethodPost, "/eks/region/"+region+"/clusters", `{"name":"x"}`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateCluster missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateCluster missing")
 	// Describe missing → 404.
 	resp, _ = eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters/missing", "")
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DescribeCluster missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeCluster missing")
 	resp, _ = eksRequest(t, srv, http.MethodDelete, "/eks/region/"+region+"/clusters/missing", "")
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DeleteCluster missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteCluster missing")
 	resp, _ = eksRequest(t, srv, http.MethodPost, "/eks/region/"+region+"/clusters/missing/node-groups", `{"nodegroupName":"x"}`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateNodeGroup missing args: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateNodeGroup missing args")
 	resp, _ = eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters/x/node-groups/missing", "")
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DescribeNodeGroup missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeNodeGroup missing")
 	resp, _ = eksRequest(t, srv, http.MethodDelete, "/eks/region/"+region+"/clusters/x/node-groups/missing", "")
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DeleteNodeGroup missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteNodeGroup missing")
 	resp, _ = eksRequest(t, srv, http.MethodPost, "/eks/region/"+region+"/clusters/missing/addons", `{}`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateAddon empty: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateAddon empty")
 	resp, _ = eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters/x/addons/missing", "")
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DescribeAddon missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeAddon missing")
 	resp, _ = eksRequest(t, srv, http.MethodDelete, "/eks/region/"+region+"/clusters/x/addons/missing", "")
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DeleteAddon missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteAddon missing")
 }
 
 func TestCoverage_Route53ErrorPaths(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",
 		`<CreateHostedZoneRequest></CreateHostedZoneRequest>`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateHostedZone empty: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateHostedZone empty")
 	resp, _ = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone/Zmissing", "")
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("GetHostedZone missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "GetHostedZone missing")
 	resp, _ = r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/Zmissing/rrset/",
 		`<ChangeResourceRecordSetsRequest><ChangeBatch><Changes></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("ChangeRRset on missing zone: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ChangeRRset on missing zone")
 	resp, _ = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/change/missing", "")
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("GetChange missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "GetChange missing")
 }
 
 func TestCoverage_SecretsManagerErrorPaths(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, _ := smCall(t, srv, "CreateSecret", `{}`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("CreateSecret empty: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateSecret empty")
 	resp, _ = smCall(t, srv, "GetSecretValue", `{"SecretId":"missing"}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("GetSecretValue missing: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "GetSecretValue missing")
 	resp, _ = smCall(t, srv, "BogusOp", `{}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("Unknown SM op: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "Unknown SM op")
 }
 
 func TestCoverage_S3OwnershipAndEncryption(t *testing.T) {
@@ -676,16 +516,12 @@ func TestCoverage_S3OwnershipAndEncryption(t *testing.T) {
 	req.Header.Set("Content-Type", "application/xml")
 	resp, _ = srv.Client().Do(req)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("PutOwnershipControls: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "PutOwnershipControls")
 
 	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/s3/test-cov-bucket/?ownershipControls", nil)
 	resp, _ = srv.Client().Do(req)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("GetOwnershipControls: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "GetOwnershipControls")
 
 	// PutEncryption + GetEncryption.
 	encBody := `<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>`
@@ -693,16 +529,12 @@ func TestCoverage_S3OwnershipAndEncryption(t *testing.T) {
 	req.Header.Set("Content-Type", "application/xml")
 	resp, _ = srv.Client().Do(req)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("PutEncryption: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "PutEncryption")
 
 	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/s3/test-cov-bucket/?encryption", nil)
 	resp, _ = srv.Client().Do(req)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("GetEncryption: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "GetEncryption")
 }
 
 func TestCoverage_S3HeadObject(t *testing.T) {
@@ -719,7 +551,5 @@ func TestCoverage_S3HeadObject(t *testing.T) {
 	req, _ = http.NewRequest(http.MethodHead, srv.URL+"/s3/cov-head-bucket/key.txt", nil)
 	resp, _ = srv.Client().Do(req)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("HeadObject v1 contract: got %d, want 404", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "HeadObject v1 contract")
 }

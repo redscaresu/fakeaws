@@ -7,6 +7,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func eksRequest(t *testing.T, srv *httptest.Server, method, path, body string) (*http.Response, []byte) {
@@ -20,9 +23,7 @@ func eksRequest(t *testing.T, srv *httptest.Server, method, path, body string) (
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
+	require.NoError(t, err, "%s %s", method, path)
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	return resp, out
@@ -35,11 +36,11 @@ func eksSetupPrereqs(t *testing.T, srv *httptest.Server, region string) (cluster
 
 	// IAM cluster role.
 	iamCall(t, srv, "CreateRole", url.Values{
-		"RoleName": {"eks-cluster-role"},
+		"RoleName":                 {"eks-cluster-role"},
 		"AssumeRolePolicyDocument": {`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"eks.amazonaws.com"},"Action":"sts:AssumeRole"}]}`},
 	})
 	iamCall(t, srv, "CreateRole", url.Values{
-		"RoleName": {"eks-node-role"},
+		"RoleName":                 {"eks-node-role"},
 		"AssumeRolePolicyDocument": {`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}`},
 	})
 	clusterRoleARN = "arn:aws:iam::000000000000:role/eks-cluster-role"
@@ -65,30 +66,21 @@ func TestEKS_ClusterLifecycle(t *testing.T) {
 		"resourcesVpcConfig": {"subnetIds":["`+sa+`","`+sb+`"]},
 		"version": "1.29"
 	}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateCluster: %d %s", resp.StatusCode, body)
-	}
-	if !strings.Contains(string(body), `"name":"demo"`) {
-		t.Errorf("CreateCluster body: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateCluster: %s", body)
+	assert.Contains(t, string(body), `"name":"demo"`, "CreateCluster body: %s", body)
 
 	// Describe.
 	resp, body = eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters/demo", "")
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"ACTIVE"`) {
-		t.Errorf("DescribeCluster: %d %s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeCluster status")
+	assert.Contains(t, string(body), `"status":"ACTIVE"`, "DescribeCluster body: %s", body)
 
 	// List.
 	_, body = eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters", "")
-	if !strings.Contains(string(body), `"demo"`) {
-		t.Errorf("ListClusters: %s", body)
-	}
+	assert.Contains(t, string(body), `"demo"`, "ListClusters: %s", body)
 
 	// Delete.
 	resp, _ = eksRequest(t, srv, http.MethodDelete, "/eks/region/"+region+"/clusters/demo", "")
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteCluster: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteCluster")
 }
 
 func TestEKS_ClusterCrossAccountRoleARN404(t *testing.T) {
@@ -101,9 +93,7 @@ func TestEKS_ClusterCrossAccountRoleARN404(t *testing.T) {
 		"roleArn": "arn:aws:iam::999999999999:role/eks-cluster-role",
 		"resourcesVpcConfig": {"subnetIds":["`+sa+`","`+sb+`"]}
 	}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("cross-account roleArn: got %d, want 404", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "cross-account roleArn")
 }
 
 func TestEKS_NodeGroupSubnetMustBeInCluster(t *testing.T) {
@@ -124,9 +114,7 @@ func TestEKS_NodeGroupSubnetMustBeInCluster(t *testing.T) {
 		"nodeRole": "`+nodeRole+`",
 		"subnets": ["`+sb+`"]
 	}`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("nodegroup subnet outside cluster: got %d, want 409", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "nodegroup subnet outside cluster")
 }
 
 func TestEKS_AddonLifecycle(t *testing.T) {
@@ -143,17 +131,11 @@ func TestEKS_AddonLifecycle(t *testing.T) {
 		"addonName": "vpc-cni",
 		"addonVersion": "v1.18.0"
 	}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateAddon: %d", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateAddon")
 
 	resp, _ = eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters/demo/addons/vpc-cni", "")
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DescribeAddon: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeAddon")
 
 	resp, _ = eksRequest(t, srv, http.MethodDelete, "/eks/region/"+region+"/clusters/demo/addons/vpc-cni", "")
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteAddon: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteAddon")
 }

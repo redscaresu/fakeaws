@@ -7,6 +7,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const rdsVersion = "2014-10-31"
@@ -22,9 +25,7 @@ func rdsCall(t *testing.T, srv *httptest.Server, region, action string, params u
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(params.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("POST %s %s: %v", path, action, err)
-	}
+	require.NoError(t, err, "POST %s %s", path, action)
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	return resp, body
@@ -58,12 +59,8 @@ func TestRDS_DBSubnetGroupCRUD(t *testing.T) {
 		"SubnetIds.member.1":       {sa},
 		"SubnetIds.member.2":       {sb},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateDBSubnetGroup: %d %s", resp.StatusCode, body)
-	}
-	if !strings.Contains(string(body), "<DBSubnetGroupName>default</DBSubnetGroupName>") {
-		t.Errorf("CreateDBSubnetGroup body missing name: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateDBSubnetGroup: %s", body)
+	assert.Contains(t, string(body), "<DBSubnetGroupName>default</DBSubnetGroupName>", "CreateDBSubnetGroup body missing name: %s", body)
 
 	// Single subnet → ErrConflict (≥2 required).
 	resp, _ = rdsCall(t, srv, region, "CreateDBSubnetGroup", url.Values{
@@ -71,21 +68,15 @@ func TestRDS_DBSubnetGroupCRUD(t *testing.T) {
 		"DBSubnetGroupDescription": {"x"},
 		"SubnetIds.member.1":       {sa},
 	})
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("single-subnet group: got %d, want 409", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "single-subnet group")
 
 	// Describe by name.
 	_, body = rdsCall(t, srv, region, "DescribeDBSubnetGroups", url.Values{"DBSubnetGroupName": {"default"}})
-	if !strings.Contains(string(body), "<DBSubnetGroupName>default</DBSubnetGroupName>") {
-		t.Errorf("Describe: %s", body)
-	}
+	assert.Contains(t, string(body), "<DBSubnetGroupName>default</DBSubnetGroupName>", "Describe: %s", body)
 
 	// Delete.
 	resp, _ = rdsCall(t, srv, region, "DeleteDBSubnetGroup", url.Values{"DBSubnetGroupName": {"default"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("DeleteDBSubnetGroup: %d", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteDBSubnetGroup")
 }
 
 func TestRDS_DBInstance_FullChain(t *testing.T) {
@@ -113,12 +104,8 @@ func TestRDS_DBInstance_FullChain(t *testing.T) {
 		"DBSubnetGroupName":    {"default"},
 		"DBParameterGroupName": {"pg15"},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateDBInstance: %d %s", resp.StatusCode, body)
-	}
-	if !strings.Contains(string(body), "<DBInstanceIdentifier>db-1</DBInstanceIdentifier>") {
-		t.Errorf("CreateDBInstance body missing id: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateDBInstance: %s", body)
+	assert.Contains(t, string(body), "<DBInstanceIdentifier>db-1</DBInstanceIdentifier>", "CreateDBInstance body missing id: %s", body)
 
 	// Missing subnet group → 404.
 	resp, _ = rdsCall(t, srv, region, "CreateDBInstance", url.Values{
@@ -127,9 +114,7 @@ func TestRDS_DBInstance_FullChain(t *testing.T) {
 		"DBInstanceClass":      {"db.t3.micro"},
 		"DBSubnetGroupName":    {"missing"},
 	})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("missing subnet group: got %d, want 404", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "missing subnet group")
 
 	// DeleteDBInstance with deletion_protection=true → 409.
 	rdsCall(t, srv, region, "CreateDBInstance", url.Values{
@@ -140,9 +125,7 @@ func TestRDS_DBInstance_FullChain(t *testing.T) {
 		"DeletionProtection":   {"true"},
 	})
 	resp, _ = rdsCall(t, srv, region, "DeleteDBInstance", url.Values{"DBInstanceIdentifier": {"db-prot"}})
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("DeleteDBInstance with deletion_protection: got %d, want 409", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DeleteDBInstance with deletion_protection")
 }
 
 func TestRDS_ReadReplicaChainRESTRICT(t *testing.T) {
@@ -171,16 +154,12 @@ func TestRDS_ReadReplicaChainRESTRICT(t *testing.T) {
 	})
 	// Source delete with replica → 409.
 	resp, _ := rdsCall(t, srv, region, "DeleteDBInstance", url.Values{"DBInstanceIdentifier": {"src"}})
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("DeleteDBInstance src-with-replicas: got %d, want 409", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DeleteDBInstance src-with-replicas")
 
 	// After replica delete, source delete proceeds.
 	rdsCall(t, srv, region, "DeleteDBInstance", url.Values{"DBInstanceIdentifier": {"replica"}})
 	resp, _ = rdsCall(t, srv, region, "DeleteDBInstance", url.Values{"DBInstanceIdentifier": {"src"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteDBInstance src after replica gone: got %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteDBInstance src after replica gone")
 }
 
 func TestRDS_ParameterGroupCRUD(t *testing.T) {
@@ -190,13 +169,9 @@ func TestRDS_ParameterGroupCRUD(t *testing.T) {
 		"DBParameterGroupFamily": {"postgres15"},
 		"Description":            {"pg15"},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateDBParameterGroup: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateDBParameterGroup: %s", body)
 	resp, _ = rdsCall(t, srv, "us-east-1", "DeleteDBParameterGroup", url.Values{"DBParameterGroupName": {"pg15"}})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteDBParameterGroup: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteDBParameterGroup")
 }
 
 // TestContract_rds_dbi_resource_id_distinct_from_identifier lives in

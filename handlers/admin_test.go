@@ -6,10 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/redscaresu/fakeaws/handlers"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestAdminMockState_ReturnsDocumentedShape pins the /mock/state
@@ -20,69 +21,46 @@ func TestAdminMockState_ReturnsDocumentedShape(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 
 	resp, body := doGet(t, srv, "/mock/state")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: got %d want 200", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var state map[string]any
-	if err := json.Unmarshal(body, &state); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	require.NoError(t, json.Unmarshal(body, &state), "decode")
 	for _, want := range []string{"schema_version", "operations", "audit", "iam", "s3"} {
-		if _, ok := state[want]; !ok {
-			t.Errorf("missing key %q in /mock/state response: %s", want, body)
-		}
+		assert.Contains(t, state, want, "missing key %q in /mock/state response: %s", want, body)
 	}
-	if v, _ := state["schema_version"].(float64); v != 1 {
-		t.Errorf("schema_version: got %v want 1", state["schema_version"])
-	}
+	v, _ := state["schema_version"].(float64)
+	assert.Equal(t, float64(1), v, "schema_version: got %v want 1", state["schema_version"])
 }
 
 func TestAdminMockState_PerServiceFiltersToBlock(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 
 	resp, body := doGet(t, srv, "/mock/state/iam")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: got %d", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var state map[string]any
-	if err := json.Unmarshal(body, &state); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if _, ok := state["iam"]; !ok {
-		t.Errorf("expected iam block in per-service response: %s", body)
-	}
-	if _, ok := state["s3"]; ok {
-		t.Errorf("per-service /state/iam should NOT include s3 block: %s", body)
-	}
+	require.NoError(t, json.Unmarshal(body, &state), "decode")
+	assert.Contains(t, state, "iam", "expected iam block in per-service response: %s", body)
+	assert.NotContains(t, state, "s3", "per-service /state/iam should NOT include s3 block: %s", body)
 }
 
 func TestAdminMockState_UnknownServiceReturnsEmptyBlock(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 
 	resp, body := doGet(t, srv, "/mock/state/notreal")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: got %d", resp.StatusCode)
-	}
-	if !strings.Contains(string(body), `"notreal":{}`) {
-		t.Errorf("expected empty block for unknown service: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), `"notreal":{}`, "expected empty block for unknown service: %s", body)
 }
 
 func TestAdminMockReset_OK(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 
 	resp, body := doPost(t, srv, "/mock/reset")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: got %d body %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body %s", body)
 }
 
 func TestAdminMockSnapshot_MemoryConflict(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, body := doPost(t, srv, "/mock/snapshot")
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("status: got %d want 409 (snapshot meaningless on :memory:); body: %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusConflict, resp.StatusCode, "snapshot meaningless on :memory:; body: %s", body)
 }
 
 func TestAdminMockRestore_NoBaselineIs404(t *testing.T) {
@@ -90,9 +68,7 @@ func TestAdminMockRestore_NoBaselineIs404(t *testing.T) {
 	srv := newTestServer(t, dbPath)
 
 	resp, body := doPost(t, srv, "/mock/restore")
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status: got %d want 404 (no snapshot baseline); body: %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusNotFound, resp.StatusCode, "no snapshot baseline; body: %s", body)
 }
 
 func TestAdminMockSnapshotRestore_FileBackedRoundTrips(t *testing.T) {
@@ -100,14 +76,12 @@ func TestAdminMockSnapshotRestore_FileBackedRoundTrips(t *testing.T) {
 	srv := newTestServer(t, dbPath)
 
 	// Snapshot the empty state.
-	if r, b := doPost(t, srv, "/mock/snapshot"); r.StatusCode != http.StatusOK {
-		t.Fatalf("snapshot: got %d body %s", r.StatusCode, b)
-	}
+	r, b := doPost(t, srv, "/mock/snapshot")
+	require.Equal(t, http.StatusOK, r.StatusCode, "snapshot body %s", b)
 
 	// Restore — the snapshot file exists, so this should 200.
-	if r, b := doPost(t, srv, "/mock/restore"); r.StatusCode != http.StatusOK {
-		t.Fatalf("restore: got %d body %s", r.StatusCode, b)
-	}
+	r, b = doPost(t, srv, "/mock/restore")
+	require.Equal(t, http.StatusOK, r.StatusCode, "restore body %s", b)
 }
 
 // ----- helpers -----
@@ -115,9 +89,7 @@ func TestAdminMockSnapshotRestore_FileBackedRoundTrips(t *testing.T) {
 func newTestServer(t *testing.T, dbPath string) *httptest.Server {
 	t.Helper()
 	app, err := handlers.NewApplication(dbPath, false)
-	if err != nil {
-		t.Fatalf("NewApplication: %v", err)
-	}
+	require.NoError(t, err, "NewApplication")
 	srv := httptest.NewServer(app.Router())
 	t.Cleanup(func() {
 		srv.Close()
@@ -129,9 +101,7 @@ func newTestServer(t *testing.T, dbPath string) *httptest.Server {
 func doGet(t *testing.T, srv *httptest.Server, path string) (*http.Response, []byte) {
 	t.Helper()
 	resp, err := srv.Client().Get(srv.URL + path)
-	if err != nil {
-		t.Fatalf("GET %s: %v", path, err)
-	}
+	require.NoError(t, err, "GET %s", path)
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	return resp, body
@@ -140,9 +110,7 @@ func doGet(t *testing.T, srv *httptest.Server, path string) (*http.Response, []b
 func doPost(t *testing.T, srv *httptest.Server, path string) (*http.Response, []byte) {
 	t.Helper()
 	resp, err := srv.Client().Post(srv.URL+path, "application/json", nil)
-	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
-	}
+	require.NoError(t, err, "POST %s", path)
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	return resp, body
