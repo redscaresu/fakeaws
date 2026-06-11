@@ -97,6 +97,25 @@ docker run --rm -p 8082:8082 ghcr.io/redscaresu/fakeaws:latest --port 8082
 
 The Dockerfile in the repo root produces a `~15MB` static image (multi-stage build from `golang:1.25-alpine`).
 
+### Driving real terraform/tofu against the mock
+
+The repo ships `make demo-*` targets that wire up the env + drive a real
+`hashicorp/aws` provider through a full lifecycle against fakeaws.
+Useful for blog demos and manual exploration.
+
+```bash
+make build              # one-time
+make demo-apply         # boots fakeaws + init + apply + plan-no-op (sqs_queue)
+make demo-apply EXAMPLE=iam_role
+make demo-shell         # bash subshell with env set + cd'd to example
+make demo-help          # full target list + available examples
+make demo-down          # kill fakeaws + clean temp files
+```
+
+The `plan -detailed-exitcode == 0` check at the end of `demo-apply` is the
+correctness oracle — drift in any wire-shape detail (case-sensitive JSON
+keys, exact status codes, default fields) surfaces here.
+
 ## Provider version pin
 
 This mock targets `hashicorp/aws ~> 5.70`. Bumps require an explicit PR
