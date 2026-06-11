@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func kmsCall(t *testing.T, srv *httptest.Server, region, op string, body string) (*http.Response, []byte) {
@@ -235,34 +238,26 @@ func TestContract_kms_soft_delete_state_pending_deletion(t *testing.T) {
 
 	// Create a key.
 	resp, body := kmsCall(t, srv, region, "CreateKey", `{}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateKey: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateKey: %s", body)
 	var created struct {
 		KeyMetadata struct {
 			KeyId string
 		}
 	}
-	if err := json.Unmarshal(body, &created); err != nil {
-		t.Fatalf("decode CreateKey: %v\nbody=%s", err, body)
-	}
+	require.NoError(t, json.Unmarshal(body, &created), "decode CreateKey: %s", body)
 	keyID := created.KeyMetadata.KeyId
 
 	// Schedule deletion.
 	resp, body = kmsCall(t, srv, region, "ScheduleKeyDeletion",
 		`{"KeyId":"`+keyID+`","PendingWindowInDays":7}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ScheduleKeyDeletion: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ScheduleKeyDeletion: %s", body)
 
 	// DescribeKey must still return 200 with KeyState=PendingDeletion
 	// (mirrors real AWS; the provider's destroy wait-loop polls this).
 	resp, body = kmsCall(t, srv, region, "DescribeKey",
 		`{"KeyId":"`+keyID+`"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("DescribeKey after ScheduleKeyDeletion: %d %s (expected 200 with PendingDeletion)",
-			resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode,
+		"DescribeKey after ScheduleKeyDeletion (expected 200 with PendingDeletion): %s", body)
 	var described struct {
 		KeyMetadata struct {
 			KeyId        string
@@ -271,16 +266,8 @@ func TestContract_kms_soft_delete_state_pending_deletion(t *testing.T) {
 			DeletionDate float64
 		}
 	}
-	if err := json.Unmarshal(body, &described); err != nil {
-		t.Fatalf("decode DescribeKey: %v\nbody=%s", err, body)
-	}
-	if described.KeyMetadata.KeyState != "PendingDeletion" {
-		t.Errorf("KeyState=%q, want PendingDeletion", described.KeyMetadata.KeyState)
-	}
-	if described.KeyMetadata.Enabled {
-		t.Errorf("Enabled=true after ScheduleKeyDeletion, want false")
-	}
-	if described.KeyMetadata.DeletionDate == 0 {
-		t.Errorf("DeletionDate not set in DescribeKey response after ScheduleKeyDeletion")
-	}
+	require.NoError(t, json.Unmarshal(body, &described), "decode DescribeKey: %s", body)
+	assert.Equal(t, "PendingDeletion", described.KeyMetadata.KeyState)
+	assert.False(t, described.KeyMetadata.Enabled, "Enabled=true after ScheduleKeyDeletion, want false")
+	assert.NotZero(t, described.KeyMetadata.DeletionDate, "DeletionDate not set in DescribeKey response after ScheduleKeyDeletion")
 }

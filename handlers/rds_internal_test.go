@@ -3,6 +3,8 @@ package handlers
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // TestContract_rds_dbi_resource_id_distinct_from_identifier — wire-shape
@@ -24,14 +26,8 @@ func TestContract_rds_dbi_resource_id_distinct_from_identifier(t *testing.T) {
 	}
 	for _, id := range cases {
 		got := dbiResourceIDFor(id)
-		if got == id {
-			t.Errorf("dbiResourceIDFor(%q) returned the identifier verbatim — must NOT collide", id)
-		}
-		if !strings.HasPrefix(got, "db-") {
-			t.Errorf("dbiResourceIDFor(%q) = %q, expected db-<hex> prefix", id, got)
-		}
-		if again := dbiResourceIDFor(id); again != got {
-			t.Errorf("dbiResourceIDFor(%q) is not stable: %q vs %q", id, got, again)
-		}
+		assert.NotEqual(t, id, got, "dbiResourceIDFor(%q) returned the identifier verbatim — must NOT collide", id)
+		assert.True(t, strings.HasPrefix(got, "db-"), "dbiResourceIDFor(%q) = %q, expected db-<hex> prefix", id, got)
+		assert.Equal(t, got, dbiResourceIDFor(id), "dbiResourceIDFor(%q) is not stable", id)
 	}
 }

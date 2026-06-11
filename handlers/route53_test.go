@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func r53Request(t *testing.T, srv *httptest.Server, method, path, body string) (*http.Response, []byte) {
@@ -211,12 +213,8 @@ func TestContract_route53_records_sorted_lexicographically(t *testing.T) {
 	// terraform-provider-aws per-record Read shape.
 	_, body = r53Request(t, srv, http.MethodGet,
 		"/route53/2013-04-01/hostedzone/"+zoneID+"/rrset?name=test.example.invalid&type=A&maxitems=1", "")
-	if !strings.Contains(string(body), `<Type>A</Type>`) {
-		t.Errorf("expected A record first (lex order), got: %s", body)
-	}
-	if strings.Contains(string(body), `<Type>NS</Type>`) {
-		t.Errorf("expected ONLY A record (maxitems=1), NS record leaked: %s", body)
-	}
+	assert.Contains(t, string(body), `<Type>A</Type>`, "expected A record first (lex order)")
+	assert.NotContains(t, string(body), `<Type>NS</Type>`, "expected ONLY A record (maxitems=1), NS record leaked")
 }
 
 // TestRoute53_ChangeTagsForResourceAccepts pins S96's second fix.
