@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func r53Request(t *testing.T, srv *httptest.Server, method, path, body string) (*http.Response, []byte) {
@@ -21,9 +22,7 @@ func r53Request(t *testing.T, srv *httptest.Server, method, path, body string) (
 		req.Header.Set("Content-Type", "application/xml")
 	}
 	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
+	require.NoError(t, err, "%s %s", method, path)
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	return resp, out
@@ -35,12 +34,8 @@ func TestRoute53_HostedZoneLifecycle(t *testing.T) {
 	// Create.
 	resp, body := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",
 		`<CreateHostedZoneRequest><Name>example.com.</Name><CallerReference>r1</CallerReference></CreateHostedZoneRequest>`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateHostedZone: %d %s", resp.StatusCode, body)
-	}
-	if !strings.Contains(string(body), `<Name>example.com.</Name>`) {
-		t.Errorf("CreateHostedZone body: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateHostedZone: %s", body)
+	assert.Contains(t, string(body), `<Name>example.com.</Name>`, "CreateHostedZone body: %s", body)
 	// Extract zone id from "/hostedzone/Z..."
 	idStart := strings.Index(string(body), "<Id>/hostedzone/") + len("<Id>/hostedzone/")
 	idEnd := strings.Index(string(body)[idStart:], "</Id>") + idStart
@@ -48,21 +43,15 @@ func TestRoute53_HostedZoneLifecycle(t *testing.T) {
 
 	// List.
 	_, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone", "")
-	if !strings.Contains(string(body), zoneID) {
-		t.Errorf("ListHostedZones: %s", body)
-	}
+	assert.Contains(t, string(body), zoneID, "ListHostedZones: %s", body)
 
 	// Get.
 	resp, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone/"+zoneID, "")
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("GetHostedZone: %d %s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "GetHostedZone body=%s", body)
 
 	// Delete (empty zone after default NS+SOA — non-empty refusal won't fire).
 	resp, _ = r53Request(t, srv, http.MethodDelete, "/route53/2013-04-01/hostedzone/"+zoneID, "")
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteHostedZone: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteHostedZone")
 }
 
 func TestRoute53_ChangeBatchTransactional(t *testing.T) {
@@ -83,9 +72,7 @@ func TestRoute53_ChangeBatchTransactional(t *testing.T) {
 		</ResourceRecordSet></Change>
 	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
 	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", apex)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("apex CNAME: got %d, want 409", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "apex CNAME")
 
 	// CNAME on a child works.
 	good := `<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>
@@ -95,21 +82,15 @@ func TestRoute53_ChangeBatchTransactional(t *testing.T) {
 		</ResourceRecordSet></Change>
 	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
 	resp, body = r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", good)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("child CNAME: %d %s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "child CNAME: %s", body)
 
 	// List.
 	_, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset", "")
-	if !strings.Contains(string(body), "www.example.com.") {
-		t.Errorf("ListResourceRecordSets missing www: %s", body)
-	}
+	assert.Contains(t, string(body), "www.example.com.", "ListResourceRecordSets missing www: %s", body)
 
 	// Non-empty zone delete refused.
 	resp, _ = r53Request(t, srv, http.MethodDelete, "/route53/2013-04-01/hostedzone/"+zoneID, "")
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("non-empty zone delete: got %d, want 409", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "non-empty zone delete")
 }
 
 // TestRoute53_AliasTargetRoundTrip pins Codex pass 2 BLOCKING #1:
@@ -134,18 +115,12 @@ func TestRoute53_AliasTargetRoundTrip(t *testing.T) {
 		</ResourceRecordSet></Change>
 	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
 	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", alias)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("apex ALIAS: %d", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "apex ALIAS")
 
 	// List must round-trip the AliasTarget.
 	_, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset", "")
-	if !strings.Contains(string(body), "d111111abcdef8.cloudfront.net.") {
-		t.Errorf("AliasTarget DNSName not round-tripped: %s", body)
-	}
-	if !strings.Contains(string(body), "Z2FDTNDATAQYW2") {
-		t.Errorf("AliasTarget HostedZoneId not round-tripped: %s", body)
-	}
+	assert.Contains(t, string(body), "d111111abcdef8.cloudfront.net.", "AliasTarget DNSName not round-tripped: %s", body)
+	assert.Contains(t, string(body), "Z2FDTNDATAQYW2", "AliasTarget HostedZoneId not round-tripped: %s", body)
 }
 
 func TestRoute53_BatchAtomicityOnInvalidChange(t *testing.T) {
@@ -170,14 +145,10 @@ func TestRoute53_BatchAtomicityOnInvalidChange(t *testing.T) {
 		</ResourceRecordSet></Change>
 	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
 	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", mixed)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("mixed batch: %d, want 409", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "mixed batch")
 	// Verify NEITHER change applied.
 	_, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset", "")
-	if strings.Contains(string(body), "www.example.com.") {
-		t.Errorf("transactional violation: www record applied despite batch failure: %s", body)
-	}
+	assert.NotContains(t, string(body), "www.example.com.", "transactional violation: www record applied despite batch failure: %s", body)
 }
 
 // TestRoute53_ListSortsLexicographically pins S96's fix for the
@@ -233,14 +204,10 @@ func TestRoute53_ChangeTagsForResourceAccepts(t *testing.T) {
 
 	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/tags/hostedzone/"+zoneID,
 		`<ChangeTagsForResourceRequest><AddTags><Tag><Key>Owner</Key><Value>platform</Value></Tag></AddTags></ChangeTagsForResourceRequest>`)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("ChangeTagsForResource: %d, want 200", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "ChangeTagsForResource")
 
 	// ListTagsForResource still returns empty (we don't model storage).
 	resp, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/tags/hostedzone/"+zoneID, "")
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("ListTagsForResource after change: %d, want 200", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "ListTagsForResource after change")
 	_ = body
 }

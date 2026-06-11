@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestAllContractsHaveTests is the durable, CI-enforced enforcement of
@@ -55,9 +57,7 @@ var (
 
 func TestAllContractsHaveTests(t *testing.T) {
 	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
+	require.NoError(t, err, "getwd")
 
 	sourceIDs, sourceLocs := scanContractIDs(t, dir)
 	testIDs, testLocs := scanTestContractFuncs(t, dir)
@@ -104,9 +104,7 @@ func scanContractIDs(t *testing.T, dir string) (map[string]struct{}, map[string]
 	locs := map[string][]string{}
 	for _, path := range files {
 		raw, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
+		require.NoError(t, err, "read %s", path)
 		base := filepath.Base(path)
 		for line, text := range strings.Split(string(raw), "\n") {
 			for _, m := range contractRe.FindAllStringSubmatch(text, -1) {
@@ -126,9 +124,7 @@ func scanTestContractFuncs(t *testing.T, dir string) (map[string]struct{}, map[s
 	locs := map[string][]string{}
 	for _, path := range files {
 		raw, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
+		require.NoError(t, err, "read %s", path)
 		base := filepath.Base(path)
 		for line, text := range strings.Split(string(raw), "\n") {
 			for _, m := range testRe.FindAllStringSubmatch(text, -1) {
@@ -145,9 +141,7 @@ func scanTestContractFuncs(t *testing.T, dir string) (map[string]struct{}, map[s
 func globGo(t *testing.T, dir, pattern string, excludeTest bool) []string {
 	t.Helper()
 	all, err := filepath.Glob(filepath.Join(dir, pattern))
-	if err != nil {
-		t.Fatalf("glob %q: %v", pattern, err)
-	}
+	require.NoError(t, err, "glob %q", pattern)
 	out := make([]string, 0, len(all))
 	for _, p := range all {
 		base := filepath.Base(p)
@@ -204,39 +198,27 @@ func TestContractAuditTest_Self(t *testing.T) {
 
 	src, _ := scanContractIDs(t, tmp)
 	tst, _ := scanTestContractFuncs(t, tmp)
-	if got := setDiff(src, tst); len(got) != 0 {
-		t.Errorf("known-good: setDiff(src, tst) = %v, want empty", got)
-	}
-	if got := setDiff(tst, src); len(got) != 0 {
-		t.Errorf("known-good: setDiff(tst, src) = %v, want empty", got)
-	}
+	require.Empty(t, setDiff(src, tst), "known-good: setDiff(src, tst) must be empty")
+	require.Empty(t, setDiff(tst, src), "known-good: setDiff(tst, src) must be empty")
 
 	tmp2 := t.TempDir()
 	mustWrite(t, filepath.Join(tmp2, "src.go"),
 		"package x\n// CRITICAL[orphan-doc]: invariant\nfunc handle() {}\n")
 	src2, _ := scanContractIDs(t, tmp2)
 	tst2, _ := scanTestContractFuncs(t, tmp2)
-	if diff := setDiff(src2, tst2); len(diff) != 1 {
-		t.Errorf("known-bad-missing-test: setDiff = %v, want exactly 1 missing", diff)
-	}
+	require.Len(t, setDiff(src2, tst2), 1, "known-bad-missing-test: setDiff must have exactly 1 missing")
 
 	tmp3 := t.TempDir()
 	mustWrite(t, filepath.Join(tmp3, "src_test.go"),
 		"package x\nimport \"testing\"\nfunc TestContract_orphan_test(t *testing.T) {}\n")
 	src3, _ := scanContractIDs(t, tmp3)
 	tst3, _ := scanTestContractFuncs(t, tmp3)
-	if diff := setDiff(tst3, src3); len(diff) != 1 {
-		t.Errorf("known-bad-orphan-test: setDiff(tst, src) = %v, want exactly 1 orphan", diff)
-	}
+	require.Len(t, setDiff(tst3, src3), 1, "known-bad-orphan-test: setDiff(tst, src) must have exactly 1 orphan")
 
-	if got := snakeToKebab(kebabToSnake("a-b-c-d")); got != "a-b-c-d" {
-		t.Errorf("kebab/snake round-trip: %q", got)
-	}
+	require.Equal(t, "a-b-c-d", snakeToKebab(kebabToSnake("a-b-c-d")), "kebab/snake round-trip")
 }
 
 func mustWrite(t *testing.T, path, contents string) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o644), "write %s", path)
 }

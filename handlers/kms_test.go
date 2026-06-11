@@ -18,9 +18,7 @@ func kmsCall(t *testing.T, srv *httptest.Server, region, op string, body string)
 	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
 	req.Header.Set("X-Amz-Target", "TrentService."+op)
 	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("POST /kms %s: %v", op, err)
-	}
+	require.NoError(t, err, "POST /kms %s", op)
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	return resp, out
@@ -41,60 +39,38 @@ func TestKMS_KeyRotationPersistence(t *testing.T) {
 
 	// Create a key.
 	resp, body := kmsCall(t, srv, region, "CreateKey", `{}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateKey: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateKey: %s", body)
 	var created struct {
 		KeyMetadata struct {
 			KeyId string
 		}
 	}
-	if err := json.Unmarshal(body, &created); err != nil {
-		t.Fatalf("decode CreateKey: %v\nbody=%s", err, body)
-	}
-	if created.KeyMetadata.KeyId == "" {
-		t.Fatalf("empty KeyId in CreateKey response: %s", body)
-	}
+	require.NoError(t, json.Unmarshal(body, &created), "decode CreateKey: body=%s", body)
+	require.NotEmpty(t, created.KeyMetadata.KeyId, "empty KeyId in CreateKey response: %s", body)
 	keyID := created.KeyMetadata.KeyId
 
 	// Pre-Enable: rotation should be false (default).
 	resp, body = kmsCall(t, srv, region, "GetKeyRotationStatus", `{"KeyId":"`+keyID+`"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("pre-Enable GetKeyRotationStatus: %d %s", resp.StatusCode, body)
-	}
-	if !strings.Contains(string(body), `"KeyRotationEnabled":false`) {
-		t.Errorf("pre-Enable expected false, got: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "pre-Enable GetKeyRotationStatus: %s", body)
+	assert.Contains(t, string(body), `"KeyRotationEnabled":false`, "pre-Enable expected false, got: %s", body)
 
 	// Enable rotation.
 	resp, body = kmsCall(t, srv, region, "EnableKeyRotation", `{"KeyId":"`+keyID+`"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("EnableKeyRotation: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "EnableKeyRotation: %s", body)
 
 	// Post-Enable: rotation should be true.
 	resp, body = kmsCall(t, srv, region, "GetKeyRotationStatus", `{"KeyId":"`+keyID+`"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("post-Enable GetKeyRotationStatus: %d %s", resp.StatusCode, body)
-	}
-	if !strings.Contains(string(body), `"KeyRotationEnabled":true`) {
-		t.Errorf("post-Enable expected true, got: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "post-Enable GetKeyRotationStatus: %s", body)
+	assert.Contains(t, string(body), `"KeyRotationEnabled":true`, "post-Enable expected true, got: %s", body)
 
 	// Disable rotation.
 	resp, body = kmsCall(t, srv, region, "DisableKeyRotation", `{"KeyId":"`+keyID+`"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("DisableKeyRotation: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DisableKeyRotation: %s", body)
 
 	// Post-Disable: rotation should be false again.
 	resp, body = kmsCall(t, srv, region, "GetKeyRotationStatus", `{"KeyId":"`+keyID+`"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("post-Disable GetKeyRotationStatus: %d %s", resp.StatusCode, body)
-	}
-	if !strings.Contains(string(body), `"KeyRotationEnabled":false`) {
-		t.Errorf("post-Disable expected false, got: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "post-Disable GetKeyRotationStatus: %s", body)
+	assert.Contains(t, string(body), `"KeyRotationEnabled":false`, "post-Disable expected false, got: %s", body)
 }
 
 // TestKMS_KeyRotation_UnknownKeyReturns404 guards the not-found
@@ -105,14 +81,10 @@ func TestKMS_KeyRotation_UnknownKeyReturns404(t *testing.T) {
 	const region = "us-east-1"
 
 	resp, _ := kmsCall(t, srv, region, "GetKeyRotationStatus", `{"KeyId":"nonexistent-key-id"}`)
-	if resp.StatusCode == http.StatusOK {
-		t.Errorf("GetKeyRotationStatus on missing key should not return 200, got %d", resp.StatusCode)
-	}
+	assert.NotEqual(t, http.StatusOK, resp.StatusCode, "GetKeyRotationStatus on missing key should not return 200, got %d", resp.StatusCode)
 
 	resp, _ = kmsCall(t, srv, region, "EnableKeyRotation", `{"KeyId":"nonexistent-key-id"}`)
-	if resp.StatusCode == http.StatusOK {
-		t.Errorf("EnableKeyRotation on missing key should not return 200, got %d", resp.StatusCode)
-	}
+	assert.NotEqual(t, http.StatusOK, resp.StatusCode, "EnableKeyRotation on missing key should not return 200, got %d", resp.StatusCode)
 }
 
 // TestKMS_TagPersistence pins S79's fix for the aws_kms_key tags
@@ -132,70 +104,47 @@ func TestKMS_TagPersistence(t *testing.T) {
 	// Create a key with initial tags.
 	resp, body := kmsCall(t, srv, region, "CreateKey",
 		`{"Tags":[{"TagKey":"env","TagValue":"prod"},{"TagKey":"team","TagValue":"platform"}]}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateKey: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateKey: %s", body)
 	var created struct {
 		KeyMetadata struct {
 			KeyId string
 		}
 	}
-	if err := json.Unmarshal(body, &created); err != nil {
-		t.Fatalf("decode CreateKey: %v\nbody=%s", err, body)
-	}
+	require.NoError(t, json.Unmarshal(body, &created), "decode CreateKey: body=%s", body)
 	keyID := created.KeyMetadata.KeyId
 
 	// ListResourceTags should return both initial tags.
 	resp, body = kmsCall(t, srv, region, "ListResourceTags", `{"KeyId":"`+keyID+`"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ListResourceTags: %d %s", resp.StatusCode, body)
-	}
-	if !strings.Contains(string(body), `"TagKey":"env"`) || !strings.Contains(string(body), `"TagValue":"prod"`) {
-		t.Errorf("expected env=prod tag in initial list, got: %s", body)
-	}
-	if !strings.Contains(string(body), `"TagKey":"team"`) || !strings.Contains(string(body), `"TagValue":"platform"`) {
-		t.Errorf("expected team=platform tag in initial list, got: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ListResourceTags: %s", body)
+	assert.Contains(t, string(body), `"TagKey":"env"`, "expected env=prod tag in initial list, got: %s", body)
+	assert.Contains(t, string(body), `"TagValue":"prod"`, "expected env=prod tag in initial list, got: %s", body)
+	assert.Contains(t, string(body), `"TagKey":"team"`, "expected team=platform tag in initial list, got: %s", body)
+	assert.Contains(t, string(body), `"TagValue":"platform"`, "expected team=platform tag in initial list, got: %s", body)
 
 	// Add a third tag + overwrite env.
 	resp, body = kmsCall(t, srv, region, "TagResource",
 		`{"KeyId":"`+keyID+`","Tags":[{"TagKey":"env","TagValue":"staging"},{"TagKey":"owner","TagValue":"sre"}]}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("TagResource: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "TagResource: %s", body)
 
 	resp, body = kmsCall(t, srv, region, "ListResourceTags", `{"KeyId":"`+keyID+`"}`)
-	if !strings.Contains(string(body), `"TagValue":"staging"`) {
-		t.Errorf("expected env=staging after TagResource overwrite, got: %s", body)
-	}
-	if !strings.Contains(string(body), `"TagKey":"owner"`) {
-		t.Errorf("expected owner tag after TagResource add, got: %s", body)
-	}
-	if strings.Contains(string(body), `"TagValue":"prod"`) {
-		t.Errorf("expected old env=prod gone after overwrite, got: %s", body)
-	}
+	assert.Contains(t, string(body), `"TagValue":"staging"`, "expected env=staging after TagResource overwrite, got: %s", body)
+	assert.Contains(t, string(body), `"TagKey":"owner"`, "expected owner tag after TagResource add, got: %s", body)
+	assert.NotContains(t, string(body), `"TagValue":"prod"`, "expected old env=prod gone after overwrite, got: %s", body)
 
 	// Remove env and owner; keep team.
 	resp, body = kmsCall(t, srv, region, "UntagResource",
 		`{"KeyId":"`+keyID+`","TagKeys":["env","owner"]}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("UntagResource: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "UntagResource: %s", body)
 
 	resp, body = kmsCall(t, srv, region, "ListResourceTags", `{"KeyId":"`+keyID+`"}`)
-	if strings.Contains(string(body), `"TagKey":"env"`) || strings.Contains(string(body), `"TagKey":"owner"`) {
-		t.Errorf("expected env+owner removed after UntagResource, got: %s", body)
-	}
-	if !strings.Contains(string(body), `"TagKey":"team"`) {
-		t.Errorf("expected team tag to survive UntagResource, got: %s", body)
-	}
+	assert.NotContains(t, string(body), `"TagKey":"env"`, "expected env removed after UntagResource, got: %s", body)
+	assert.NotContains(t, string(body), `"TagKey":"owner"`, "expected owner removed after UntagResource, got: %s", body)
+	assert.Contains(t, string(body), `"TagKey":"team"`, "expected team tag to survive UntagResource, got: %s", body)
 
 	// UntagResource on an unknown key — real AWS silently ignores; we mirror.
 	resp, body = kmsCall(t, srv, region, "UntagResource",
 		`{"KeyId":"`+keyID+`","TagKeys":["does-not-exist"]}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("UntagResource of unknown key should silently 200, got %d %s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "UntagResource of unknown key should silently 200, got %d %s", resp.StatusCode, body)
 }
 
 // TestKMS_Tag_UnknownKeyReturns404 guards the not-found path for
@@ -205,21 +154,15 @@ func TestKMS_Tag_UnknownKeyReturns404(t *testing.T) {
 	const region = "us-east-1"
 
 	resp, _ := kmsCall(t, srv, region, "ListResourceTags", `{"KeyId":"nonexistent"}`)
-	if resp.StatusCode == http.StatusOK {
-		t.Errorf("ListResourceTags on missing key should not return 200, got %d", resp.StatusCode)
-	}
+	assert.NotEqual(t, http.StatusOK, resp.StatusCode, "ListResourceTags on missing key should not return 200, got %d", resp.StatusCode)
 
 	resp, _ = kmsCall(t, srv, region, "TagResource",
 		`{"KeyId":"nonexistent","Tags":[{"TagKey":"a","TagValue":"b"}]}`)
-	if resp.StatusCode == http.StatusOK {
-		t.Errorf("TagResource on missing key should not return 200, got %d", resp.StatusCode)
-	}
+	assert.NotEqual(t, http.StatusOK, resp.StatusCode, "TagResource on missing key should not return 200, got %d", resp.StatusCode)
 
 	resp, _ = kmsCall(t, srv, region, "UntagResource",
 		`{"KeyId":"nonexistent","TagKeys":["a"]}`)
-	if resp.StatusCode == http.StatusOK {
-		t.Errorf("UntagResource on missing key should not return 200, got %d", resp.StatusCode)
-	}
+	assert.NotEqual(t, http.StatusOK, resp.StatusCode, "UntagResource on missing key should not return 200, got %d", resp.StatusCode)
 }
 
 // TestKMS_ScheduleDeletion_SoftDelete pins the fix for the

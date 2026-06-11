@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func ddbCall(t *testing.T, srv *httptest.Server, region, op string, body string) (*http.Response, []byte) {
@@ -14,9 +17,7 @@ func ddbCall(t *testing.T, srv *httptest.Server, region, op string, body string)
 	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
 	req.Header.Set("X-Amz-Target", "DynamoDB_20120810."+op)
 	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("POST /dynamodb %s: %v", op, err)
-	}
+	require.NoError(t, err, "POST /dynamodb %s", op)
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	return resp, out
@@ -33,30 +34,21 @@ func TestDynamoDB_TableLifecycle(t *testing.T) {
 		"KeySchema": [{"AttributeName":"id","KeyType":"HASH"}],
 		"BillingMode": "PAY_PER_REQUEST"
 	}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateTable: %d %s", resp.StatusCode, body)
-	}
-	if !strings.Contains(string(body), `"TableName":"Users"`) {
-		t.Errorf("CreateTable body: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateTable: %s", body)
+	assert.Contains(t, string(body), `"TableName":"Users"`, "CreateTable body: %s", body)
 
 	// DescribeTable.
 	resp, body = ddbCall(t, srv, region, "DescribeTable", `{"TableName":"Users"}`)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"TableStatus":"ACTIVE"`) {
-		t.Errorf("DescribeTable: %d %s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeTable status")
+	assert.Contains(t, string(body), `"TableStatus":"ACTIVE"`, "DescribeTable body: %s", body)
 
 	// DescribeTable on missing → 404.
 	resp, _ = ddbCall(t, srv, region, "DescribeTable", `{"TableName":"Missing"}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("DescribeTable missing: got %d, want 404", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeTable missing")
 
 	// DeleteTable.
 	resp, _ = ddbCall(t, srv, region, "DeleteTable", `{"TableName":"Users"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteTable: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteTable")
 }
 
 func TestDynamoDB_PutGetDeleteItem(t *testing.T) {
@@ -73,42 +65,31 @@ func TestDynamoDB_PutGetDeleteItem(t *testing.T) {
 		"TableName": "Users",
 		"Item": {"id":{"S":"alice"},"age":{"N":"30"}}
 	}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("PutItem: %d", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "PutItem")
 
 	// GetItem returns the item.
 	resp, body := ddbCall(t, srv, region, "GetItem", `{
 		"TableName": "Users",
 		"Key": {"id":{"S":"alice"}}
 	}`)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"alice"`) {
-		t.Errorf("GetItem: %d %s", resp.StatusCode, body)
-	}
-	if !strings.Contains(string(body), `"30"`) {
-		t.Errorf("GetItem age: %s", body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "GetItem status")
+	assert.Contains(t, string(body), `"alice"`, "GetItem: %s", body)
+	assert.Contains(t, string(body), `"30"`, "GetItem age: %s", body)
 
 	// GetItem on missing key returns 200 + empty body (per AWS contract).
 	resp, body = ddbCall(t, srv, region, "GetItem", `{
 		"TableName": "Users",
 		"Key": {"id":{"S":"bob"}}
 	}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("GetItem missing key: got %d, want 200; body=%s", resp.StatusCode, body)
-	}
-	if strings.Contains(string(body), `"Item":`) {
-		t.Errorf("GetItem missing key should not include Item field: %s", body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "GetItem missing key; body=%s", body)
+	assert.NotContains(t, string(body), `"Item":`, "GetItem missing key should not include Item field: %s", body)
 
 	// DeleteItem.
 	resp, _ = ddbCall(t, srv, region, "DeleteItem", `{
 		"TableName": "Users",
 		"Key": {"id":{"S":"alice"}}
 	}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DeleteItem: %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteItem")
 }
 
 func TestDynamoDB_PutItemMissingTable404(t *testing.T) {
@@ -117,9 +98,7 @@ func TestDynamoDB_PutItemMissingTable404(t *testing.T) {
 		"TableName": "Missing",
 		"Item": {"id":{"S":"x"}}
 	}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("PutItem missing table: got %d, want 404", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "PutItem missing table")
 }
 
 func TestDynamoDB_ScanReturnsAllItems(t *testing.T) {
@@ -133,18 +112,12 @@ func TestDynamoDB_ScanReturnsAllItems(t *testing.T) {
 	ddbCall(t, srv, region, "PutItem", `{"TableName":"Users","Item":{"id":{"S":"a"}}}`)
 	ddbCall(t, srv, region, "PutItem", `{"TableName":"Users","Item":{"id":{"S":"b"}}}`)
 	resp, body := ddbCall(t, srv, region, "Scan", `{"TableName":"Users"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("Scan: %d", resp.StatusCode)
-	}
-	if !strings.Contains(string(body), `"Count":2`) {
-		t.Errorf("Scan count: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "Scan")
+	assert.Contains(t, string(body), `"Count":2`, "Scan count: %s", body)
 }
 
 func TestDynamoDB_UnknownOperation404(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, _ := ddbCall(t, srv, "us-east-1", "BatchGetItem", `{}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("Unknown op: got %d, want 404", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "Unknown op")
 }

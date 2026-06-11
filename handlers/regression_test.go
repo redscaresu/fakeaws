@@ -28,6 +28,8 @@ import (
 	"testing"
 
 	"github.com/redscaresu/fakeaws/handlers"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // requireHandlerImplemented re-exports the package-private helper so
@@ -55,9 +57,7 @@ func TestRegressionCrossAccountFKRejection(t *testing.T) {
 		"RoleName":  {"r"},
 		"PolicyArn": {"arn:aws:iam::999999999999:policy/foreign"},
 	})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("cross-account ARN must 404, got %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "cross-account ARN must 404")
 }
 
 // 2. Wrong-collection FK rejection (same-account paths).
@@ -76,9 +76,7 @@ func TestRegressionWrongCollectionFKRejection(t *testing.T) {
 		"RoleName":  {"r"},
 		"PolicyArn": {"arn:aws:iam::000000000000:role/p"},
 	})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("wrong-collection ARN must 404, got %d", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "wrong-collection ARN must 404")
 }
 
 // 3. Relative-path wrong-collection rejection.
@@ -116,18 +114,14 @@ func TestRegressionRelativePathWrongCollectionRejection(t *testing.T) {
 		"ImageId":      {"ami-0abcd1234"},
 		"InstanceType": {"t3.micro"},
 	})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("wrong-collection ref (sg id where subnet id expected): got %d, want 404", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "wrong-collection ref (sg id where subnet id expected)")
 	// Confirm the right shape DOES succeed under same prereqs.
 	resp, _ = ec2PostRegression(t, srv, region, "RunInstances", url.Values{
 		"SubnetId":     {subnetID},
 		"ImageId":      {"ami-0abcd1234"},
 		"InstanceType": {"t3.micro"},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("right-shape ref control: got %d, want 200", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "right-shape ref control")
 }
 
 // 4. Subnet/VPC pairing on instance / cluster create.
@@ -156,9 +150,7 @@ func TestRegressionSubnetVPCPairing(t *testing.T) {
 		"SubnetId": {subnetB}, "ImageId": {"ami-0abcd1234"},
 		"InstanceType": {"t3.micro"}, "SecurityGroupId.1": {sgA},
 	})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("subnet/SG VPC mismatch must 404, got %d body=%s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "subnet/SG VPC mismatch must 404; body=%s", body)
 }
 
 // 5. Post-merge PATCH validation.
@@ -184,9 +176,7 @@ func TestRegressionPostMergePATCHValidation(t *testing.T) {
 		"IpPermissions.1.ToPort":            {"443"},
 		"IpPermissions.1.IpRanges.1.CidrIp": {"0.0.0.0/0"},
 	})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("Authorize on missing SG must 404 (merged state invalid), got %d body=%s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "Authorize on missing SG must 404 (merged state invalid); body=%s", body)
 }
 
 // 6. Bare-name region scoping.
@@ -213,9 +203,7 @@ func TestRegressionBareNameRegionScoping(t *testing.T) {
 	// DescribeSubnets in same region resolves the bare id without an
 	// AZ-derived disambiguator.
 	_, body = ec2PostRegression(t, srv, "us-east-1", "DescribeSubnets", nil)
-	if !strings.Contains(string(body), subnetID) {
-		t.Errorf("bare-name subnet id must resolve in same region; body=%s", body)
-	}
+	assert.Contains(t, string(body), subnetID, "bare-name subnet id must resolve in same region; body=%s", body)
 }
 
 // 7. Region-vs-zone heuristic.
@@ -238,9 +226,7 @@ func TestRegressionRegionVsZoneHeuristic(t *testing.T) {
 	_, body = ec2PostRegression(t, srv, "us-east-1", "CreateSubnet", url.Values{
 		"VpcId": {vpcID}, "CidrBlock": {"10.0.1.0/24"},
 	})
-	if got := xmlExtract(body, "availabilityZone"); got != "us-east-1a" {
-		t.Errorf("region us-east-1 must produce AZ us-east-1a (not us-easta or us-east-a); got %q", got)
-	}
+	assert.Equal(t, "us-east-1a", xmlExtract(body, "availabilityZone"), "region us-east-1 must produce AZ us-east-1a (not us-easta or us-east-a)")
 }
 
 // 8. Cache-baseline lifecycle on /mock/reset.
@@ -268,9 +254,7 @@ func TestRegressionCacheBaselineLifecycle(t *testing.T) {
 		req.Header.Set("Content-Type", "application/x-amz-json-1.0")
 		req.Header.Set("X-Amz-Target", target)
 		resp, err := srv.Client().Do(req)
-		if err != nil {
-			t.Fatalf("post %s: %v", target, err)
-		}
+		require.NoError(t, err, "post %s", target)
 		defer resp.Body.Close()
 		out := readResponseBody(t, resp)
 		return resp, out
@@ -279,23 +263,17 @@ func TestRegressionCacheBaselineLifecycle(t *testing.T) {
 	post("AmazonSQS.CreateQueue", `{"QueueName":"jobs"}`)
 	state, _ := http.Get(srv.URL + "/mock/state")
 	stateBytes := readResponseBody(t, state)
-	if !strings.Contains(string(stateBytes), `"jobs"`) {
-		t.Fatalf("setup: queue not in pre-reset state: %s", stateBytes)
-	}
+	require.Contains(t, string(stateBytes), `"jobs"`, "setup: queue not in pre-reset state: %s", stateBytes)
 
 	// Reset.
 	resp, _ := http.Post(srv.URL+"/mock/reset", "application/json", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("/mock/reset: %d", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "/mock/reset")
 	resp.Body.Close()
 
 	// Post-reset: queue is gone (cache + DB cleared together).
 	state, _ = http.Get(srv.URL + "/mock/state")
 	stateBytes = readResponseBody(t, state)
-	if strings.Contains(string(stateBytes), `"jobs"`) {
-		t.Errorf("queue should be gone after /mock/reset; state=%s", stateBytes)
-	}
+	assert.NotContains(t, string(stateBytes), `"jobs"`, "queue should be gone after /mock/reset; state=%s", stateBytes)
 }
 
 // 9. Terminal state refuses transitions.
@@ -315,9 +293,7 @@ func TestRegressionTerminalStateRefusesTransitions(t *testing.T) {
 		req.Header.Set("Content-Type", "application/x-amz-json-1.1")
 		req.Header.Set("X-Amz-Target", target)
 		resp, err := srv.Client().Do(req)
-		if err != nil {
-			t.Fatalf("POST %s: %v", target, err)
-		}
+		require.NoError(t, err, "POST %s", target)
 		defer resp.Body.Close()
 		return resp, readResponseBody(t, resp)
 	}
@@ -327,9 +303,7 @@ func TestRegressionTerminalStateRefusesTransitions(t *testing.T) {
 
 	// Restore after destroy → 409.
 	resp, body := post("secretsmanager.RestoreSecret", `{"SecretId":"db"}`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("RestoreSecret on Destroyed: got %d, want 409; body=%s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "RestoreSecret on Destroyed; body=%s", body)
 }
 
 // 10. Distinct 409 sentinels.
@@ -349,18 +323,13 @@ func TestRegressionDistinct409Sentinels(t *testing.T) {
 	createPolicy(t, srv, "p")
 	// Attach + try to delete: ErrInUse → 409 ResourceInUseException.
 	policyArn := "arn:aws:iam::000000000000:policy/p"
-	if _, body := iamPost(t, srv, "AttachRolePolicy", url.Values{
+	_, body := iamPost(t, srv, "AttachRolePolicy", url.Values{
 		"RoleName": {"r"}, "PolicyArn": {policyArn},
-	}); body == nil {
-		t.Fatalf("AttachRolePolicy returned nil body")
-	}
+	})
+	require.NotNil(t, body, "AttachRolePolicy returned nil body")
 	resp, body := iamPost(t, srv, "DeletePolicy", url.Values{"PolicyName": {"p"}})
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("DeletePolicy attached: got %d, want 409", resp.StatusCode)
-	}
-	if !strings.Contains(string(body), "ResourceInUseException") {
-		t.Errorf("body must carry ResourceInUseException (not generic ConflictException): %s", body)
-	}
+	require.Equal(t, http.StatusConflict, resp.StatusCode, "DeletePolicy attached")
+	assert.Contains(t, string(body), "ResourceInUseException", "body must carry ResourceInUseException (not generic ConflictException): %s", body)
 }
 
 // 11. Hosted-zone delete refused if non-empty.
@@ -384,18 +353,14 @@ func TestRegressionHostedZoneDeleteRefusedIfNonEmpty(t *testing.T) {
 			req, _ = http.NewRequest(method, srv.URL+path, nil)
 		}
 		resp, err := srv.Client().Do(req)
-		if err != nil {
-			t.Fatalf("%s %s: %v", method, path, err)
-		}
+		require.NoError(t, err, "%s %s", method, path)
 		defer resp.Body.Close()
 		return resp, readResponseBody(t, resp)
 	}
 
 	resp, body := r53Post(http.MethodPost, "/route53/2013-04-01/hostedzone",
 		`<CreateHostedZoneRequest><Name>example.com.</Name><CallerReference>r1</CallerReference></CreateHostedZoneRequest>`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("setup CreateHostedZone: %d %s", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "setup CreateHostedZone: %s", body)
 	idStart := strings.Index(string(body), "<Id>/hostedzone/") + len("<Id>/hostedzone/")
 	idEnd := strings.Index(string(body)[idStart:], "</Id>") + idStart
 	zoneID := string(body)[idStart:idEnd]
@@ -409,9 +374,7 @@ func TestRegressionHostedZoneDeleteRefusedIfNonEmpty(t *testing.T) {
 
 	// Delete must reject.
 	resp, _ = r53Post(http.MethodDelete, "/route53/2013-04-01/hostedzone/"+zoneID, "")
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("non-empty zone delete: got %d, want 409", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "non-empty zone delete")
 }
 
 // 12. Tombstone semantics on parent delete.
@@ -434,9 +397,7 @@ func TestRegressionTombstoneSemanticsOnParentDelete(t *testing.T) {
 		req.Header.Set("Content-Type", "application/x-amz-json-1.0")
 		req.Header.Set("X-Amz-Target", target)
 		resp, err := srv.Client().Do(req)
-		if err != nil {
-			t.Fatalf("POST %s: %v", target, err)
-		}
+		require.NoError(t, err, "POST %s", target)
 		defer resp.Body.Close()
 		return readResponseBody(t, resp)
 	}
@@ -451,14 +412,10 @@ func TestRegressionTombstoneSemanticsOnParentDelete(t *testing.T) {
 
 	// /mock/state.sqs.tombstoned_messages must be 1 — message rebadged.
 	resp, err := http.Get(srv.URL + "/mock/state")
-	if err != nil {
-		t.Fatalf("GET /mock/state: %v", err)
-	}
+	require.NoError(t, err, "GET /mock/state")
 	defer resp.Body.Close()
 	stateBytes := readResponseBody(t, resp)
-	if !strings.Contains(string(stateBytes), `"tombstoned_messages":1`) {
-		t.Errorf("tombstone count after queue delete: state=%s", stateBytes)
-	}
+	assert.Contains(t, string(stateBytes), `"tombstoned_messages":1`, "tombstone count after queue delete: state=%s", stateBytes)
 }
 
 // 13. Resource-existence gate on every sub-resource / child handler.
@@ -478,12 +435,8 @@ func TestRegressionResourceExistenceGateOnSubResource(t *testing.T) {
 		"RoleName":  {"missing"},
 		"PolicyArn": {"arn:aws:iam::000000000000:policy/p"},
 	})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("AttachRolePolicy with missing role: %d want 404 body=%s", resp.StatusCode, body)
-	}
-	if !strings.Contains(string(body), "ResourceNotFoundException") {
-		t.Errorf("body must carry ResourceNotFoundException: %s", body)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "AttachRolePolicy with missing role; body=%s", body)
+	assert.Contains(t, string(body), "ResourceNotFoundException", "body must carry ResourceNotFoundException: %s", body)
 }
 
 // 14. Server-stamped fields are never trusted from the client.
@@ -502,15 +455,9 @@ func TestRegressionServerStampedFieldsNeverTrusted(t *testing.T) {
 		"AssumeRolePolicyDocument": {`{"Version":"2012-10-17"}`},
 		"Arn":                      {"arn:aws:iam::000000000000:role/SMUGGLED"},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateRole: %d body=%s", resp.StatusCode, body)
-	}
-	if strings.Contains(string(body), "SMUGGLED") {
-		t.Errorf("server must ignore smuggled Arn: %s", body)
-	}
-	if !strings.Contains(string(body), "arn:aws:iam::000000000000:role/x") {
-		t.Errorf("server must stamp canonical ARN: %s", body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateRole: body=%s", body)
+	assert.NotContains(t, string(body), "SMUGGLED", "server must ignore smuggled Arn: %s", body)
+	assert.Contains(t, string(body), "arn:aws:iam::000000000000:role/x", "server must stamp canonical ARN: %s", body)
 }
 
 // 15. SQL-column / JSON-blob sync on UPDATE.
@@ -550,16 +497,12 @@ func TestRegressionSQLColumnJSONBlobSyncOnUpdate(t *testing.T) {
 		"IpPermissions.1.ToPort":            {"22"},
 		"IpPermissions.1.IpRanges.1.CidrIp": {"10.0.0.0/8"},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("Authorize: %d", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "Authorize")
 
 	params := url.Values{}
 	params.Set("GroupId.1", sgID)
 	_, body = ec2PostRegression(t, srv, region, "DescribeSecurityGroups", params)
-	if !strings.Contains(string(body), "<cidrIp>10.0.0.0/8</cidrIp>") {
-		t.Errorf("rule JSON column must round-trip through indexed lookup; body=%s", body)
-	}
+	assert.Contains(t, string(body), "<cidrIp>10.0.0.0/8</cidrIp>", "rule JSON column must round-trip through indexed lookup; body=%s", body)
 }
 
 // 16. Transactional batched changes.
@@ -580,9 +523,7 @@ func TestRegressionTransactionalBatchedChanges(t *testing.T) {
 			req, _ = http.NewRequest(method, srv.URL+path, nil)
 		}
 		resp, err := srv.Client().Do(req)
-		if err != nil {
-			t.Fatalf("%s %s: %v", method, path, err)
-		}
+		require.NoError(t, err, "%s %s", method, path)
 		defer resp.Body.Close()
 		return resp, readResponseBody(t, resp)
 	}
@@ -606,15 +547,11 @@ func TestRegressionTransactionalBatchedChanges(t *testing.T) {
 		</ResourceRecordSet></Change>
 	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
 	resp, _ := r53Post(http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", mixed)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("mixed batch: %d, want 409", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "mixed batch")
 
 	// Verify NEITHER change applied.
 	_, body = r53Post(http.MethodGet, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset", "")
-	if strings.Contains(string(body), "www.example.com.") {
-		t.Errorf("transactional violation — www applied despite batch failure: %s", body)
-	}
+	assert.NotContains(t, string(body), "www.example.com.", "transactional violation — www applied despite batch failure: %s", body)
 }
 
 // TestRegressionStateGatherCollectionsComplete pins Codex pass 7
@@ -635,9 +572,7 @@ func TestRegressionStateGatherCollectionsComplete(t *testing.T) {
 		req.Header.Set("Content-Type", "application/x-amz-json-1.0")
 		req.Header.Set("X-Amz-Target", target)
 		resp, err := srv.Client().Do(req)
-		if err != nil {
-			t.Fatalf("POST %s %s: %v", svc, target, err)
-		}
+		require.NoError(t, err, "POST %s %s", svc, target)
 		defer resp.Body.Close()
 		readResponseBody(t, resp)
 	}
@@ -648,9 +583,7 @@ func TestRegressionStateGatherCollectionsComplete(t *testing.T) {
 		req.Header.Set("Content-Type", "application/x-amz-json-1.1")
 		req.Header.Set("X-Amz-Target", target)
 		resp, err := srv.Client().Do(req)
-		if err != nil {
-			t.Fatalf("POST %s %s: %v", svc, target, err)
-		}
+		require.NoError(t, err, "POST %s %s", svc, target)
 		defer resp.Body.Close()
 		readResponseBody(t, resp)
 	}
@@ -665,25 +598,15 @@ func TestRegressionStateGatherCollectionsComplete(t *testing.T) {
 		`{"QueueUrl":"http://localhost/sqs/`+region+`/000000000000/jobs","MessageBody":"hello"}`)
 
 	resp, err := http.Get(srv.URL + "/mock/state")
-	if err != nil {
-		t.Fatalf("GET /mock/state: %v", err)
-	}
+	require.NoError(t, err, "GET /mock/state")
 	defer resp.Body.Close()
 	stateBytes := readResponseBody(t, resp)
 	state := string(stateBytes)
 
-	if !strings.Contains(state, `"items"`) {
-		t.Errorf("dynamodb.items collection missing from /mock/state: %s", state)
-	}
-	if !strings.Contains(state, `"alice"`) {
-		t.Errorf("dynamodb item not surfaced in /mock/state: %s", state)
-	}
-	if !strings.Contains(state, `"messages"`) {
-		t.Errorf("sqs.messages collection missing from /mock/state: %s", state)
-	}
-	if !strings.Contains(state, `"hello"`) {
-		t.Errorf("sqs message body not surfaced in /mock/state: %s", state)
-	}
+	assert.Contains(t, state, `"items"`, "dynamodb.items collection missing from /mock/state: %s", state)
+	assert.Contains(t, state, `"alice"`, "dynamodb item not surfaced in /mock/state: %s", state)
+	assert.Contains(t, state, `"messages"`, "sqs.messages collection missing from /mock/state: %s", state)
+	assert.Contains(t, state, `"hello"`, "sqs message body not surfaced in /mock/state: %s", state)
 }
 
 // TestRegressionEC2DescribeRegionScoped pins Codex pass 8 BLOCKING #1:
@@ -709,15 +632,11 @@ func TestRegressionEC2DescribeRegionScoped(t *testing.T) {
 
 	// DescribeSubnets in us-east-1: must NOT contain eu-west-1's subnet.
 	_, body := ec2PostRegression(t, srv, "us-east-1", "DescribeSubnets", nil)
-	if strings.Contains(string(body), "eu-west-1") {
-		t.Errorf("DescribeSubnets us-east-1 leaked eu-west-1 row: %s", body)
-	}
+	assert.NotContains(t, string(body), "eu-west-1", "DescribeSubnets us-east-1 leaked eu-west-1 row: %s", body)
 
 	// DescribeInternetGateways in us-east-1: same isolation.
 	_, body = ec2PostRegression(t, srv, "us-east-1", "DescribeInternetGateways", nil)
-	if strings.Contains(string(body), "eu-west-1") {
-		t.Errorf("DescribeInternetGateways us-east-1 leaked eu-west-1 row: %s", body)
-	}
+	assert.NotContains(t, string(body), "eu-west-1", "DescribeInternetGateways us-east-1 leaked eu-west-1 row: %s", body)
 }
 
 // TestRegressionStateGatherAccountWide pins Codex pass 8 BLOCKING #2:
@@ -745,24 +664,16 @@ func TestRegressionStateGatherAccountWide(t *testing.T) {
 	smReq.Header.Set("Content-Type", "application/x-amz-json-1.1")
 	smReq.Header.Set("X-Amz-Target", "secretsmanager.CreateSecret")
 	resp, err := srv.Client().Do(smReq)
-	if err != nil {
-		t.Fatalf("CreateSecret %s: %v", oddRegion, err)
-	}
+	require.NoError(t, err, "CreateSecret %s", oddRegion)
 	resp.Body.Close()
 
 	resp, err = http.Get(srv.URL + "/mock/state")
-	if err != nil {
-		t.Fatalf("GET /mock/state: %v", err)
-	}
+	require.NoError(t, err, "GET /mock/state")
 	defer resp.Body.Close()
 	state := string(readResponseBody(t, resp))
 
-	if !strings.Contains(state, "odd-kp") {
-		t.Errorf("/mock/state.ec2.key_pairs missing odd-region key pair: %s", state)
-	}
-	if !strings.Contains(state, "odd-secret") {
-		t.Errorf("/mock/state.secretsmanager.secrets missing odd-region secret: %s", state)
-	}
+	assert.Contains(t, state, "odd-kp", "/mock/state.ec2.key_pairs missing odd-region key pair: %s", state)
+	assert.Contains(t, state, "odd-secret", "/mock/state.secretsmanager.secrets missing odd-region secret: %s", state)
 }
 
 // TestRegressionRunInstancesAutoSeedsUnknownAMI pins the
@@ -803,9 +714,7 @@ func TestRegressionRunInstancesAutoSeedsUnknownAMI(t *testing.T) {
 		"InstanceType": {"t3.micro"},
 		"MinCount":     {"1"}, "MaxCount": {"1"},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("RunInstances with well-formed unknown AMI: got %d, want 200 (auto-seed) body=%s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "RunInstances with well-formed unknown AMI (auto-seed) body=%s", body)
 
 	// Malformed AMI (no `ami-` prefix) → still rejected, the typo case.
 	resp, body = ec2PostRegression(t, srv, region, "RunInstances", url.Values{
@@ -814,9 +723,7 @@ func TestRegressionRunInstancesAutoSeedsUnknownAMI(t *testing.T) {
 		"InstanceType": {"t3.micro"},
 		"MinCount":     {"1"}, "MaxCount": {"1"},
 	})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("RunInstances with malformed AMI: got %d, want 404 body=%s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "RunInstances with malformed AMI body=%s", body)
 }
 
 // TestRegressionDescribeInstanceTypesSynthesizesForAnyType pins the
@@ -836,13 +743,10 @@ func TestRegressionDescribeInstanceTypesSynthesizesForAnyType(t *testing.T) {
 		resp, body := ec2PostRegression(t, srv, region, "DescribeInstanceTypes", url.Values{
 			"InstanceType.1": {name},
 		})
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("DescribeInstanceTypes %s: got %d, want 200 body=%s", name, resp.StatusCode, body)
+		if !assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeInstanceTypes %s body=%s", name, body) {
 			continue
 		}
-		if got := xmlExtract(body, "instanceType"); got != name {
-			t.Errorf("DescribeInstanceTypes %s: response missing instanceType, got %q in body=%s", name, got, body)
-		}
+		assert.Equal(t, name, xmlExtract(body, "instanceType"), "DescribeInstanceTypes %s: response missing instanceType in body=%s", name, body)
 	}
 }
 
@@ -870,9 +774,7 @@ func TestRegressionRunInstancesAvailableInAnyRegion(t *testing.T) {
 		"InstanceType": {"t3.micro"},
 		"MinCount":     {"1"}, "MaxCount": {"1"},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("RunInstances ap-northeast-1: got %d, want 200 body=%s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "RunInstances ap-northeast-1 body=%s", body)
 }
 
 // TestRegressionStateGatherEC2Collections pins Codex pass 10 BLOCKING
@@ -889,43 +791,34 @@ func TestRegressionStateGatherEC2Collections(t *testing.T) {
 		"CidrBlock": {"10.0.0.0/16"},
 	})
 	vpcID := xmlExtract(body, "vpcId")
-	if vpcID == "" {
-		t.Fatalf("CreateVpc: missing vpcId in %s", body)
-	}
+	require.NotEmpty(t, vpcID, "CreateVpc: missing vpcId in %s", body)
 	_, body = ec2PostRegression(t, srv, region, "CreateSubnet", url.Values{
 		"VpcId":            {vpcID},
 		"CidrBlock":        {"10.0.1.0/24"},
 		"AvailabilityZone": {"us-east-1a"},
 	})
 	subnetID := xmlExtract(body, "subnetId")
-	if subnetID == "" {
-		t.Fatalf("CreateSubnet: missing subnetId in %s", body)
-	}
+	require.NotEmpty(t, subnetID, "CreateSubnet: missing subnetId in %s", body)
 
 	// Internet gateway — provides a target for the default route.
 	_, body = ec2PostRegression(t, srv, region, "CreateInternetGateway", url.Values{})
 	igwID := xmlExtract(body, "internetGatewayId")
-	if igwID == "" {
-		t.Fatalf("CreateInternetGateway: missing internetGatewayId in %s", body)
-	}
+	require.NotEmpty(t, igwID, "CreateInternetGateway: missing internetGatewayId in %s", body)
 
 	// Route table.
 	_, body = ec2PostRegression(t, srv, region, "CreateRouteTable", url.Values{
 		"VpcId": {vpcID},
 	})
 	rtID := xmlExtract(body, "routeTableId")
-	if rtID == "" {
-		t.Fatalf("CreateRouteTable: missing routeTableId in %s", body)
-	}
+	require.NotEmpty(t, rtID, "CreateRouteTable: missing routeTableId in %s", body)
 
 	// Route on the table — 0.0.0.0/0 → IGW.
-	if resp, body := ec2PostRegression(t, srv, region, "CreateRoute", url.Values{
+	r, b := ec2PostRegression(t, srv, region, "CreateRoute", url.Values{
 		"RouteTableId":         {rtID},
 		"DestinationCidrBlock": {"0.0.0.0/0"},
 		"GatewayId":            {igwID},
-	}); resp.StatusCode != http.StatusOK {
-		t.Fatalf("CreateRoute: %d body=%s", resp.StatusCode, body)
-	}
+	})
+	require.Equal(t, http.StatusOK, r.StatusCode, "CreateRoute: body=%s", b)
 
 	// Subnet association.
 	_, body = ec2PostRegression(t, srv, region, "AssociateRouteTable", url.Values{
@@ -933,23 +826,17 @@ func TestRegressionStateGatherEC2Collections(t *testing.T) {
 		"SubnetId":     {subnetID},
 	})
 	assocID := xmlExtract(body, "associationId")
-	if assocID == "" {
-		t.Fatalf("AssociateRouteTable: missing associationId in %s", body)
-	}
+	require.NotEmpty(t, assocID, "AssociateRouteTable: missing associationId in %s", body)
 
 	// EIP allocation.
 	_, body = ec2PostRegression(t, srv, region, "AllocateAddress", url.Values{
 		"Domain": {"vpc"},
 	})
 	allocID := xmlExtract(body, "allocationId")
-	if allocID == "" {
-		t.Fatalf("AllocateAddress: missing allocationId in %s", body)
-	}
+	require.NotEmpty(t, allocID, "AllocateAddress: missing allocationId in %s", body)
 
 	resp, err := http.Get(srv.URL + "/mock/state")
-	if err != nil {
-		t.Fatalf("GET /mock/state: %v", err)
-	}
+	require.NoError(t, err, "GET /mock/state")
 	defer resp.Body.Close()
 	state := string(readResponseBody(t, resp))
 
@@ -960,15 +847,11 @@ func TestRegressionStateGatherEC2Collections(t *testing.T) {
 		`"route_table_associations"`,
 		`"eips"`,
 	} {
-		if !strings.Contains(state, want) {
-			t.Errorf("/mock/state.ec2 missing collection %s: %s", want, state)
-		}
+		assert.Contains(t, state, want, "/mock/state.ec2 missing collection %s: %s", want, state)
 	}
 	// Each created id must surface in the corresponding collection.
 	for _, want := range []string{rtID, assocID, allocID, "0.0.0.0/0", igwID} {
-		if !strings.Contains(state, want) {
-			t.Errorf("/mock/state.ec2 missing %q: %s", want, state)
-		}
+		assert.Contains(t, state, want, "/mock/state.ec2 missing %q: %s", want, state)
 	}
 }
 
@@ -991,9 +874,7 @@ func TestRegressionStateGatherRoute53AliasTarget(t *testing.T) {
 			req, _ = http.NewRequest(method, srv.URL+path, nil)
 		}
 		resp, err := srv.Client().Do(req)
-		if err != nil {
-			t.Fatalf("%s %s: %v", method, path, err)
-		}
+		require.NoError(t, err, "%s %s", method, path)
 		defer resp.Body.Close()
 		return resp, readResponseBody(t, resp)
 	}
@@ -1019,17 +900,11 @@ func TestRegressionStateGatherRoute53AliasTarget(t *testing.T) {
 
 	// /mock/state.route53.record_sets must include alias_target.
 	resp, err := http.Get(srv.URL + "/mock/state")
-	if err != nil {
-		t.Fatalf("GET /mock/state: %v", err)
-	}
+	require.NoError(t, err, "GET /mock/state")
 	defer resp.Body.Close()
 	state := string(readResponseBody(t, resp))
-	if !strings.Contains(state, "alias_target") {
-		t.Errorf("alias_target field missing from /mock/state.route53.record_sets: %s", state)
-	}
-	if !strings.Contains(state, "d111111abcdef8.cloudfront.net.") {
-		t.Errorf("AliasTarget DNSName not surfaced in /mock/state: %s", state)
-	}
+	assert.Contains(t, state, "alias_target", "alias_target field missing from /mock/state.route53.record_sets: %s", state)
+	assert.Contains(t, state, "d111111abcdef8.cloudfront.net.", "AliasTarget DNSName not surfaced in /mock/state: %s", state)
 }
 
 // TestRegressionPutSecretValueRefusedAfterForceDelete pins Codex
@@ -1049,9 +924,7 @@ func TestRegressionPutSecretValueRefusedAfterForceDelete(t *testing.T) {
 		req.Header.Set("Content-Type", "application/x-amz-json-1.1")
 		req.Header.Set("X-Amz-Target", "secretsmanager."+target)
 		resp, err := srv.Client().Do(req)
-		if err != nil {
-			t.Fatalf("POST %s: %v", target, err)
-		}
+		require.NoError(t, err, "POST %s", target)
 		defer resp.Body.Close()
 		return resp, readResponseBody(t, resp)
 	}
@@ -1060,9 +933,7 @@ func TestRegressionPutSecretValueRefusedAfterForceDelete(t *testing.T) {
 	post("DeleteSecret", `{"SecretId":"db/password","ForceDeleteWithoutRecovery":true}`)
 
 	resp, body := post("PutSecretValue", `{"SecretId":"db/password","SecretString":"sneak"}`)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("PutSecretValue after force-delete: got %d, want 404 body=%s", resp.StatusCode, body)
-	}
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "PutSecretValue after force-delete; body=%s", body)
 }
 
 // TestRegressionSecretsManagerTerminalStateWireShape pins Codex
@@ -1081,9 +952,7 @@ func TestRegressionSecretsManagerTerminalStateWireShape(t *testing.T) {
 		req.Header.Set("Content-Type", "application/x-amz-json-1.1")
 		req.Header.Set("X-Amz-Target", "secretsmanager."+target)
 		resp, err := srv.Client().Do(req)
-		if err != nil {
-			t.Fatalf("POST %s: %v", target, err)
-		}
+		require.NoError(t, err, "POST %s", target)
 		defer resp.Body.Close()
 		return resp, readResponseBody(t, resp)
 	}
@@ -1092,12 +961,8 @@ func TestRegressionSecretsManagerTerminalStateWireShape(t *testing.T) {
 	post("DeleteSecret", `{"SecretId":"db/pwd","ForceDeleteWithoutRecovery":true}`)
 
 	resp, body := post("RestoreSecret", `{"SecretId":"db/pwd"}`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("RestoreSecret on destroyed: got %d, want 409", resp.StatusCode)
-	}
-	if !strings.Contains(string(body), "InvalidRequestException") {
-		t.Errorf("RestoreSecret terminal-state body: must carry InvalidRequestException, got: %s", body)
-	}
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "RestoreSecret on destroyed")
+	assert.Contains(t, string(body), "InvalidRequestException", "RestoreSecret terminal-state body: must carry InvalidRequestException, got: %s", body)
 }
 
 // ----- test helpers (regression-suite local) -----
@@ -1107,9 +972,7 @@ const regressionVersion = "2010-05-08"
 func newTestServerForRegression(t *testing.T) *httptest.Server {
 	t.Helper()
 	app, err := handlers.NewApplication(":memory:", false)
-	if err != nil {
-		t.Fatalf("NewApplication: %v", err)
-	}
+	require.NoError(t, err, "NewApplication")
 	srv := httptest.NewServer(app.Router())
 	t.Cleanup(func() {
 		srv.Close()
@@ -1128,9 +991,7 @@ func ec2PostRegression(t *testing.T, srv *httptest.Server, region, action string
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/ec2/region/"+region, strings.NewReader(params.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("POST /ec2/region/%s %s: %v", region, action, err)
-	}
+	require.NoError(t, err, "POST /ec2/region/%s %s", region, action)
 	defer resp.Body.Close()
 	body := readResponseBody(t, resp)
 	return resp, body
@@ -1161,9 +1022,7 @@ func iamPost(t *testing.T, srv *httptest.Server, action string, params url.Value
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/iam", strings.NewReader(params.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("POST /iam %s: %v", action, err)
-	}
+	require.NoError(t, err, "POST /iam %s", action)
 	defer resp.Body.Close()
 	body := readResponseBody(t, resp)
 	return resp, body
@@ -1195,9 +1054,7 @@ func createRole(t *testing.T, srv *httptest.Server, name string) {
 		"RoleName":                 {name},
 		"AssumeRolePolicyDocument": {`{"Version":"2012-10-17"}`},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("regression seed: createRole(%s): %d body=%s", name, resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "regression seed: createRole(%s) body=%s", name, body)
 }
 
 func createPolicy(t *testing.T, srv *httptest.Server, name string) {
@@ -1206,7 +1063,5 @@ func createPolicy(t *testing.T, srv *httptest.Server, name string) {
 		"PolicyName":     {name},
 		"PolicyDocument": {`{"Version":"2012-10-17"}`},
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("regression seed: createPolicy(%s): %d body=%s", name, resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "regression seed: createPolicy(%s) body=%s", name, body)
 }
