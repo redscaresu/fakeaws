@@ -71,6 +71,7 @@ fakeaws/
   `examples/{working,misconfigured,updates}/` registers it for the
   smoke gate (S43-T12). No per-service smoke ticket. Detail in
   **Provider smoke harness** below.
+- **Assertion convention (project-wide)**: default to `github.com/stretchr/testify` for assertions where possible. `assert.Equal` / `require.NoError` / `assert.Contains` over `if x != y { t.Fatalf(...) }`. Use `require` when a failure should stop the test (setup steps, anything whose failure would cause downstream nil-deref / panic). Use `assert` otherwise so multiple failures surface in one run. Don't bare-literal HTTP status codes — `http.StatusNoContent` not `204`. The qualifier "where possible" is real: if an if-fatalf block carries a fundamentally custom error message the assertion library can't express, leave it stdlib — don't force conversions that hurt readability. Same rule lives in every sibling fake's AGENTS.md.
 
 ## Provider smoke harness
 
