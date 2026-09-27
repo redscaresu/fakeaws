@@ -86,6 +86,39 @@ jobs:
       - working-directory: fakeaws
         run: go test ./internal/audit/ -run TestFullCoverageAudit
 
+  # provider-smoke drives the real hashicorp/aws provider through every
+  # examples/{working,misconfigured,updates}/ dir against a local fakeaws
+  # (examples/provider_smoke_test.go). The examples hardcode :8082. Fake
+  # credentials only; examples/known_red_test.go lists the known-red ones.
+  provider-smoke:
+    runs-on: ubuntu-latest
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tofu-plugin-cache
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: 1.12.6
+          tofu_wrapper: false
+      - name: Start fakeaws on :8082
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          go build -o fakeaws ./cmd/fakeaws
+          nohup ./fakeaws --port 8082 > fakeaws.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8082/healthz && exit 0
+            sleep 1
+          done
+          echo "fakeaws did not answer /healthz" >&2
+          cat fakeaws.log
+          exit 1
+      - run: INFRAFACTORY_ENABLE_E2E=1 go test ./examples/ -v -count=1 -timeout 30m
+      - if: failure()
+        run: cat fakeaws.log
+
   # Aggregate handlers/... line coverage. Emits the metric on every push.
   # The strict >= 80% threshold is a PHASE-EXIT gate enforced by S48-T7's
   # TestFullCoverageAudit at end-of-phase, not on every commit (per

@@ -165,13 +165,13 @@ Every directory under `examples/` is an executable contract against a real Terra
 | `examples/misconfigured/<svc>/` | `apply` MUST fail with the documented AWS error code; if `expected.txt` is present, the error output MUST contain that fragment |
 | `examples/updates/<svc>/` | `apply -var-file=v1.tfvars → plan no-op → apply -var-file=v2.tfvars → plan no-op → destroy` |
 
-`examples/provider_smoke_test.go` walks the three trees with `runtime.Caller` and registers each subdirectory as its own `t.Run` sub-test. Adding a directory adds a test — no per-example test wiring. The harness assumes a fakeaws server is reachable at `FAKEAWS_URL` (default `http://127.0.0.1:8082`); CI runs it after `make fakeaws-up` from the infrafactory Makefile.
+`examples/provider_smoke_test.go` walks the three trees with `runtime.Caller` and registers each subdirectory as its own `t.Run` sub-test. Adding a directory adds a test — no per-example test wiring. The harness needs a fakeaws server on `http://127.0.0.1:8082` (the examples hardcode it) and resets it before each example; the `provider-smoke` job in this repo's CI builds and starts one, then runs `INFRAFACTORY_ENABLE_E2E=1 go test ./examples/` on every pull request.
 
 The **idempotency gate** (`plan -detailed-exitcode 0`) is the strongest compatibility signal: if fakeaws returns a single field with the wrong case, type, or default, the provider sees drift on the second plan and the test fails. Wire-shape parity across the nine S43–S48 services (S3, IAM, EC2, VPC, RDS, DynamoDB, SQS, Route53, Secrets Manager) was closed by the 17-pass codex review loop driving this gate.
 
-### 2. No allowlist — every example must pass
+### 2. Known-red examples, tracked in code
 
-mockway and fakegcp use an `examples/known_broken.yaml` ratchet for examples whose idempotency gate is currently expected to fail. fakeaws does not: the S43–S48 codex review loop closed at pass 17 with zero allowlist entries, so the smoke harness enforces the working-tree contract strictly. Any new example that drifts must be fixed before merge, not allowlisted. If a regression batch ever needs an allowlist, copy the pattern from `fakegcp/examples/provider_smoke_test.go` (ratchet-only-tighten: entries can only be REMOVED).
+`examples/known_red_test.go::knownRed` lists the examples that are red today, each with the stage it fails at, a fragment of the failure output and an owner story. A listed example must fail exactly that way; one that starts passing fails the harness until its entry is removed, and one that fails any other way fails too. Everything not listed must pass.
 
 ### 3. Cross-repo e2e from infrafactory
 
