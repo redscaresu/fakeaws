@@ -418,3 +418,14 @@ entries:
     misconfigured_exempt_reason: "Versions on a missing secret 404 — covered in TestSecretsManager_PutSecretValue (handler test). Version-stage rotation is the load-bearing contract, asserted in TestSecretsManager_VersionStages."
     updates_dir_name: update_secret_value
     integration_test_func_name: "^TestSecretsManager_VersionStages$"
+
+  # STS: GetCallerIdentity only; every other action 501s.
+  # scenario_resource_type omitted: a data source, not a generator resource.
+  - aws_service: sts
+    aws_resource_type: aws_caller_identity
+    working_dir_name: env_endpoints
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "GetCallerIdentity takes no input to misconfigure; a wrong account fails working/env_endpoints via allowed_account_ids (Arn) and its precondition (Account)."
+    updates_exempt: true
+    updates_exempt_reason: "aws_caller_identity is a read-only data source with nothing to update."
+    integration_test_func_name: "^TestContract_sts_caller_identity_fake_account$"

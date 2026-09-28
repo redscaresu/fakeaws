@@ -21,8 +21,8 @@ import (
 // fakeaws dies here instead of reaching AWS.
 const deadProxy = "http://127.0.0.1:9"
 
-// endpointEnv maps a service id (handlers.LandedServices, plus STS and
-// SSM ahead of their handlers) to its AWS_ENDPOINT_URL_<SVC> suffix and
+// endpointEnv maps a service id (handlers.LandedServices, plus SSM
+// ahead of its handler) to its AWS_ENDPOINT_URL_<SVC> suffix and
 // the fakeaws URL the examples' endpoints blocks use.
 var endpointEnv = map[string]struct{ suffix, url string }{
 	"dynamodb":       {"DYNAMODB", defaultFakeAWSURL + "/dynamodb/region/us-east-1"},
@@ -137,7 +137,7 @@ var endpointLine = regexp.MustCompile(`(?m)^\s*(\w+)\s*=\s*"(http://127\.0\.0\.1
 
 func TestSmokeEnvEndpointsCoverLandedServices(t *testing.T) {
 	env := smokeEnv(t, "apply")
-	for _, id := range append(slices.Clone(handlers.LandedServices), "sts", "ssm") {
+	for _, id := range append(slices.Clone(handlers.LandedServices), "ssm") {
 		e, ok := endpointEnv[id]
 		if !assert.True(t, ok, "service %q has no AWS_ENDPOINT_URL_<SVC> in smokeEnv", id) {
 			continue

@@ -50,9 +50,10 @@ fakeaws/
 
 ## Key conventions
 
-- **Wire formats vary**: 5 distinct shapes across 9 services. XML (S3, Route53),
-  Query-RPC (EC2, RDS, IAM), JSON 1.0 with x-amz-target (SQS), JSON 1.1 with
-  x-amz-target (DynamoDB, SecretsManager), JSON-REST (EKS). The `awsproto/`
+- **Wire formats vary**: 5 distinct shapes across 11 services. XML (S3, Route53),
+  Query-RPC (EC2, RDS, IAM, STS), JSON 1.0 with x-amz-target (SQS), JSON 1.1 with
+  x-amz-target (DynamoDB, SecretsManager, KMS), JSON-REST (EKS). STS models
+  GetCallerIdentity only (account `000000000000`); other STS actions 501. The `awsproto/`
   helper (S43-T2) handles the marshalling — handler files focus on resource
   semantics + FK validation.
 - **Per-service ARN builders**: real AWS ARN formats vary per service.
