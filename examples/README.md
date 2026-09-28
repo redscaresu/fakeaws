@@ -140,6 +140,7 @@ Configs that apply, can be updated, and destroy cleanly. These show the right wa
 | `working/route53` | Route53 hosted zone + record set |
 | `working/s3_bucket` | S3 bucket + server-side encryption configuration (sub-resource reads use SeaweedFS in cross-repo infrafactory tests, see M59) |
 | `working/secrets_manager` | Secrets Manager secret + initial version (M62: ARN-or-name SecretId, epoch timestamps, full lifecycle) |
+| `working/ssm_parameter` | SSM String + tagged SecureString parameters, and `data.aws_ssm_parameter` reading the public AL2023 AMI parameter (resolves to the AL2023 fixture) |
 | `working/sqs_queue` | SQS queue with visibility + retention + redrive policy |
 | `working/vpc_network` | VPC + subnets + internet gateway + route table + security group (the dependency chain) |
 
@@ -153,6 +154,7 @@ Valid Terraform that produces a clean plan, but the apply fails because fakeaws 
 | `misconfigured/iam_attachment_missing_role` | Role-policy attachment references a role that doesn't exist |
 | `misconfigured/instance_missing_subnet` | EC2 instance references a non-existent subnet |
 | `misconfigured/rds_missing_subnet_group` | RDS instance references a DB subnet group that hasn't been declared |
+| `misconfigured/ssm_parameter_duplicate` | Two `aws_ssm_parameter` resources claim one name; the second create is refused with `ParameterAlreadyExists` |
 | `misconfigured/route53_apex_cname` | CNAME record on the apex of a hosted zone (AWS rejects; CNAME at apex isn't valid per RFC 1034) |
 
 ### updates
