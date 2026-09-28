@@ -1,6 +1,7 @@
 package handlers_test
 
 import (
+	"encoding/xml"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -177,3 +178,95 @@ func TestRDS_ParameterGroupCRUD(t *testing.T) {
 // TestContract_rds_dbi_resource_id_distinct_from_identifier lives in
 // handlers/rds_internal_test.go because it exercises the unexported
 // dbiResourceIDFor helper directly.
+
+// rdsClusterRead is the part of a DescribeDBClusters member
+// aws_rds_cluster compares with its config.
+type rdsClusterRead struct {
+	EngineMode            string   `xml:"EngineMode"`
+	Port                  int      `xml:"Port"`
+	BackupRetentionPeriod int      `xml:"BackupRetentionPeriod"`
+	PreferredBackupWindow string   `xml:"PreferredBackupWindow"`
+	DatabaseName          string   `xml:"DatabaseName"`
+	StorageEncrypted      bool     `xml:"StorageEncrypted"`
+	AvailabilityZones     []string `xml:"AvailabilityZones>AvailabilityZone"`
+	VpcSecurityGroupIds   []string `xml:"VpcSecurityGroups>VpcSecurityGroupMembership>VpcSecurityGroupId"`
+}
+
+func describeCluster(t *testing.T, srv *httptest.Server, id string) rdsClusterRead {
+	t.Helper()
+	resp, body := rdsCall(t, srv, "us-east-1", "DescribeDBClusters", url.Values{"DBClusterIdentifier": {id}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeDBClusters: %s", body)
+	var out struct {
+		Clusters []rdsClusterRead `xml:"DescribeDBClustersResult>DBClusters>DBCluster"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	require.Len(t, out.Clusters, 1, "%s", body)
+	return out.Clusters[0]
+}
+
+// TestRDS_ClusterReadsBackWhatCreateSet: aws_rds_cluster plans a diff
+// on each of these that reads back other than it set, and replaces the
+// cluster over engine_mode; left unset, RDS's defaults come back.
+func TestRDS_ClusterReadsBackWhatCreateSet(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, body := rdsCall(t, srv, "us-east-1", "CreateDBCluster", url.Values{
+		"DBClusterIdentifier": {"set"}, "Engine": {"aurora-postgresql"},
+		"Port": {"5433"}, "BackupRetentionPeriod": {"7"}, "PreferredBackupWindow": {"03:00-04:00"},
+		"DatabaseName": {"app"}, "StorageEncrypted": {"true"},
+		"AvailabilityZones.AvailabilityZone.1":     {"us-east-1a"},
+		"VpcSecurityGroupIds.VpcSecurityGroupId.1": {"sg-1"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateDBCluster: %s", body)
+	assert.Equal(t, rdsClusterRead{
+		EngineMode: "provisioned", Port: 5433, BackupRetentionPeriod: 7, PreferredBackupWindow: "03:00-04:00",
+		DatabaseName: "app", StorageEncrypted: true,
+		AvailabilityZones: []string{"us-east-1a"}, VpcSecurityGroupIds: []string{"sg-1"},
+	}, describeCluster(t, srv, "set"))
+
+	resp, body = rdsCall(t, srv, "us-east-1", "CreateDBCluster", url.Values{"DBClusterIdentifier": {"defaults"}, "Engine": {"aurora-mysql"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateDBCluster: %s", body)
+	assert.Equal(t, rdsClusterRead{
+		EngineMode: "provisioned", Port: 3306, BackupRetentionPeriod: 1, PreferredBackupWindow: "07:00-08:00",
+	}, describeCluster(t, srv, "defaults"))
+}
+
+// TestRDS_ClusterReadAndDeletePaths: the calls aws_rds_cluster and
+// aws_rds_cluster_parameter_group make around their reads and deletes.
+func TestRDS_ClusterReadAndDeletePaths(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+	rdsCall(t, srv, region, "CreateDBClusterParameterGroup", url.Values{
+		"DBClusterParameterGroupName": {"cpg"}, "DBParameterGroupFamily": {"aurora-postgresql15"}, "Description": {"d"},
+	})
+	resp, body := rdsCall(t, srv, region, "DescribeDBClusterParameters", url.Values{"DBClusterParameterGroupName": {"cpg"}, "Source": {"user"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeDBClusterParameters: %s", body)
+	assert.Contains(t, string(body), "<DescribeDBClusterParametersResult>", "%s", body)
+	resp, body = rdsCall(t, srv, region, "DescribeDBClusterParameters", url.Values{"DBClusterParameterGroupName": {"nope"}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeDBClusterParameters missing")
+	assert.Contains(t, string(body), "<Code>DBParameterGroupNotFound</Code>", "%s", body)
+
+	resp, body = rdsCall(t, srv, region, "DescribeGlobalClusters", url.Values{"Filters.Filter.1.Name": {"db-cluster-id"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeGlobalClusters: %s", body)
+	assert.NotContains(t, string(body), "<GlobalClusterMember>", "%s", body)
+
+	resp, body = rdsCall(t, srv, region, "CreateDBCluster", url.Values{
+		"DBClusterIdentifier": {"c"}, "Engine": {"aurora-postgresql"}, "DBClusterParameterGroupName": {"cpg"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateDBCluster: %s", body)
+	resp, body = rdsCall(t, srv, region, "DeleteDBClusterParameterGroup", url.Values{"DBClusterParameterGroupName": {"cpg"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "DeleteDBClusterParameterGroup in use")
+	assert.Contains(t, string(body), "<Code>InvalidDBParameterGroupState</Code>", "%s", body)
+
+	resp, body = rdsCall(t, srv, region, "DeleteDBCluster", url.Values{"DBClusterIdentifier": {"c"}, "SkipFinalSnapshot": {"true"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteDBCluster: %s", body)
+	assert.Contains(t, string(body), "<Status>deleting</Status>", "DeleteDBCluster returns the deleting cluster: %s", body)
+	resp, body = rdsCall(t, srv, region, "DeleteDBCluster", url.Values{"DBClusterIdentifier": {"c"}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteDBCluster missing")
+	assert.Contains(t, string(body), "<Code>DBClusterNotFoundFault</Code>", "%s", body)
+
+	resp, _ = rdsCall(t, srv, region, "DeleteDBClusterParameterGroup", url.Values{"DBClusterParameterGroupName": {"cpg"}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteDBClusterParameterGroup")
+	resp, body = rdsCall(t, srv, region, "DeleteDBClusterParameterGroup", url.Values{"DBClusterParameterGroupName": {"cpg"}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteDBClusterParameterGroup missing")
+	assert.Contains(t, string(body), "<Code>DBParameterGroupNotFound</Code>", "%s", body)
+}

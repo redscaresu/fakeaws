@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"cmp"
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
@@ -80,6 +81,8 @@ func (app *Application) handleRDS(w http.ResponseWriter, r *http.Request) {
 		app.rdsDescribeDBClusterParameterGroups(w, account, region, req)
 	case "DeleteDBClusterParameterGroup":
 		app.rdsDeleteDBClusterParameterGroup(w, account, region, req)
+	case "DescribeDBClusterParameters":
+		app.rdsDescribeDBClusterParameters(w, account, region, req)
 
 	// ----- DB Cluster -----
 	case "CreateDBCluster":
@@ -88,6 +91,10 @@ func (app *Application) handleRDS(w http.ResponseWriter, r *http.Request) {
 		app.rdsDescribeDBClusters(w, account, region, req)
 	case "DeleteDBCluster":
 		app.rdsDeleteDBCluster(w, account, region, req)
+	case "DescribeGlobalClusters":
+		// aws_rds_cluster's read looks up the global cluster a
+		// provisioned cluster belongs to; fakeaws models none.
+		awsproto.WriteQueryRPCResponse(w, "DescribeGlobalClusters", &rdsDescribeGlobalClustersResult{})
 
 	// ----- DB Instance -----
 	case "CreateDBInstance":
@@ -141,9 +148,11 @@ type rdsTaggedKind struct {
 }
 
 var rdsTaggedKinds = map[string]rdsTaggedKind{
-	"db":     {repository.TagsRDSInstance, "DBInstanceNotFound"},
-	"pg":     {repository.TagsRDSParameterGroup, "DBParameterGroupNotFound"},
-	"subgrp": {repository.TagsRDSSubnetGroup, "DBSubnetGroupNotFoundFault"},
+	"db":         {repository.TagsRDSInstance, "DBInstanceNotFound"},
+	"pg":         {repository.TagsRDSParameterGroup, "DBParameterGroupNotFound"},
+	"subgrp":     {repository.TagsRDSSubnetGroup, "DBSubnetGroupNotFoundFault"},
+	"cluster":    {repository.TagsRDSCluster, "DBClusterNotFoundFault"},
+	"cluster-pg": {repository.TagsRDSClusterParamGroup, "DBParameterGroupNotFound"},
 }
 
 // rdsTagTarget resolves a tag call's ResourceName ARN. It writes the
@@ -217,6 +226,10 @@ type rdsParameterXML struct {
 
 type rdsDescribeDBParametersResult struct {
 	Parameters []rdsParameterXML `xml:"Parameters>Parameter"`
+}
+
+type rdsDescribeGlobalClustersResult struct {
+	GlobalClusters []struct{} `xml:"GlobalClusters>GlobalClusterMember"`
 }
 
 // ----- DB Subnet Group -----
@@ -442,6 +455,12 @@ func (app *Application) rdsCreateDBClusterParameterGroup(w http.ResponseWriter, 
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
+	if err := app.tagCreated(account, repository.TagsRDSClusterParamGroup, pg.ARN, queryTags(req.Params, "Tags.Tag."), func() error {
+		return app.repo.DeleteDBClusterParameterGroup(account, region, name)
+	}); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
 	awsproto.WriteQueryRPCResponse(w, "CreateDBClusterParameterGroup",
 		&rdsCreateClusterParamGroupResult{DBClusterParameterGroup: rdsClusterParamGroupXML{
 			DBClusterParameterGroupName: pg.Name,
@@ -457,9 +476,7 @@ func (app *Application) rdsDescribeDBClusterParameterGroups(w http.ResponseWrite
 	if name != "" {
 		pg, err := app.repo.GetDBClusterParameterGroup(account, region, name)
 		if err != nil {
-			awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
-				"DBParameterGroupNotFound",
-				fmt.Sprintf("DBClusterParameterGroup %s not found.", name))
+			rdsWriteClusterParamGroupNotFound(w, name)
 			return
 		}
 		out.DBClusterParameterGroups = append(out.DBClusterParameterGroups, rdsClusterParamGroupXML{
@@ -473,25 +490,74 @@ func (app *Application) rdsDescribeDBClusterParameterGroups(w http.ResponseWrite
 }
 
 func (app *Application) rdsDeleteDBClusterParameterGroup(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteDBClusterParameterGroup(account, region, req.Params.Get("DBClusterParameterGroupName")); err != nil {
+	name := req.Params.Get("DBClusterParameterGroupName")
+	err := app.repo.DeleteDBClusterParameterGroup(account, region, name)
+	switch {
+	case errors.Is(err, models.ErrInUse):
+		// The code terraform-provider-aws retries the delete on, as
+		// for a DB parameter group.
+		awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusBadRequest,
+			"InvalidDBParameterGroupState",
+			fmt.Sprintf("One or more DB clusters are still members of parameter group %s.", name))
+		return
+	case errors.Is(err, models.ErrNotFound):
+		rdsWriteClusterParamGroupNotFound(w, name)
+		return
+	case err != nil:
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteDBClusterParameterGroup", nil)
 }
 
+func rdsWriteClusterParamGroupNotFound(w http.ResponseWriter, name string) {
+	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
+		"DBParameterGroupNotFound", fmt.Sprintf("DBClusterParameterGroup %s not found.", name))
+}
+
+// rdsDescribeDBClusterParameters answers aws_rds_cluster_parameter_group's
+// read with no parameters, as DescribeDBParameters does: fakeaws keeps
+// none, so every one is at its family default.
+func (app *Application) rdsDescribeDBClusterParameters(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	name := req.Params.Get("DBClusterParameterGroupName")
+	if _, err := app.repo.GetDBClusterParameterGroup(account, region, name); err != nil {
+		rdsWriteClusterParamGroupNotFound(w, name)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "DescribeDBClusterParameters", &rdsDescribeDBParametersResult{Parameters: []rdsParameterXML{}})
+}
+
 // ----- DB Cluster -----
 
 type rdsClusterXML struct {
-	DBClusterIdentifier     string `xml:"DBClusterIdentifier"`
-	Engine                  string `xml:"Engine"`
-	EngineVersion           string `xml:"EngineVersion,omitempty"`
-	Status                  string `xml:"Status"`
-	DBSubnetGroup           string `xml:"DBSubnetGroup,omitempty"`
-	DBClusterParameterGroup string `xml:"DBClusterParameterGroup,omitempty"`
-	MasterUsername          string `xml:"MasterUsername,omitempty"`
-	DeletionProtection      bool   `xml:"DeletionProtection"`
-	DBClusterArn            string `xml:"DBClusterArn"`
+	DBClusterIdentifier              string                   `xml:"DBClusterIdentifier"`
+	Engine                           string                   `xml:"Engine"`
+	EngineVersion                    string                   `xml:"EngineVersion,omitempty"`
+	EngineMode                       string                   `xml:"EngineMode"`
+	Status                           string                   `xml:"Status"`
+	DBSubnetGroup                    string                   `xml:"DBSubnetGroup,omitempty"`
+	DBClusterParameterGroup          string                   `xml:"DBClusterParameterGroup,omitempty"`
+	MasterUsername                   string                   `xml:"MasterUsername,omitempty"`
+	DatabaseName                     string                   `xml:"DatabaseName,omitempty"`
+	Endpoint                         string                   `xml:"Endpoint"`
+	ReaderEndpoint                   string                   `xml:"ReaderEndpoint"`
+	Port                             int                      `xml:"Port"`
+	BackupRetentionPeriod            int                      `xml:"BackupRetentionPeriod"`
+	PreferredBackupWindow            string                   `xml:"PreferredBackupWindow"`
+	PreferredMaintenanceWindow       string                   `xml:"PreferredMaintenanceWindow"`
+	StorageEncrypted                 bool                     `xml:"StorageEncrypted"`
+	CopyTagsToSnapshot               bool                     `xml:"CopyTagsToSnapshot"`
+	IAMDatabaseAuthenticationEnabled bool                     `xml:"IAMDatabaseAuthenticationEnabled"`
+	AvailabilityZones                []string                 `xml:"AvailabilityZones>AvailabilityZone,omitempty"`
+	VpcSecurityGroups                []rdsVpcSecurityGroupXML `xml:"VpcSecurityGroups>VpcSecurityGroupMembership,omitempty"`
+	DeletionProtection               bool                     `xml:"DeletionProtection"`
+	DBClusterArn                     string                   `xml:"DBClusterArn"`
+	TagList                          []rdsTagXML              `xml:"TagList>Tag,omitempty"`
+}
+
+type rdsVpcSecurityGroupXML struct {
+	VpcSecurityGroupId string `xml:"VpcSecurityGroupId"`
+	Status             string `xml:"Status"`
 }
 
 type rdsCreateClusterResult struct {
@@ -502,23 +568,58 @@ type rdsDescribeClustersResult struct {
 	DBClusters []rdsClusterXML `xml:"DBClusters>DBCluster"`
 }
 
-func rdsClusterToXML(c *repository.RDSCluster) rdsClusterXML {
-	return rdsClusterXML{
-		DBClusterIdentifier:     c.ID,
-		Engine:                  c.Engine,
-		EngineVersion:           c.EngineVersion,
-		Status:                  c.State,
-		DBSubnetGroup:           c.SubnetGroupName,
-		DBClusterParameterGroup: c.ClusterParameterGroupName,
-		MasterUsername:          c.MasterUsername,
-		DeletionProtection:      c.DeletionProtection,
-		DBClusterArn:            c.ARN,
+// rdsClusterToXML echoes what CreateDBCluster persisted, and RDS's
+// defaults for what it was not given: aws_rds_cluster reads each one
+// back, and plans a replacement when engine_mode reads back other than
+// "provisioned".
+func (app *Application) rdsClusterToXML(account string, c *repository.RDSCluster) rdsClusterXML {
+	x := rdsClusterXML{
+		DBClusterIdentifier:              c.ID,
+		Engine:                           c.Engine,
+		EngineVersion:                    c.EngineVersion,
+		EngineMode:                       cmp.Or(c.EngineMode, "provisioned"),
+		Status:                           c.State,
+		DBSubnetGroup:                    c.SubnetGroupName,
+		DBClusterParameterGroup:          c.ClusterParameterGroupName,
+		MasterUsername:                   c.MasterUsername,
+		DatabaseName:                     c.DatabaseName,
+		Endpoint:                         fmt.Sprintf("%s.cluster.fakeaws.local", c.ID),
+		ReaderEndpoint:                   fmt.Sprintf("%s.cluster-ro.fakeaws.local", c.ID),
+		Port:                             cmp.Or(c.Port, rdsDefaultPort(c.Engine)),
+		BackupRetentionPeriod:            cmp.Or(c.BackupRetentionPeriod, 1),
+		PreferredBackupWindow:            cmp.Or(c.PreferredBackupWindow, "07:00-08:00"),
+		PreferredMaintenanceWindow:       cmp.Or(c.PreferredMaintenanceWindow, "sun:08:00-sun:09:00"),
+		StorageEncrypted:                 c.StorageEncrypted,
+		CopyTagsToSnapshot:               c.CopyTagsToSnapshot,
+		IAMDatabaseAuthenticationEnabled: c.IAMDatabaseAuthenticationEnabled,
+		AvailabilityZones:                c.AvailabilityZones,
+		DeletionProtection:               c.DeletionProtection,
+		DBClusterArn:                     c.ARN,
 	}
+	for _, id := range c.VPCSecurityGroupIDs {
+		x.VpcSecurityGroups = append(x.VpcSecurityGroups, rdsVpcSecurityGroupXML{VpcSecurityGroupId: id, Status: "active"})
+	}
+	// aws_rds_cluster reads its tags from TagList. A deleted cluster
+	// has none to show.
+	if tags, err := app.repo.ResourceTags(account, repository.TagsRDSCluster, c.ARN); err == nil {
+		x.TagList = rdsTags(tags)
+	}
+	return x
+}
+
+// rdsDefaultPort is the port RDS gives an engine's cluster when
+// CreateDBCluster names none.
+func rdsDefaultPort(engine string) int {
+	if strings.Contains(engine, "mysql") {
+		return 3306
+	}
+	return 5432
 }
 
 func (app *Application) rdsCreateDBCluster(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	id := req.Params.Get("DBClusterIdentifier")
-	engine := req.Params.Get("Engine")
+	p := req.Params
+	id := p.Get("DBClusterIdentifier")
+	engine := p.Get("Engine")
 	if id == "" || engine == "" {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
 			fmt.Errorf("DBClusterIdentifier and Engine required: %w", models.ErrConflict))
@@ -526,22 +627,38 @@ func (app *Application) rdsCreateDBCluster(w http.ResponseWriter, account, regio
 	}
 	c := &repository.RDSCluster{
 		ID: id, Engine: engine,
-		EngineVersion:             req.Params.Get("EngineVersion"),
-		SubnetGroupName:           req.Params.Get("DBSubnetGroupName"),
-		ClusterParameterGroupName: req.Params.Get("DBClusterParameterGroupName"),
-		MasterUsername:            req.Params.Get("MasterUsername"),
-		DeletionProtection:        req.Params.Get("DeletionProtection") == "true",
-		Region:                    region,
-		ARN:                       awsproto.BuildRDSClusterARN(region, id),
-		CreatedAt:                 time.Now().UTC().Format(time.RFC3339),
+		EngineVersion:                    p.Get("EngineVersion"),
+		SubnetGroupName:                  p.Get("DBSubnetGroupName"),
+		ClusterParameterGroupName:        p.Get("DBClusterParameterGroupName"),
+		MasterUsername:                   p.Get("MasterUsername"),
+		DeletionProtection:               p.Get("DeletionProtection") == "true",
+		Region:                           region,
+		ARN:                              awsproto.BuildRDSClusterARN(region, id),
+		CreatedAt:                        time.Now().UTC().Format(time.RFC3339),
+		EngineMode:                       p.Get("EngineMode"),
+		Port:                             atoiOrZero(p.Get("Port")),
+		BackupRetentionPeriod:            atoiOrZero(p.Get("BackupRetentionPeriod")),
+		PreferredBackupWindow:            p.Get("PreferredBackupWindow"),
+		PreferredMaintenanceWindow:       p.Get("PreferredMaintenanceWindow"),
+		DatabaseName:                     p.Get("DatabaseName"),
+		StorageEncrypted:                 p.Get("StorageEncrypted") == "true",
+		CopyTagsToSnapshot:               p.Get("CopyTagsToSnapshot") == "true",
+		IAMDatabaseAuthenticationEnabled: p.Get("EnableIAMDatabaseAuthentication") == "true",
+		AvailabilityZones:                queryListValues(p, "AvailabilityZones.AvailabilityZone."),
+		VPCSecurityGroupIDs:              queryListValues(p, "VpcSecurityGroupIds.VpcSecurityGroupId."),
 	}
 	if err := app.repo.CreateDBCluster(account, c); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	got, _ := app.repo.GetDBCluster(account, region, id)
+	if err := app.tagCreated(account, repository.TagsRDSCluster, c.ARN, queryTags(p, "Tags.Tag."), func() error {
+		return app.repo.DeleteDBCluster(account, region, id)
+	}); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
 	awsproto.WriteQueryRPCResponse(w, "CreateDBCluster",
-		&rdsCreateClusterResult{DBCluster: rdsClusterToXML(got)})
+		&rdsCreateClusterResult{DBCluster: app.rdsClusterToXML(account, c)})
 }
 
 func (app *Application) rdsDescribeDBClusters(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -550,22 +667,35 @@ func (app *Application) rdsDescribeDBClusters(w http.ResponseWriter, account, re
 	if id != "" {
 		c, err := app.repo.GetDBCluster(account, region, id)
 		if err != nil {
-			awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
-				"DBClusterNotFoundFault",
-				fmt.Sprintf("DBCluster %s not found.", id))
+			rdsWriteClusterNotFound(w, id)
 			return
 		}
-		out.DBClusters = append(out.DBClusters, rdsClusterToXML(c))
+		out.DBClusters = append(out.DBClusters, app.rdsClusterToXML(account, c))
 	}
 	awsproto.WriteQueryRPCResponse(w, "DescribeDBClusters", &out)
 }
 
+func rdsWriteClusterNotFound(w http.ResponseWriter, id string) {
+	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
+		"DBClusterNotFoundFault", fmt.Sprintf("DBCluster %s not found.", id))
+}
+
+// rdsDeleteDBCluster returns the cluster in "deleting" state, as RDS
+// does; the SDK fails to decode an empty DeleteDBClusterResult.
 func (app *Application) rdsDeleteDBCluster(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteDBCluster(account, region, req.Params.Get("DBClusterIdentifier")); err != nil {
+	id := req.Params.Get("DBClusterIdentifier")
+	c, err := app.repo.GetDBCluster(account, region, id)
+	if err != nil {
+		rdsWriteClusterNotFound(w, id)
+		return
+	}
+	deleting := app.rdsClusterToXML(account, c)
+	if err := app.repo.DeleteDBCluster(account, region, id); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "DeleteDBCluster", nil)
+	deleting.Status = "deleting"
+	awsproto.WriteQueryRPCResponse(w, "DeleteDBCluster", &rdsCreateClusterResult{DBCluster: deleting})
 }
 
 // ----- DB Instance -----

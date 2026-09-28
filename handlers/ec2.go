@@ -111,6 +111,8 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 		app.ec2DescribeAddresses(w, account, region, req)
 	case "ReleaseAddress":
 		app.ec2ReleaseAddress(w, account, region, req)
+	case "DescribeAddressesAttribute":
+		app.ec2DescribeAddressesAttribute(w, account, region, req)
 
 	// ----- Instance -----
 	case "RunInstances":
@@ -938,9 +940,10 @@ func (app *Application) ec2DeleteRoute(w http.ResponseWriter, account, region st
 // ----- EIP handlers -----
 
 type ec2AddressXML struct {
-	AllocationId string `xml:"allocationId"`
-	PublicIp     string `xml:"publicIp"`
-	Domain       string `xml:"domain"`
+	AllocationId string              `xml:"allocationId"`
+	PublicIp     string              `xml:"publicIp"`
+	Domain       string              `xml:"domain"`
+	TagSet       []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
 }
 
 type ec2AllocateAddressResult struct {
@@ -977,6 +980,10 @@ func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, regio
 			fmt.Errorf("Domain=%q not supported (v1 supports 'vpc' only): %w", domain, models.ErrConflict))
 		return
 	}
+	specs, refused := refuseTagSpecifications(w, req.Params, "elastic-ip")
+	if refused {
+		return
+	}
 	allocID := "eipalloc-" + ec2RandID()
 	eip := &repository.EC2EIP{
 		AllocationID: allocID, Domain: domain,
@@ -984,7 +991,12 @@ func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, regio
 		Region:    region,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := app.repo.CreateEIP(account, eip); err != nil {
+	err := app.repo.CreateEIP(account, eip)
+	if err == nil {
+		err = app.tagNew(account, region, onResource(specs["elastic-ip"], allocID, "elastic-ip"),
+			func() error { return app.repo.DeleteEIP(account, region, allocID) })
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -992,32 +1004,71 @@ func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, regio
 		&ec2AllocateAddressResult{AllocationId: eip.AllocationID, PublicIp: eip.PublicIP, Domain: eip.Domain})
 }
 
-func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	// AllocationId.<n> filter — most common shape from the AWS provider.
-	wanted := map[string]bool{}
-	for k, vs := range req.Params {
-		if strings.HasPrefix(k, "AllocationId.") && len(vs) > 0 {
-			wanted[vs[0]] = true
-		}
-	}
-	out := ec2DescribeAddressesResult{AddressSet: []ec2AddressXML{}}
-	if len(wanted) == 0 {
-		// No filter — describe nothing (full list scan deferred; AWS
-		// provider's import path always supplies the AllocationId).
-		awsproto.WriteEC2QueryRPCResponse(w, "DescribeAddresses", &out)
-		return
-	}
-	for id := range wanted {
+// ec2FindAddresses looks up each AllocationId.N. It writes the error
+// itself, InvalidAllocationID.NotFound for a missing one as EC2 does,
+// and reports false.
+func (app *Application) ec2FindAddresses(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) ([]*repository.EC2EIP, bool) {
+	var out []*repository.EC2EIP
+	for _, id := range queryListValues(req.Params, "AllocationId.") {
 		eip, err := app.repo.GetEIP(account, region, id)
+		if errors.Is(err, models.ErrNotFound) {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				"InvalidAllocationID.NotFound", fmt.Sprintf("The allocation ID '%s' does not exist", id))
+			return nil, false
+		}
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-			return
+			return nil, false
 		}
+		out = append(out, eip)
+	}
+	return out, true
+}
+
+// ec2DescribeAddresses answers the AllocationId.N lookup the provider
+// makes. With no AllocationId it describes nothing (full list scan
+// deferred; the provider's import path always supplies one).
+func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	eips, ok := app.ec2FindAddresses(w, account, region, req)
+	if !ok {
+		return
+	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
+		return
+	}
+	out := ec2DescribeAddressesResult{AddressSet: []ec2AddressXML{}}
+	for _, eip := range eips {
 		out.AddressSet = append(out.AddressSet, ec2AddressXML{
 			AllocationId: eip.AllocationID, PublicIp: eip.PublicIP, Domain: eip.Domain,
+			TagSet: tags[eip.AllocationID],
 		})
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeAddresses", &out)
+}
+
+type ec2AddressAttributeXML struct {
+	AllocationId string `xml:"allocationId"`
+	PublicIp     string `xml:"publicIp"`
+}
+
+type ec2DescribeAddressesAttributeResult struct {
+	AddressSet []ec2AddressAttributeXML `xml:"addressSet>item"`
+}
+
+// ec2DescribeAddressesAttribute answers aws_eip's read of its
+// domain-name attribute: fakeaws sets no reverse DNS record, so each
+// address comes back without a ptrRecord.
+func (app *Application) ec2DescribeAddressesAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	eips, ok := app.ec2FindAddresses(w, account, region, req)
+	if !ok {
+		return
+	}
+	out := ec2DescribeAddressesAttributeResult{AddressSet: []ec2AddressAttributeXML{}}
+	for _, eip := range eips {
+		out.AddressSet = append(out.AddressSet, ec2AddressAttributeXML{AllocationId: eip.AllocationID, PublicIp: eip.PublicIP})
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeAddressesAttribute", &out)
 }
 
 func (app *Application) ec2ReleaseAddress(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -2558,6 +2609,10 @@ var ec2TaggedKinds = []ec2TaggedKind{
 	}},
 	{"key-", "key-pair", "InvalidKeyPair.NotFound", func(app *Application, account, region, id string) error {
 		_, err := app.repo.GetKeyPairByID(account, region, id)
+		return err
+	}},
+	{"eipalloc-", "elastic-ip", "InvalidAllocationID.NotFound", func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetEIP(account, region, id)
 		return err
 	}},
 }

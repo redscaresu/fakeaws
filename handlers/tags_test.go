@@ -180,6 +180,10 @@ func TestRDS_TagsRoundTrip(t *testing.T) {
 			arn + "pg:tagged", "DBParameterGroupNotFound"},
 		{"instance", "CreateDBInstance", url.Values{"DBInstanceIdentifier": {"tagged"}, "Engine": {"postgres"}, "DBInstanceClass": {"db.t3.micro"}},
 			arn + "db:tagged", "DBInstanceNotFound"},
+		{"cluster parameter group", "CreateDBClusterParameterGroup", url.Values{"DBClusterParameterGroupName": {"tagged"}, "DBParameterGroupFamily": {"aurora-postgresql15"}, "Description": {"d"}},
+			arn + "cluster-pg:tagged", "DBParameterGroupNotFound"},
+		{"cluster", "CreateDBCluster", url.Values{"DBClusterIdentifier": {"tagged"}, "Engine": {"aurora-postgresql"}},
+			arn + "cluster:tagged", "DBClusterNotFoundFault"},
 	}
 	for _, k := range kinds {
 		t.Run(k.name, func(t *testing.T) {
@@ -211,6 +215,8 @@ func TestRDS_TagsRoundTrip(t *testing.T) {
 
 	_, body := rdsCall(t, srv, region, "DescribeDBInstances", url.Values{"DBInstanceIdentifier": {"tagged"}})
 	assert.Equal(t, tagsAfterRemove(), xmlTags(t, body), "DescribeDBInstances TagList")
+	_, body = rdsCall(t, srv, region, "DescribeDBClusters", url.Values{"DBClusterIdentifier": {"tagged"}})
+	assert.Equal(t, tagsAfterRemove(), xmlTags(t, body), "DescribeDBClusters TagList")
 }
 
 func TestRoute53_TagsRoundTrip(t *testing.T) {

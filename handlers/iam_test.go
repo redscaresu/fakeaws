@@ -455,3 +455,49 @@ func TestIAM_CreateRoleResponseIsValidXML(t *testing.T) {
 	assert.NoError(t, xml.Unmarshal(body, &v), "response not valid XML: %s", body)
 	assert.Contains(t, string(body), "<CreateRoleResponse>", "response missing <CreateRoleResponse> envelope: %s", body)
 }
+
+// TestIAM_RolesAreListMembers: a role in a list, an instance profile's
+// Roles included, is a <member>. Nested as <Role>, the SDK reads the
+// profile as roleless: aws_iam_instance_profile plans `+ role` and
+// its next apply fails AddRoleToInstanceProfile.
+func TestIAM_RolesAreListMembers(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, body := iamCall(t, srv, "CreateRole", url.Values{"RoleName": {"r"}, "AssumeRolePolicyDocument": {"{}"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateRole: %s", body)
+	resp, body = iamCall(t, srv, "CreateInstanceProfile", url.Values{"InstanceProfileName": {"p"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateInstanceProfile: %s", body)
+	resp, body = iamCall(t, srv, "AddRoleToInstanceProfile", url.Values{"InstanceProfileName": {"p"}, "RoleName": {"r"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "AddRoleToInstanceProfile: %s", body)
+
+	var got struct {
+		Roles []string `xml:"GetInstanceProfileResult>InstanceProfile>Roles>member>RoleName"`
+		Name  string   `xml:"GetInstanceProfileResult>InstanceProfile>InstanceProfileName"`
+	}
+	_, body = iamCall(t, srv, "GetInstanceProfile", url.Values{"InstanceProfileName": {"p"}})
+	require.NoError(t, xml.Unmarshal(body, &got), "%s", body)
+	assert.Equal(t, "p", got.Name, "%s", body)
+	assert.Equal(t, []string{"r"}, got.Roles, "%s", body)
+
+	var listed struct {
+		Profiles []string `xml:"ListInstanceProfilesResult>InstanceProfiles>member>InstanceProfileName"`
+		Roles    []string `xml:"ListInstanceProfilesResult>InstanceProfiles>member>Roles>member>RoleName"`
+	}
+	_, body = iamCall(t, srv, "ListInstanceProfiles", nil)
+	require.NoError(t, xml.Unmarshal(body, &listed), "%s", body)
+	assert.Equal(t, []string{"p"}, listed.Profiles, "%s", body)
+	assert.Equal(t, []string{"r"}, listed.Roles, "%s", body)
+
+	var roles struct {
+		Names []string `xml:"ListRolesResult>Roles>member>RoleName"`
+	}
+	_, body = iamCall(t, srv, "ListRoles", nil)
+	require.NoError(t, xml.Unmarshal(body, &roles), "%s", body)
+	assert.Equal(t, []string{"r"}, roles.Names, "%s", body)
+
+	var role struct {
+		Name string `xml:"GetRoleResult>Role>RoleName"`
+	}
+	_, body = iamCall(t, srv, "GetRole", url.Values{"RoleName": {"r"}})
+	require.NoError(t, xml.Unmarshal(body, &role), "%s", body)
+	assert.Equal(t, "r", role.Name, "%s", body)
+}
