@@ -143,6 +143,7 @@ Configs that apply, can be updated, and destroy cleanly. These show the right wa
 | `working/ssm_parameter` | SSM String + tagged SecureString parameters, and `data.aws_ssm_parameter` reading the public AL2023 AMI parameter (resolves to the AL2023 fixture) |
 | `working/sqs_queue` | SQS queue with visibility + retention + redrive policy |
 | `working/vpc_network` | VPC + subnets + internet gateway + route table + security group (the dependency chain) |
+| `working/web_step_one` | infrafactory's step-one web stack: VPC, public subnet, IGW, route table + route + association, HTTP security group and an AL2023 instance with a public IP and `user_data`. The provider block is only `region`, `s3_use_path_style`, `default_tags` and `allowed_account_ids`; credentials and endpoints come from the harness env. `web_step_one_state_test.go` checks state carries the public IP and account `000000000000` in every `arn` and `owner_id` |
 
 ### misconfigured
 
