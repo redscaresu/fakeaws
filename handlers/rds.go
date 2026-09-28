@@ -100,11 +100,11 @@ func (app *Application) handleRDS(w http.ResponseWriter, r *http.Request) {
 		app.rdsModifyDBInstance(w, account, region, req)
 
 	case "ListTagsForResource":
-		// terraform-provider-aws polls ListTagsForResource for every RDS
-		// resource (DB instance, subnet group, parameter group). fakeaws
-		// doesn't persist tags yet — return an empty list so the Read
-		// flow doesn't error.
-		awsproto.WriteQueryRPCResponse(w, "ListTagsForResource", &rdsListTagsResult{TagList: []rdsTagXML{}})
+		app.rdsListTagsForResource(w, account, req)
+	case "AddTagsToResource":
+		app.rdsAddTagsToResource(w, account, req)
+	case "RemoveTagsFromResource":
+		app.rdsRemoveTagsFromResource(w, account, req)
 
 	case "DescribeDBParameters":
 		// Provider's aws_db_parameter_group Read iterates all parameters
@@ -127,6 +127,87 @@ type rdsTagXML struct {
 
 type rdsListTagsResult struct {
 	TagList []rdsTagXML `xml:"TagList>Tag"`
+}
+
+func rdsTags(tags map[string]string) []rdsTagXML {
+	return tagList(tags, func(k, v string) rdsTagXML { return rdsTagXML{Key: k, Value: v} })
+}
+
+// rdsTaggedKind is one RDS resource type fakeaws tags, by the type
+// segment of its ARN (arn:aws:rds:<region>:<account>:<type>:<name>).
+type rdsTaggedKind struct {
+	table    repository.TaggedTable
+	notFound string // RDS's typed 404 code
+}
+
+var rdsTaggedKinds = map[string]rdsTaggedKind{
+	"db":     {repository.TagsRDSInstance, "DBInstanceNotFound"},
+	"pg":     {repository.TagsRDSParameterGroup, "DBParameterGroupNotFound"},
+	"subgrp": {repository.TagsRDSSubnetGroup, "DBSubnetGroupNotFoundFault"},
+}
+
+// rdsTagTarget resolves a tag call's ResourceName ARN. It writes the
+// error itself and reports false for an ARN of a type fakeaws does
+// not tag.
+func rdsTagTarget(w http.ResponseWriter, req awsproto.QueryRPCRequest) (rdsTaggedKind, string, bool) {
+	arn := req.Params.Get("ResourceName")
+	parts := strings.SplitN(arn, ":", 7)
+	if len(parts) == 7 {
+		if kind, ok := rdsTaggedKinds[parts[5]]; ok {
+			return kind, arn, true
+		}
+	}
+	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusBadRequest,
+		"InvalidParameterValue", fmt.Sprintf("fakeaws does not tag the RDS resource %q", arn))
+	return rdsTaggedKind{}, "", false
+}
+
+// rdsWriteTagError writes a tag call's failure, the resource type's
+// typed 404 for a missing resource as RDS does.
+func rdsWriteTagError(w http.ResponseWriter, kind rdsTaggedKind, arn string, err error) {
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
+			kind.notFound, fmt.Sprintf("%s not found.", arn))
+		return
+	}
+	awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+}
+
+func (app *Application) rdsListTagsForResource(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	kind, arn, ok := rdsTagTarget(w, req)
+	if !ok {
+		return
+	}
+	tags, err := app.repo.ResourceTags(account, kind.table, arn)
+	if err != nil {
+		rdsWriteTagError(w, kind, arn, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "ListTagsForResource", &rdsListTagsResult{TagList: rdsTags(tags)})
+}
+
+func (app *Application) rdsAddTagsToResource(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	kind, arn, ok := rdsTagTarget(w, req)
+	if !ok {
+		return
+	}
+	if err := app.repo.TagResource(account, kind.table, arn, queryTags(req.Params, "Tags.Tag.")); err != nil {
+		rdsWriteTagError(w, kind, arn, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "AddTagsToResource", nil)
+}
+
+func (app *Application) rdsRemoveTagsFromResource(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	kind, arn, ok := rdsTagTarget(w, req)
+	if !ok {
+		return
+	}
+	if err := app.repo.UntagResource(account, kind.table, arn, queryListValues(req.Params, "TagKeys.member.")); err != nil {
+		rdsWriteTagError(w, kind, arn, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "RemoveTagsFromResource", nil)
 }
 
 type rdsParameterXML struct {
@@ -196,6 +277,12 @@ func (app *Application) rdsCreateDBSubnetGroup(w http.ResponseWriter, account, r
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateDBSubnetGroup(account, sg); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	if err := app.tagCreated(account, repository.TagsRDSSubnetGroup, sg.ARN, queryTags(req.Params, "Tags.Tag."), func() error {
+		return app.repo.DeleteDBSubnetGroup(account, region, name)
+	}); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -279,6 +366,12 @@ func (app *Application) rdsCreateDBParameterGroup(w http.ResponseWriter, account
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateDBParameterGroup(account, pg); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	if err := app.tagCreated(account, repository.TagsRDSParameterGroup, pg.ARN, queryTags(req.Params, "Tags.Tag."), func() error {
+		return app.repo.DeleteDBParameterGroup(account, region, name)
+	}); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -515,6 +608,7 @@ type rdsInstanceXML struct {
 	DBClusterIdentifier                   string             `xml:"DBClusterIdentifier,omitempty"`
 	ReadReplicaSourceDBInstanceIdentifier string             `xml:"ReadReplicaSourceDBInstanceIdentifier,omitempty"`
 	DBInstanceArn                         string             `xml:"DBInstanceArn"`
+	TagList                               []rdsTagXML        `xml:"TagList>Tag,omitempty"`
 }
 
 // rdsEndpointXML mirrors the DescribeDBInstances Endpoint sub-object.
@@ -609,6 +703,11 @@ func (app *Application) rdsInstanceToXML(account string, inst *repository.RDSIns
 			x.DBSubnetGroup = &sgXML
 		}
 	}
+	// aws_db_instance reads its tags from TagList, not ListTagsForResource.
+	// A deleted instance has none to show.
+	if tags, err := app.repo.ResourceTags(account, repository.TagsRDSInstance, inst.ARN); err == nil {
+		x.TagList = rdsTags(tags)
+	}
 	return x
 }
 
@@ -644,9 +743,14 @@ func (app *Application) rdsCreateDBInstance(w http.ResponseWriter, account, regi
 		Port:                  atoiOrZero(req.Params.Get("Port")),
 		PubliclyAccessible:    req.Params.Get("PubliclyAccessible") == "true",
 		BackupRetentionPeriod: atoiOrZero(req.Params.Get("BackupRetentionPeriod")),
-		Tags:                  parseRDSTags(req),
 	}
 	if err := app.repo.CreateDBInstance(account, inst); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	if err := app.tagCreated(account, repository.TagsRDSInstance, inst.ARN, queryTags(req.Params, "Tags.Tag."), func() error {
+		return app.repo.DeleteDBInstance(account, region, id)
+	}); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -792,30 +896,6 @@ func parseSubnetIds(req awsproto.QueryRPCRequest) []string {
 func atoiOrZero(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
-}
-
-// parseRDSTags reads Tags.Tag.N.Key / Tags.Tag.N.Value params
-// from the Query-RPC form (CreateDBInstance puts user tags here)
-// into a flat map. Returns nil when no tags are present so the
-// JSON blob stays compact.
-func parseRDSTags(req awsproto.QueryRPCRequest) map[string]string {
-	out := map[string]string{}
-	for k, vs := range req.Params {
-		if !strings.HasPrefix(k, "Tags.Tag.") || !strings.HasSuffix(k, ".Key") {
-			continue
-		}
-		if len(vs) == 0 {
-			continue
-		}
-		// Tags.Tag.1.Key → Tags.Tag.1.Value
-		idx := strings.TrimSuffix(strings.TrimPrefix(k, "Tags.Tag."), ".Key")
-		val := req.Params.Get("Tags.Tag." + idx + ".Value")
-		out[vs[0]] = val
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 // parseRDSFilter scans Filters.Filter.N.Name / Filters.Filter.N.Values.Value.M

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,22 +51,7 @@ func (app *Application) registerRoute53Routes(r chi.Router) {
 		r.Get("/hostedzone/{id}/rrset", app.r53ListResourceRecordSets)
 		r.Get("/hostedzone/{id}/rrset/", app.r53ListResourceRecordSets)
 		r.Get("/change/{id}", app.r53GetChange)
-		// terraform-provider-aws's aws_route53_zone read path calls
-		// ListTagsForResource on every refresh — we don't model tag
-		// storage on hosted zones (yet), so return an empty tag set
-		// which is the correct "no tags here" answer real AWS gives.
 		r.Get("/tags/{resourceType}/{resourceID}", app.r53ListTagsForResource)
-		// terraform-provider-aws's aws_route53_zone with `tags = {...}`
-		// POSTs to ChangeTagsForResource on Create/Update. We don't
-		// model tag storage on hosted zones yet, so accept the request
-		// and return success — terraform's tag drift detection just
-		// checks that the change went through, then ListTagsForResource
-		// (above) returns empty, which the provider's later Read
-		// reconciles as "tags removed" without an error. S96 (2026-06-03):
-		// surfaced by aws-route53 sweep-3 flake — the missing POST route
-		// 404'd and the LLM oscillated between adding tags (to satisfy
-		// the scenario) and dropping them (because the 404 looked like
-		// "tags not supported").
 		r.Post("/tags/{resourceType}/{resourceID}", app.r53ChangeTagsForResource)
 		// terraform-provider-aws's aws_route53_zone read path calls
 		// GetDNSSEC after refresh. We don't model DNSSEC; return the
@@ -537,31 +523,66 @@ func (app *Application) r53GetDNSSEC(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// r53ListTagsForResource returns an empty <Tags/> set for any
-// resourceType + resourceID. fakeaws doesn't model Route53 tag
-// storage (no scenario sets them); the empty set matches the real
-// AWS response shape when nothing's been tagged. terraform-provider-aws
-// calls this on every aws_route53_zone refresh.
+type r53TagXML struct {
+	Key   string `xml:"Key"`
+	Value string `xml:"Value"`
+}
+
+type r53ListTagsForResourceResponse struct {
+	XMLName        xml.Name `xml:"ListTagsForResourceResponse"`
+	ResourceTagSet struct {
+		ResourceType string      `xml:"ResourceType"`
+		ResourceId   string      `xml:"ResourceId"`
+		Tags         []r53TagXML `xml:"Tags>Tag,omitempty"`
+	} `xml:"ResourceTagSet"`
+}
+
+type r53ChangeTagsForResourceRequest struct {
+	XMLName       xml.Name    `xml:"ChangeTagsForResourceRequest"`
+	AddTags       []r53TagXML `xml:"AddTags>Tag"`
+	RemoveTagKeys []string    `xml:"RemoveTagKeys>Key"`
+}
+
+// r53TagTarget resolves a tag call's path to its hosted zone's ARN.
+// It writes the error itself and reports false for a resource type
+// fakeaws does not tag (health checks).
+func r53TagTarget(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if rt := chi.URLParam(r, "resourceType"); rt != "hostedzone" {
+		awsproto.WriteServiceError(w, awsproto.ShapeXML, http.StatusBadRequest,
+			"InvalidInput", fmt.Sprintf("fakeaws does not tag Route53 resource type %q", rt))
+		return "", false
+	}
+	return awsproto.BuildRoute53HostedZoneARN(chi.URLParam(r, "resourceID")), true
+}
+
+// r53WriteTagError writes a tag call's failure, NoSuchHostedZone for a
+// missing zone as Route53 does.
+func r53WriteTagError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeXML, http.StatusNotFound,
+			"NoSuchHostedZone", fmt.Sprintf("No hosted zone found with ID: %s", chi.URLParam(r, "resourceID")))
+		return
+	}
+	awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+}
+
+// r53ListTagsForResource is aws_route53_zone's tag read.
 func (app *Application) r53ListTagsForResource(w http.ResponseWriter, r *http.Request) {
-	resourceType := chi.URLParam(r, "resourceType")
-	resourceID := chi.URLParam(r, "resourceID")
-	awsproto.WriteXMLResponse(w, http.StatusOK, &struct {
-		XMLName        xml.Name `xml:"ListTagsForResourceResponse"`
-		ResourceTagSet struct {
-			ResourceType string   `xml:"ResourceType"`
-			ResourceId   string   `xml:"ResourceId"`
-			Tags         []string `xml:"Tags>Tag,omitempty"`
-		} `xml:"ResourceTagSet"`
-	}{
-		ResourceTagSet: struct {
-			ResourceType string   `xml:"ResourceType"`
-			ResourceId   string   `xml:"ResourceId"`
-			Tags         []string `xml:"Tags>Tag,omitempty"`
-		}{
-			ResourceType: resourceType,
-			ResourceId:   resourceID,
-		},
-	})
+	const account = awsproto.FakeAccountID
+	arn, ok := r53TagTarget(w, r)
+	if !ok {
+		return
+	}
+	tags, err := app.repo.ResourceTags(account, repository.TagsRoute53Zone, arn)
+	if err != nil {
+		r53WriteTagError(w, r, err)
+		return
+	}
+	var out r53ListTagsForResourceResponse
+	out.ResourceTagSet.ResourceType = chi.URLParam(r, "resourceType")
+	out.ResourceTagSet.ResourceId = chi.URLParam(r, "resourceID")
+	out.ResourceTagSet.Tags = tagList(tags, func(k, v string) r53TagXML { return r53TagXML{Key: k, Value: v} })
+	awsproto.WriteXMLResponse(w, http.StatusOK, &out)
 }
 
 // ----- helpers -----
@@ -587,15 +608,27 @@ func r53IsApex(recordName, zoneName string) bool {
 // Codex pass 3 BLOCKING #2 fix: hosted zones now also surface their
 // non-default record sets (was previously only emitting zones).
 // NS+SOA defaults are excluded so the count reflects user records only.
-// r53ChangeTagsForResource accepts the terraform-provider-aws tag-
-// change POST and returns success. We don't model tag storage on
-// hosted zones (yet); the canonical "no tags" response from
-// ListTagsForResource matches what real AWS returns post-clear, so
-// the provider's drift detection reconciles cleanly. S96 (2026-06-03):
-// the missing handler 404'd, causing aws-route53 to oscillate.
+// r53ChangeTagsForResource adds and removes a zone's tags in one call;
+// aws_route53_zone tags this way at create as well as on update.
 func (app *Application) r53ChangeTagsForResource(w http.ResponseWriter, r *http.Request) {
-	// Drain the body so the SDK doesn't think we hung up mid-request.
-	_, _ = io.Copy(io.Discard, r.Body)
+	const account = awsproto.FakeAccountID
+	arn, ok := r53TagTarget(w, r)
+	if !ok {
+		return
+	}
+	var in r53ChangeTagsForResourceRequest
+	if err := xml.NewDecoder(r.Body).Decode(&in); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeXML, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		return
+	}
+	add := make(map[string]string, len(in.AddTags))
+	for _, t := range in.AddTags {
+		add[t.Key] = t.Value
+	}
+	if err := app.repo.ChangeResourceTags(account, repository.TagsRoute53Zone, arn, add, in.RemoveTagKeys); err != nil {
+		r53WriteTagError(w, r, err)
+		return
+	}
 	awsproto.WriteXMLResponse(w, http.StatusOK, &struct {
 		XMLName xml.Name `xml:"ChangeTagsForResourceResponse"`
 	}{})

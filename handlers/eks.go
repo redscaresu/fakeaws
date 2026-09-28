@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -39,37 +41,46 @@ func (app *Application) registerEKSRoutes(r chi.Router) {
 		r.Get("/{name}/addons/{addon}", app.eksDescribeAddon)
 		r.Delete("/{name}/addons/{addon}", app.eksDeleteAddon)
 	})
+	// The SDK path-escapes the ARN into one segment; chi routes on the
+	// raw path, so the wildcard holds it escaped.
+	r.Route("/eks/region/{region}/tags", func(r chi.Router) {
+		r.Get("/*", app.eksListTagsForResource)
+		r.Post("/*", app.eksTagResource)
+		r.Delete("/*", app.eksUntagResource)
+	})
 }
 
 // ----- Cluster -----
 
 type eksCreateClusterInput struct {
-	Name              string         `json:"name"`
-	RoleArn           string         `json:"roleArn"`
-	ResourcesVpcConfig eksVpcConfig  `json:"resourcesVpcConfig"`
-	Version           string         `json:"version,omitempty"`
+	Name               string            `json:"name"`
+	RoleArn            string            `json:"roleArn"`
+	ResourcesVpcConfig eksVpcConfig      `json:"resourcesVpcConfig"`
+	Version            string            `json:"version,omitempty"`
+	Tags               map[string]string `json:"tags,omitempty"`
 }
 
 type eksVpcConfig struct {
-	SubnetIds        []string `json:"subnetIds"`
+	SubnetIds             []string `json:"subnetIds"`
 	SecurityGroupIds      []string `json:"securityGroupIds,omitempty"`
 	EndpointPublicAccess  bool     `json:"endpointPublicAccess"`
 	EndpointPrivateAccess bool     `json:"endpointPrivateAccess"`
 }
 
 type eksClusterDescription struct {
-	Name              string       `json:"name"`
-	Arn               string       `json:"arn"`
-	RoleArn           string       `json:"roleArn"`
-	Status            string       `json:"status"`
-	Version           string       `json:"version,omitempty"`
+	Name               string       `json:"name"`
+	Arn                string       `json:"arn"`
+	RoleArn            string       `json:"roleArn"`
+	Status             string       `json:"status"`
+	Version            string       `json:"version,omitempty"`
 	ResourcesVpcConfig eksVpcConfig `json:"resourcesVpcConfig"`
 	// EKS DescribeCluster returns createdAt as a JSON number (Unix
 	// epoch seconds with fractional milliseconds), NOT an ISO 8601
 	// string. The AWS SDK's deserialiser asserts on the type and
 	// fails the whole apply with "expected Timestamp to be a JSON
 	// Number, got string instead" otherwise.
-	CreatedAt float64 `json:"createdAt"`
+	CreatedAt float64           `json:"createdAt"`
+	Tags      map[string]string `json:"tags,omitempty"`
 }
 
 func eksClusterToDescription(c *repository.EKSCluster) eksClusterDescription {
@@ -77,8 +88,8 @@ func eksClusterToDescription(c *repository.EKSCluster) eksClusterDescription {
 		Name: c.Name, Arn: c.ARN, RoleArn: c.RoleARN, Status: c.Status,
 		Version: c.KubernetesVersion,
 		ResourcesVpcConfig: eksVpcConfig{
-			SubnetIds:             c.SubnetIDs,
-			SecurityGroupIds:      c.SecurityGroupIDs,
+			SubnetIds:        c.SubnetIDs,
+			SecurityGroupIds: c.SecurityGroupIDs,
 			// AWS default for new EKS clusters; provider drift-checks
 			// against this exact pair.
 			EndpointPublicAccess:  true,
@@ -117,19 +128,27 @@ func (app *Application) eksCreateCluster(w http.ResponseWriter, r *http.Request)
 	}
 	c := &repository.EKSCluster{
 		Name: in.Name, RoleARN: in.RoleArn,
-		SubnetIDs: in.ResourcesVpcConfig.SubnetIds,
-		SecurityGroupIDs: in.ResourcesVpcConfig.SecurityGroupIds,
+		SubnetIDs:         in.ResourcesVpcConfig.SubnetIds,
+		SecurityGroupIDs:  in.ResourcesVpcConfig.SecurityGroupIds,
 		KubernetesVersion: in.Version,
-		Status: "ACTIVE", Region: region,
-		ARN: awsproto.BuildEKSClusterARN(region, in.Name),
+		Status:            "ACTIVE", Region: region,
+		ARN:       awsproto.BuildEKSClusterARN(region, in.Name),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateEKSCluster(account, c); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
+	if err := app.tagCreated(account, repository.TagsEKSCluster, c.ARN, in.Tags, func() error {
+		return app.repo.DeleteEKSCluster(account, region, c.Name)
+	}); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
+		return
+	}
+	out := eksClusterToDescription(c)
+	out.Tags = in.Tags
 	awsproto.WriteJSONRESTResponse(w, http.StatusOK, map[string]any{
-		"cluster": eksClusterToDescription(c),
+		"cluster": out,
 	})
 }
 
@@ -140,8 +159,16 @@ func (app *Application) eksDescribeCluster(w http.ResponseWriter, r *http.Reques
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
+	// aws_eks_cluster reads its tags from here, not ListTagsForResource.
+	tags, err := app.repo.ResourceTags(account, repository.TagsEKSCluster, c.ARN)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
+		return
+	}
+	out := eksClusterToDescription(c)
+	out.Tags = tags
 	awsproto.WriteJSONRESTResponse(w, http.StatusOK, map[string]any{
-		"cluster": eksClusterToDescription(c),
+		"cluster": out,
 	})
 }
 
@@ -178,6 +205,80 @@ func (app *Application) eksDeleteCluster(w http.ResponseWriter, r *http.Request)
 	awsproto.WriteJSONRESTResponse(w, http.StatusOK, map[string]any{
 		"cluster": eksClusterToDescription(c),
 	})
+}
+
+// ----- Tags -----
+
+// eksTagARN is the cluster ARN a tag call's path names. It writes the
+// error itself and reports false for a malformed escape.
+func eksTagARN(w http.ResponseWriter, r *http.Request) (string, bool) {
+	arn, err := url.PathUnescape(chi.URLParam(r, "*"))
+	if err != nil {
+		awsproto.WriteServiceError(w, awsproto.ShapeJSONREST, http.StatusBadRequest,
+			"BadRequestException", fmt.Sprintf("invalid resource ARN: %v", err))
+		return "", false
+	}
+	return arn, true
+}
+
+// eksWriteTagError writes a tag call's failure: EKS's tag operations
+// answer a missing resource with NotFoundException, unlike
+// DescribeCluster's ResourceNotFoundException.
+func eksWriteTagError(w http.ResponseWriter, arn string, err error) {
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeJSONREST, http.StatusNotFound,
+			"NotFoundException", fmt.Sprintf("Resource %s not found.", arn))
+		return
+	}
+	awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
+}
+
+func (app *Application) eksListTagsForResource(w http.ResponseWriter, r *http.Request) {
+	const account = awsproto.FakeAccountID
+	arn, ok := eksTagARN(w, r)
+	if !ok {
+		return
+	}
+	tags, err := app.repo.ResourceTags(account, repository.TagsEKSCluster, arn)
+	if err != nil {
+		eksWriteTagError(w, arn, err)
+		return
+	}
+	awsproto.WriteJSONRESTResponse(w, http.StatusOK, map[string]any{"tags": tags})
+}
+
+func (app *Application) eksTagResource(w http.ResponseWriter, r *http.Request) {
+	const account = awsproto.FakeAccountID
+	arn, ok := eksTagARN(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Tags map[string]string `json:"tags"`
+	}
+	if _, err := awsproto.DecodeJSONBody(r, &in); err != nil {
+		awsproto.WriteServiceError(w, awsproto.ShapeJSONREST, http.StatusBadRequest,
+			"BadRequestException", err.Error())
+		return
+	}
+	if err := app.repo.TagResource(account, repository.TagsEKSCluster, arn, in.Tags); err != nil {
+		eksWriteTagError(w, arn, err)
+		return
+	}
+	awsproto.WriteJSONRESTResponse(w, http.StatusOK, map[string]any{})
+}
+
+func (app *Application) eksUntagResource(w http.ResponseWriter, r *http.Request) {
+	const account = awsproto.FakeAccountID
+	arn, ok := eksTagARN(w, r)
+	if !ok {
+		return
+	}
+	if err := app.repo.UntagResource(account, repository.TagsEKSCluster, arn, r.URL.Query()["tagKeys"]); err != nil {
+		eksWriteTagError(w, arn, err)
+		return
+	}
+	awsproto.WriteJSONRESTResponse(w, http.StatusOK, map[string]any{})
 }
 
 // ----- NodeGroup -----
@@ -226,7 +327,7 @@ func (app *Application) eksCreateNodeGroup(w http.ResponseWriter, r *http.Reques
 		NodeRoleARN: in.NodeRole, SubnetIDs: in.Subnets,
 		InstanceTypes: in.InstanceTypes, ScalingConfig: scalingJSON,
 		Status: "ACTIVE", Region: region,
-		ARN: awsproto.BuildEKSNodegroupARN(region, clusterName, in.NodegroupName, "deterministic"),
+		ARN:       awsproto.BuildEKSNodegroupARN(region, clusterName, in.NodegroupName, "deterministic"),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateEKSNodeGroup(account, ng); err != nil {
@@ -321,7 +422,7 @@ func (app *Application) eksCreateAddon(w http.ResponseWriter, r *http.Request) {
 	a := &repository.EKSAddon{
 		ClusterName: clusterName, Name: in.AddonName, Version: in.AddonVersion,
 		Status: "ACTIVE", Region: region,
-		ARN: fmt.Sprintf("arn:aws:eks:%s:%s:addon/%s/%s/uuid", region, awsproto.FakeAccountID, clusterName, in.AddonName),
+		ARN:       fmt.Sprintf("arn:aws:eks:%s:%s:addon/%s/%s/uuid", region, awsproto.FakeAccountID, clusterName, in.AddonName),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateEKSAddon(account, a); err != nil {

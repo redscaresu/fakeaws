@@ -2,12 +2,12 @@
 //
 // Per fakeaws/PLAN.md § "Phase 3 — Stateful data (S45)" — the FK chain:
 //
-//   rds_db_instances ──┬──► rds_db_subnet_groups ──► ec2_subnets (handler-validated)
-//                      ├──► rds_db_clusters
-//                      ├──► rds_db_parameter_groups
-//                      └──► rds_db_instances (replicate_source_db; RESTRICT on source-with-replicas)
-//   rds_db_clusters ──┬──► rds_db_subnet_groups
-//                     └──► rds_db_cluster_parameter_groups
+//	rds_db_instances ──┬──► rds_db_subnet_groups ──► ec2_subnets (handler-validated)
+//	                   ├──► rds_db_clusters
+//	                   ├──► rds_db_parameter_groups
+//	                   └──► rds_db_instances (replicate_source_db; RESTRICT on source-with-replicas)
+//	rds_db_clusters ──┬──► rds_db_subnet_groups
+//	                  └──► rds_db_cluster_parameter_groups
 //
 // The subnet-group ↔ ec2_subnets link is enforced at the handler
 // layer (rds.go::CreateDBSubnetGroup) rather than via SQLite FK,
@@ -158,34 +158,33 @@ type RDSCluster struct {
 }
 
 type RDSInstance struct {
-	ID                  string            `json:"id"`
-	Engine              string            `json:"engine"`
-	EngineVersion       string            `json:"engine_version"`
-	InstanceClass       string            `json:"instance_class"`
-	SubnetGroupName     string            `json:"subnet_group_name,omitempty"`
-	ClusterID           string            `json:"cluster_id,omitempty"`
-	ParameterGroupName  string            `json:"parameter_group_name,omitempty"`
-	ReplicateSourceDB   string            `json:"replicate_source_db,omitempty"`
-	DeletionProtection  bool              `json:"deletion_protection"`
-	SkipFinalSnapshot   bool              `json:"skip_final_snapshot"`
-	State               string            `json:"state"`
-	Region              string            `json:"region"`
-	ARN                 string            `json:"arn"`
-	CreatedAt           string            `json:"created_at"`
+	ID                 string `json:"id"`
+	Engine             string `json:"engine"`
+	EngineVersion      string `json:"engine_version"`
+	InstanceClass      string `json:"instance_class"`
+	SubnetGroupName    string `json:"subnet_group_name,omitempty"`
+	ClusterID          string `json:"cluster_id,omitempty"`
+	ParameterGroupName string `json:"parameter_group_name,omitempty"`
+	ReplicateSourceDB  string `json:"replicate_source_db,omitempty"`
+	DeletionProtection bool   `json:"deletion_protection"`
+	SkipFinalSnapshot  bool   `json:"skip_final_snapshot"`
+	State              string `json:"state"`
+	Region             string `json:"region"`
+	ARN                string `json:"arn"`
+	CreatedAt          string `json:"created_at"`
 	// Fields below are persisted as part of the JSON blob; they
 	// must round-trip through Get/List so the Read response matches
 	// the planned/applied HCL exactly. Hard-coding any of them
 	// causes terraform-provider-aws to flag plan drift and trigger
 	// a replacement (e.g. MasterUsername mismatch forces replace).
-	MasterUsername       string            `json:"master_username,omitempty"`
-	AllocatedStorage     int               `json:"allocated_storage,omitempty"`
-	StorageType          string            `json:"storage_type,omitempty"`
-	StorageEncrypted     bool              `json:"storage_encrypted,omitempty"`
-	MultiAZ              bool              `json:"multi_az,omitempty"`
-	Port                 int               `json:"port,omitempty"`
-	PubliclyAccessible   bool              `json:"publicly_accessible,omitempty"`
-	BackupRetentionPeriod int              `json:"backup_retention_period,omitempty"`
-	Tags                 map[string]string `json:"tags,omitempty"`
+	MasterUsername        string `json:"master_username,omitempty"`
+	AllocatedStorage      int    `json:"allocated_storage,omitempty"`
+	StorageType           string `json:"storage_type,omitempty"`
+	StorageEncrypted      bool   `json:"storage_encrypted,omitempty"`
+	MultiAZ               bool   `json:"multi_az,omitempty"`
+	Port                  int    `json:"port,omitempty"`
+	PubliclyAccessible    bool   `json:"publicly_accessible,omitempty"`
+	BackupRetentionPeriod int    `json:"backup_retention_period,omitempty"`
 }
 
 // ----- DB Subnet Group -----
