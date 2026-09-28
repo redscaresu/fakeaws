@@ -1,6 +1,9 @@
 package awsproto
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Per-service ARN builders. Real AWS ARN formats vary per service —
 // IAM omits region, S3 is bucket-scoped, Route53 is global, EC2/RDS/
@@ -145,4 +148,11 @@ func BuildDynamoDBTableARN(region, name string) string {
 // Route53 is global — no region, no account.
 func BuildRoute53HostedZoneARN(id string) string {
 	return fmt.Sprintf("arn:aws:route53:::hostedzone/%s", id)
+}
+
+// BuildSSMParameterARN: arn:aws:ssm:<region>:<account>:parameter/<name>
+// A hierarchical name's leading '/' is not doubled. AWS public
+// parameters (/aws/service/...) have an empty account segment.
+func BuildSSMParameterARN(region, account, name string) string {
+	return fmt.Sprintf("arn:aws:ssm:%s:%s:parameter/%s", region, account, strings.TrimPrefix(name, "/"))
 }

@@ -44,6 +44,7 @@ var LandedServices = []string{
 	"s3",
 	"secretsmanager",
 	"sqs",
+	"ssm",
 	"sts",
 }
 

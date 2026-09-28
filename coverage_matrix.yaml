@@ -429,3 +429,12 @@ entries:
     updates_exempt: true
     updates_exempt_reason: "aws_caller_identity is a read-only data source with nothing to update."
     integration_test_func_name: "^TestContract_sts_caller_identity_fake_account$"
+
+  # SSM Parameter Store. scenario_resource_type omitted: no generator key yet.
+  - aws_service: ssm
+    aws_resource_type: aws_ssm_parameter
+    working_dir_name: ssm_parameter
+    misconfigured_dir_name: ssm_parameter_duplicate
+    updates_exempt: true
+    updates_exempt_reason: "The Overwrite=true path (Version bump, omitted Description/DataType/KeyId/Tier kept) is pinned in TestContract_ssm_put_parameter_no_overwrite_cas and TestSSM_ParameterLifecycle; no v1/v2 example yet."
+    integration_test_func_name: "^TestSSM_ParameterLifecycle$"

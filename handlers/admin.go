@@ -25,6 +25,7 @@ import (
 //	  "sqs":            {...},
 //	  "secretsmanager": {...},
 //	  "route53":        {...},
+//	  "ssm":            {"parameters": [...]},  // name, type, version, region; no values
 //	  "operations":     [...],   // bookkeeping; ignored by countOrphans
 //	  "audit":          [...]    // request log; ignored by countOrphans
 //	}
@@ -136,6 +137,7 @@ func (app *Application) collectState(service string) map[string]any {
 	state["sqs"] = app.gatherSQSStateReal()
 	state["route53"] = app.gatherRoute53StateReal()
 	state["secretsmanager"] = app.gatherSecretsManagerStateReal()
+	state["ssm"] = app.gatherSSMStateReal()
 
 	if service == "" {
 		return state
