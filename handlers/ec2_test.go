@@ -1,6 +1,8 @@
 package handlers_test
 
 import (
+	"encoding/json"
+	"encoding/xml"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -327,6 +329,225 @@ func TestEC2_SecurityGroupCRUDPlusRules(t *testing.T) {
 	// DeleteSecurityGroup.
 	resp, _ = ec2Call(t, srv, region, "DeleteSecurityGroup", url.Values{"GroupId": {sgID}})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteSecurityGroup")
+}
+
+// sgRuleSourceXML decodes any DescribeSecurityGroups rule source item;
+// only the fields of that source's kind are set.
+type sgRuleSourceXML struct {
+	CidrIp       string `xml:"cidrIp"`
+	CidrIpv6     string `xml:"cidrIpv6"`
+	GroupId      string `xml:"groupId"`
+	UserId       string `xml:"userId"`
+	PrefixListId string `xml:"prefixListId"`
+	Description  string `xml:"description"`
+}
+
+type sgPermXML struct {
+	IpProtocol    string            `xml:"ipProtocol"`
+	FromPort      int               `xml:"fromPort"`
+	ToPort        int               `xml:"toPort"`
+	IpRanges      []sgRuleSourceXML `xml:"ipRanges>item"`
+	Ipv6Ranges    []sgRuleSourceXML `xml:"ipv6Ranges>item"`
+	Groups        []sgRuleSourceXML `xml:"groups>item"`
+	PrefixListIds []sgRuleSourceXML `xml:"prefixListIds>item"`
+}
+
+// newSGPair creates a VPC with two security groups and returns the
+// server, the group under test and a peer group to reference.
+func newSGPair(t *testing.T, region string) (srv *httptest.Server, sgID, peerID string) {
+	t.Helper()
+	srv = newTestServer(t, ":memory:")
+	_, body := ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	vpcID := extractEC2Tag(body, "vpcId")
+	ids := make([]string, 2)
+	for i, name := range []string{"web", "lb"} {
+		resp, body := ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
+			"GroupName": {name}, "GroupDescription": {name}, "VpcId": {vpcID},
+		})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "CreateSecurityGroup %s: %s", name, body)
+		ids[i] = extractEC2Tag(body, "groupId")
+	}
+	return srv, ids[0], ids[1]
+}
+
+func sgAuthorize(t *testing.T, srv *httptest.Server, region, action, sgID string, params url.Values) {
+	t.Helper()
+	params.Set("GroupId", sgID)
+	resp, body := ec2Call(t, srv, region, action, params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", action, body)
+}
+
+// describeSGRules returns sgID's ingress and egress permissions as
+// DescribeSecurityGroups renders them.
+func describeSGRules(t *testing.T, srv *httptest.Server, region, sgID string) (ingress, egress []sgPermXML) {
+	t.Helper()
+	resp, body := ec2Call(t, srv, region, "DescribeSecurityGroups", url.Values{"GroupId.1": {sgID}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeSecurityGroups: %s", body)
+	var out struct {
+		Groups []struct {
+			Ingress []sgPermXML `xml:"ipPermissions>item"`
+			Egress  []sgPermXML `xml:"ipPermissionsEgress>item"`
+		} `xml:"securityGroupInfo>item"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "decode DescribeSecurityGroups: %s", body)
+	require.Len(t, out.Groups, 1, "DescribeSecurityGroups: %s", body)
+	return out.Groups[0].Ingress, out.Groups[0].Egress
+}
+
+// sgPermByPort returns the permission with the given from_port, or the
+// zero value.
+func sgPermByPort(perms []sgPermXML, port int) sgPermXML {
+	for _, p := range perms {
+		if p.FromPort == port {
+			return p
+		}
+	}
+	return sgPermXML{}
+}
+
+// sgStateRules returns sgID's ip_permissions and ip_permissions_egress
+// from /mock/state as raw JSON.
+func sgStateRules(t *testing.T, srv *httptest.Server, sgID string) (ingress, egress string) {
+	t.Helper()
+	resp, body := doGet(t, srv, "/mock/state/ec2")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GET /mock/state/ec2: %s", body)
+	var state struct {
+		EC2 struct {
+			SecurityGroups []struct {
+				ID      string          `json:"id"`
+				Ingress json.RawMessage `json:"ip_permissions"`
+				Egress  json.RawMessage `json:"ip_permissions_egress"`
+			} `json:"security_groups"`
+		} `json:"ec2"`
+	}
+	require.NoError(t, json.Unmarshal(body, &state), "decode /mock/state: %s", body)
+	for _, sg := range state.EC2.SecurityGroups {
+		if sg.ID == sgID {
+			return string(sg.Ingress), string(sg.Egress)
+		}
+	}
+	require.FailNow(t, "security group missing from /mock/state", "%s in %s", sgID, body)
+	return "", ""
+}
+
+func TestEC2_SecurityGroupFullIpPermissionsShape(t *testing.T) {
+	const region = "us-east-1"
+	const prefixList = "pl-0123456789abcdef0"
+	srv, sgID, peerID := newSGPair(t, region)
+
+	// tcp 22 from 0.0.0.0/0 and ::/0 in one permission, the way an
+	// inline ingress block with cidr_blocks + ipv6_cidr_blocks sends it.
+	sgAuthorize(t, srv, region, "AuthorizeSecurityGroupIngress", sgID, url.Values{
+		"IpPermissions.1.IpProtocol":                   {"tcp"},
+		"IpPermissions.1.FromPort":                     {"22"},
+		"IpPermissions.1.ToPort":                       {"22"},
+		"IpPermissions.1.IpRanges.1.CidrIp":            {"0.0.0.0/0"},
+		"IpPermissions.1.Ipv6Ranges.1.CidrIpv6":        {"::/0"},
+		"IpPermissions.2.IpProtocol":                   {"tcp"},
+		"IpPermissions.2.FromPort":                     {"443"},
+		"IpPermissions.2.ToPort":                       {"443"},
+		"IpPermissions.2.Groups.1.GroupId":             {peerID},
+		"IpPermissions.3.IpProtocol":                   {"tcp"},
+		"IpPermissions.3.FromPort":                     {"5432"},
+		"IpPermissions.3.ToPort":                       {"5432"},
+		"IpPermissions.3.PrefixListIds.1.PrefixListId": {prefixList},
+	})
+	sgAuthorize(t, srv, region, "AuthorizeSecurityGroupEgress", sgID, url.Values{
+		"IpPermissions.1.IpProtocol":        {"-1"},
+		"IpPermissions.1.IpRanges.1.CidrIp": {"0.0.0.0/0"},
+	})
+
+	ingress, _ := describeSGRules(t, srv, region, sgID)
+	assert.Equal(t, []sgRuleSourceXML{{CidrIpv6: "::/0"}}, sgPermByPort(ingress, 22).Ipv6Ranges, "tcp 22 ::/0 in ipv6Ranges")
+	assert.Equal(t, []sgRuleSourceXML{{GroupId: peerID}}, sgPermByPort(ingress, 443).Groups, "SG-to-SG rule as a UserIdGroupPair")
+	assert.Equal(t, []sgRuleSourceXML{{PrefixListId: prefixList}}, sgPermByPort(ingress, 5432).PrefixListIds, "prefix list rule")
+
+	stateIngress, stateEgress := sgStateRules(t, srv, sgID)
+	assert.Contains(t, stateIngress, `"ipv6_ranges":[{"cidr_ipv6":"::/0","description":""}]`, "tcp 22 ::/0 in /mock/state")
+	assert.JSONEq(t, `[{"ip_protocol":"-1","from_port":0,"to_port":0,
+		"ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],
+		"ipv6_ranges":[],"user_id_group_pairs":[],"prefix_list_ids":[]}]`, stateEgress, "allow-all egress in ip_permissions_egress")
+
+	// Revoking ::/0 removes only that source; the IPv4 source on the
+	// same permission stays.
+	sgAuthorize(t, srv, region, "RevokeSecurityGroupIngress", sgID, url.Values{
+		"IpPermissions.1.IpProtocol":            {"tcp"},
+		"IpPermissions.1.FromPort":              {"22"},
+		"IpPermissions.1.ToPort":                {"22"},
+		"IpPermissions.1.Ipv6Ranges.1.CidrIpv6": {"::/0"},
+	})
+	stateIngress, _ = sgStateRules(t, srv, sgID)
+	assert.Contains(t, stateIngress, `"ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[]`, "revoke ::/0 keeps the IPv4 source in /mock/state")
+}
+
+// authorizeEverySourceKind puts one ingress permission carrying every
+// source kind, each with its own description, and one egress rule.
+func authorizeEverySourceKind(t *testing.T, srv *httptest.Server, region, sgID, peerID string) {
+	t.Helper()
+	sgAuthorize(t, srv, region, "AuthorizeSecurityGroupIngress", sgID, url.Values{
+		"IpPermissions.1.IpProtocol":                   {"tcp"},
+		"IpPermissions.1.FromPort":                     {"22"},
+		"IpPermissions.1.ToPort":                       {"22"},
+		"IpPermissions.1.IpRanges.1.CidrIp":            {"10.0.0.0/8"},
+		"IpPermissions.1.IpRanges.1.Description":       {"office"},
+		"IpPermissions.1.Ipv6Ranges.1.CidrIpv6":        {"::/0"},
+		"IpPermissions.1.Ipv6Ranges.1.Description":     {"anywhere v6"},
+		"IpPermissions.1.Groups.1.GroupId":             {peerID},
+		"IpPermissions.1.Groups.1.UserId":              {"111122223333"},
+		"IpPermissions.1.Groups.1.Description":         {"from lb"},
+		"IpPermissions.1.PrefixListIds.1.PrefixListId": {"pl-0123456789abcdef0"},
+		"IpPermissions.1.PrefixListIds.1.Description":  {"s3"},
+	})
+	sgAuthorize(t, srv, region, "AuthorizeSecurityGroupEgress", sgID, url.Values{
+		"IpPermissions.1.IpProtocol":             {"-1"},
+		"IpPermissions.1.IpRanges.1.CidrIp":      {"0.0.0.0/0"},
+		"IpPermissions.1.IpRanges.1.Description": {"all out"},
+	})
+}
+
+// TestEC2_SecurityGroupStateRulesGolden pins the exact /mock/state
+// permission keys that state policies (open-ingress deny_state) read.
+func TestEC2_SecurityGroupStateRulesGolden(t *testing.T) {
+	const region = "us-east-1"
+	srv, sgID, peerID := newSGPair(t, region)
+	authorizeEverySourceKind(t, srv, region, sgID, peerID)
+
+	ingress, egress := sgStateRules(t, srv, sgID)
+	assert.JSONEq(t, strings.ReplaceAll(`[{
+		"ip_protocol": "tcp", "from_port": 22, "to_port": 22,
+		"ip_ranges": [{"cidr_ip": "10.0.0.0/8", "description": "office"}],
+		"ipv6_ranges": [{"cidr_ipv6": "::/0", "description": "anywhere v6"}],
+		"user_id_group_pairs": [{"group_id": "PEER", "user_id": "111122223333", "description": "from lb"}],
+		"prefix_list_ids": [{"prefix_list_id": "pl-0123456789abcdef0", "description": "s3"}]
+	}]`, "PEER", peerID), ingress)
+	assert.JSONEq(t, `[{
+		"ip_protocol": "-1", "from_port": 0, "to_port": 0,
+		"ip_ranges": [{"cidr_ip": "0.0.0.0/0", "description": "all out"}],
+		"ipv6_ranges": [], "user_id_group_pairs": [], "prefix_list_ids": []
+	}]`, egress)
+}
+
+// TestContract_ec2_sg_rule_source_descriptions_round_trip pins
+// CRITICAL[ec2-sg-rule-source-descriptions-round-trip] in ec2.go.
+func TestContract_ec2_sg_rule_source_descriptions_round_trip(t *testing.T) {
+	const region = "us-east-1"
+	srv, sgID, peerID := newSGPair(t, region)
+	authorizeEverySourceKind(t, srv, region, sgID, peerID)
+
+	ingress, egress := describeSGRules(t, srv, region, sgID)
+	assert.Equal(t, []sgPermXML{{
+		IpProtocol:    "tcp",
+		FromPort:      22,
+		ToPort:        22,
+		IpRanges:      []sgRuleSourceXML{{CidrIp: "10.0.0.0/8", Description: "office"}},
+		Ipv6Ranges:    []sgRuleSourceXML{{CidrIpv6: "::/0", Description: "anywhere v6"}},
+		Groups:        []sgRuleSourceXML{{GroupId: peerID, UserId: "111122223333", Description: "from lb"}},
+		PrefixListIds: []sgRuleSourceXML{{PrefixListId: "pl-0123456789abcdef0", Description: "s3"}},
+	}}, ingress)
+	assert.Equal(t, []sgPermXML{{
+		IpProtocol: "-1",
+		IpRanges:   []sgRuleSourceXML{{CidrIp: "0.0.0.0/0", Description: "all out"}},
+	}}, egress)
 }
 
 func TestEC2_RunInstancesAndTerminate(t *testing.T) {
