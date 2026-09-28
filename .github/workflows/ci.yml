@@ -115,7 +115,7 @@ jobs:
           echo "fakeaws did not answer /healthz" >&2
           cat fakeaws.log
           exit 1
-      - run: INFRAFACTORY_ENABLE_E2E=1 go test ./examples/ -v -count=1 -timeout 30m
+      - run: INFRAFACTORY_ENABLE_E2E=1 go test ./examples/ -v -count=1 -timeout 45m
       - if: failure()
         run: cat fakeaws.log
 

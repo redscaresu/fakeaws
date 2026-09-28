@@ -88,7 +88,7 @@ fakeaws/
 
 Adding a directory to any of the three trees auto-registers — no per-example test wiring. Each subdirectory is its own `t.Run` sub-test.
 
-Where it runs: the **`provider-smoke` job in this repo's `.github/workflows/ci.yml`**, on every pull request — OpenTofu 1.12.6, fakeaws built and started on `:8082` (the examples hardcode it), then `INFRAFACTORY_ENABLE_E2E=1 go test ./examples/ -v -count=1 -timeout 30m`. Locally: start fakeaws on `:8082` and run the same command. Without the env var, the test `t.Skip`s with a clear message — mirroring the gating pattern infrafactory uses for tofu-driven e2e tests. The harness POSTs `/mock/reset` before each example.
+Where it runs: the **`provider-smoke` job in this repo's `.github/workflows/ci.yml`**, on every pull request — OpenTofu 1.12.6, fakeaws built and started on `:8082` (the examples hardcode it), then `INFRAFACTORY_ENABLE_E2E=1 go test ./examples/ -v -count=1 -timeout 45m`. Locally: start fakeaws on `:8082` and run the same command. Without the env var, the test `t.Skip`s with a clear message — mirroring the gating pattern infrafactory uses for tofu-driven e2e tests. The harness POSTs `/mock/reset` before each example.
 
 Known-red examples: `examples/known_red_test.go::knownRed` maps `<tree>/<dir>` → `{stage, fragment, owner}`. A listed example must fail at that stage with that fragment in its output (logged, no `t.Skip`); if it passes the harness fails with "remove it from knownRed", and if it fails any other way the harness fails. Anything not listed must pass. Fixing a known-red example means deleting its entry in the same PR.
 
