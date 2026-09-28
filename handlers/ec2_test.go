@@ -3,10 +3,13 @@ package handlers_test
 import (
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -626,6 +629,315 @@ func TestEC2_RunInstances_SubnetVPCPairing(t *testing.T) {
 		"SecurityGroupId.1": {sgA},
 	})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "subnet/SG VPC mismatch body=%s", body)
+}
+
+// instanceNet is a VPC with one subnet and two security groups.
+type instanceNet struct {
+	subnet string
+	sgs    []string
+}
+
+func newInstanceNet(t *testing.T, srv *httptest.Server, region, vpcCidr, subnetCidr string) instanceNet {
+	t.Helper()
+	_, body := ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {vpcCidr}})
+	vpcID := extractEC2Tag(body, "vpcId")
+	resp, body := ec2Call(t, srv, region, "CreateSubnet", url.Values{"VpcId": {vpcID}, "CidrBlock": {subnetCidr}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateSubnet: %s", body)
+	n := instanceNet{subnet: extractEC2Tag(body, "subnetId")}
+	for _, name := range []string{"web", "ssh"} {
+		resp, body := ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
+			"GroupName": {name}, "GroupDescription": {name}, "VpcId": {vpcID},
+		})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "CreateSecurityGroup: %s", body)
+		n.sgs = append(n.sgs, extractEC2Tag(body, "groupId"))
+	}
+	return n
+}
+
+// nicParams is the NetworkInterface.1.* launch the provider sends when
+// associate_public_ip_address is set.
+func nicParams(subnet string, sgs []string, public bool) url.Values {
+	p := url.Values{
+		"ImageId":                                     {"ami-0abcd1234"},
+		"InstanceType":                                {"t3.micro"},
+		"NetworkInterface.1.DeviceIndex":              {"0"},
+		"NetworkInterface.1.SubnetId":                 {subnet},
+		"NetworkInterface.1.AssociatePublicIpAddress": {strconv.FormatBool(public)},
+	}
+	for i, sg := range sgs {
+		p.Set(fmt.Sprintf("NetworkInterface.1.SecurityGroupId.%d", i+1), sg)
+	}
+	return p
+}
+
+func topLevelParams(subnet string, sgs []string) url.Values {
+	p := url.Values{"ImageId": {"ami-0abcd1234"}, "InstanceType": {"t3.micro"}, "SubnetId": {subnet}}
+	for i, sg := range sgs {
+		p.Set(fmt.Sprintf("SecurityGroupId.%d", i+1), sg)
+	}
+	return p
+}
+
+func runInstance(t *testing.T, srv *httptest.Server, region string, params url.Values) string {
+	t.Helper()
+	resp, body := ec2Call(t, srv, region, "RunInstances", params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "RunInstances: %s", body)
+	return extractEC2Tag(body, "instanceId")
+}
+
+type instanceNetXML struct {
+	PrivateIpAddress string   `xml:"privateIpAddress"`
+	IpAddress        string   `xml:"ipAddress"`
+	SourceDestCheck  bool     `xml:"sourceDestCheck"`
+	Groups           []string `xml:"groupSet>item>groupId"`
+	ENIs             []struct {
+		ID              string `xml:"networkInterfaceId"`
+		PublicIp        string `xml:"association>publicIp"`
+		SourceDestCheck bool   `xml:"sourceDestCheck"`
+	} `xml:"networkInterfaceSet>item"`
+}
+
+// describeInstance returns id's network fields from DescribeInstances,
+// and the raw body.
+func describeInstance(t *testing.T, srv *httptest.Server, region, id string) (instanceNetXML, string) {
+	t.Helper()
+	resp, body := ec2Call(t, srv, region, "DescribeInstances", url.Values{"InstanceId.1": {id}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeInstances: %s", body)
+	var out struct {
+		Instances []instanceNetXML `xml:"reservationSet>item>instancesSet>item"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "decode DescribeInstances: %s", body)
+	require.Len(t, out.Instances, 1, "DescribeInstances: %s", body)
+	return out.Instances[0], string(body)
+}
+
+func describeENIIDs(t *testing.T, srv *httptest.Server, region string, params url.Values) []string {
+	t.Helper()
+	resp, body := ec2Call(t, srv, region, "DescribeNetworkInterfaces", params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeNetworkInterfaces: %s", body)
+	var out struct {
+		IDs []string `xml:"networkInterfaceSet>item>networkInterfaceId"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "decode DescribeNetworkInterfaces: %s", body)
+	return out.IDs
+}
+
+type instanceStateXML struct {
+	Instances []struct {
+		ID        string `json:"id"`
+		PublicIP  string `json:"public_ip"`
+		PrivateIP string `json:"private_ip"`
+	} `json:"instances"`
+	ENIs []struct {
+		ID         string `json:"id"`
+		InstanceID string `json:"instance_id"`
+	} `json:"network_interfaces"`
+}
+
+func instanceState(t *testing.T, srv *httptest.Server) instanceStateXML {
+	t.Helper()
+	resp, body := doGet(t, srv, "/mock/state/ec2")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GET /mock/state/ec2: %s", body)
+	var state struct {
+		EC2 instanceStateXML `json:"ec2"`
+	}
+	require.NoError(t, json.Unmarshal(body, &state), "decode /mock/state: %s", body)
+	require.NotNil(t, state.EC2.ENIs, "network_interfaces is a list, never null: %s", body)
+	return state.EC2
+}
+
+// TestContract_ec2_instance_public_ip_from_primary_eni pins
+// CRITICAL[ec2-instance-public-ip-from-primary-eni] in ec2.go.
+func TestContract_ec2_instance_public_ip_from_primary_eni(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	n := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+
+	id := runInstance(t, srv, region, nicParams(n.subnet, n.sgs, true))
+
+	inst, body := describeInstance(t, srv, region, id)
+	require.Len(t, inst.ENIs, 1, "networkInterfaceSet: %s", body)
+	assert.NotEmpty(t, inst.IpAddress, "ipAddress: %s", body)
+	assert.Equal(t, inst.ENIs[0].PublicIp, inst.IpAddress, "ipAddress is the primary ENI's association.publicIp")
+	ip, err := netip.ParseAddr(inst.PrivateIpAddress)
+	require.NoError(t, err, "privateIpAddress: %s", body)
+	assert.True(t, netip.MustParsePrefix("10.0.1.0/24").Contains(ip), "privateIpAddress %s outside the subnet", ip)
+	assert.Equal(t, n.sgs, inst.Groups, "instance groupSet is the two SGs")
+}
+
+// TestEC2_RunInstances_PublicIPOnlyWhenAsked: without
+// AssociatePublicIpAddress=true there is no ipAddress and no
+// association, in either launch form. Both land in one subnet, so
+// their private IPs must differ.
+func TestEC2_RunInstances_PublicIPOnlyWhenAsked(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	n := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+
+	var privateIPs []string
+	for name, params := range map[string]url.Values{
+		"AssociatePublicIpAddress=false": nicParams(n.subnet, n.sgs, false),
+		"top-level SubnetId":             topLevelParams(n.subnet, n.sgs),
+	} {
+		inst, body := describeInstance(t, srv, region, runInstance(t, srv, region, params))
+		assert.NotContains(t, body, "<ipAddress>", name)
+		assert.NotContains(t, body, "<association>", name)
+		assert.Equal(t, n.sgs, inst.Groups, name)
+		assert.NotEmpty(t, inst.PrivateIpAddress, name)
+		privateIPs = append(privateIPs, inst.PrivateIpAddress)
+	}
+	assert.NotEqual(t, privateIPs[0], privateIPs[1], "two instances in one subnet share a private IP")
+}
+
+// TestEC2_RunInstances_NICFailsLikeTopLevel: both launch forms go
+// through one subnet and SG-VPC check, so they fail with the same body.
+func TestEC2_RunInstances_NICFailsLikeTopLevel(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	a := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+	b := newInstanceNet(t, srv, region, "10.1.0.0/16", "10.1.1.0/24")
+
+	for name, c := range map[string]instanceNet{
+		"SG from another VPC": {subnet: a.subnet, sgs: b.sgs[:1]},
+		"unknown subnet":      {subnet: "subnet-missing"},
+	} {
+		topResp, topBody := ec2Call(t, srv, region, "RunInstances", topLevelParams(c.subnet, c.sgs))
+		nicResp, nicBody := ec2Call(t, srv, region, "RunInstances", nicParams(c.subnet, c.sgs, true))
+		assert.Equal(t, http.StatusNotFound, topResp.StatusCode, "%s top-level: %s", name, topBody)
+		assert.Equal(t, topResp.StatusCode, nicResp.StatusCode, name)
+		assert.Equal(t, string(topBody), string(nicBody), name)
+	}
+
+	for param, value := range map[string]string{
+		"SubnetId": a.subnet, "SecurityGroupId.1": a.sgs[0], "PrivateIpAddress": "10.0.1.50",
+	} {
+		both := nicParams(a.subnet, a.sgs, true)
+		both.Set(param, value)
+		resp, body := ec2Call(t, srv, region, "RunInstances", both)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s + NetworkInterface.1.*: %s", param, body)
+		assert.Equal(t, "InvalidParameterCombination", extractEC2Tag(body, "Code"), param)
+	}
+}
+
+// TestEC2_RunInstances_RequestedPrivateIP: a configured private_ip
+// arrives as NetworkInterface.1.PrivateIpAddress or PrivateIpAddress
+// and must be the address the instance gets.
+func TestEC2_RunInstances_RequestedPrivateIP(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	n := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+
+	nic := nicParams(n.subnet, n.sgs, true)
+	nic.Set("NetworkInterface.1.PrivateIpAddress", "10.0.1.50")
+	inst, _ := describeInstance(t, srv, region, runInstance(t, srv, region, nic))
+	assert.Equal(t, "10.0.1.50", inst.PrivateIpAddress, "NetworkInterface.1.PrivateIpAddress")
+
+	top := topLevelParams(n.subnet, n.sgs)
+	top.Set("PrivateIpAddress", "10.0.1.51")
+	inst, _ = describeInstance(t, srv, region, runInstance(t, srv, region, top))
+	assert.Equal(t, "10.0.1.51", inst.PrivateIpAddress, "top-level PrivateIpAddress")
+
+	resp, body := ec2Call(t, srv, region, "RunInstances", nic)
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "private IP already in use: %s", body)
+}
+
+// TestEC2_ModifyInstanceAttributeSourceDestCheck: the provider sends
+// source_dest_check = false through ModifyInstanceAttribute and reads
+// it back from the instance and its primary ENI.
+func TestEC2_ModifyInstanceAttributeSourceDestCheck(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	n := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+	id := runInstance(t, srv, region, topLevelParams(n.subnet, n.sgs))
+	inst, raw := describeInstance(t, srv, region, id)
+	require.Len(t, inst.ENIs, 1, "networkInterfaceSet: %s", raw)
+	assert.True(t, inst.SourceDestCheck, "sourceDestCheck defaults to true")
+
+	resp, body := ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{
+		"InstanceId": {id}, "SourceDestCheck.Value": {"false"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ModifyInstanceAttribute: %s", body)
+	inst, raw = describeInstance(t, srv, region, id)
+	require.Len(t, inst.ENIs, 1, "networkInterfaceSet: %s", raw)
+	assert.False(t, inst.SourceDestCheck, "instance sourceDestCheck: %s", raw)
+	assert.False(t, inst.ENIs[0].SourceDestCheck, "ENI sourceDestCheck: %s", raw)
+}
+
+func TestEC2_ModifyNetworkInterfaceAttributeGroups(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	a := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+	b := newInstanceNet(t, srv, region, "10.1.0.0/16", "10.1.1.0/24")
+	id := runInstance(t, srv, region, nicParams(a.subnet, a.sgs[:1], true))
+	inst, raw := describeInstance(t, srv, region, id)
+	require.Len(t, inst.ENIs, 1, "networkInterfaceSet: %s", raw)
+	eniID := inst.ENIs[0].ID
+
+	modify := func(sgID string) (*http.Response, []byte) {
+		return ec2Call(t, srv, region, "ModifyNetworkInterfaceAttribute", url.Values{
+			"NetworkInterfaceId": {eniID}, "SecurityGroupId.1": {sgID},
+		})
+	}
+	resp, body := modify(a.sgs[1])
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ModifyNetworkInterfaceAttribute: %s", body)
+	inst, _ = describeInstance(t, srv, region, id)
+	assert.Equal(t, []string{a.sgs[1]}, inst.Groups, "instance groupSet follows the ENI")
+
+	resp, body = modify(b.sgs[0])
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "SG from another VPC: %s", body)
+	inst, _ = describeInstance(t, srv, region, id)
+	assert.Equal(t, []string{a.sgs[1]}, inst.Groups, "refused change leaves groupSet alone")
+
+	eniID = "eni-missing"
+	resp, body = modify(a.sgs[0])
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, "InvalidNetworkInterfaceID.NotFound", extractEC2Tag(body, "Code"))
+}
+
+func TestEC2_TerminateInstancesDeletesENI(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	n := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+	id := runInstance(t, srv, region, nicParams(n.subnet, n.sgs, true))
+	inst, raw := describeInstance(t, srv, region, id)
+	require.Len(t, inst.ENIs, 1, "networkInterfaceSet: %s", raw)
+	eniID := inst.ENIs[0].ID
+
+	for name, params := range map[string]url.Values{
+		"attachment.instance-id": {"Filter.1.Name": {"attachment.instance-id"}, "Filter.1.Value.1": {id}},
+		"network-interface-id":   {"Filter.1.Name": {"network-interface-id"}, "Filter.1.Value.1": {eniID}},
+		"subnet-id":              {"Filter.1.Name": {"subnet-id"}, "Filter.1.Value.1": {n.subnet}},
+		"group-id":               {"Filter.1.Name": {"group-id"}, "Filter.1.Value.1": {n.sgs[1]}},
+		"NetworkInterfaceId.1":   {"NetworkInterfaceId.1": {eniID}},
+	} {
+		assert.Equal(t, []string{eniID}, describeENIIDs(t, srv, region, params), name)
+	}
+	assert.Empty(t, describeENIIDs(t, srv, region, url.Values{
+		"Filter.1.Name": {"attachment.instance-id"}, "Filter.1.Value.1": {"i-other"},
+	}), "non-matching filter")
+	resp, _ := ec2Call(t, srv, region, "DescribeNetworkInterfaces", url.Values{
+		"Filter.1.Name": {"description"}, "Filter.1.Value.1": {"x"},
+	})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "unsupported filter is refused, not ignored")
+
+	state := instanceState(t, srv)
+	require.Len(t, state.Instances, 1)
+	assert.Equal(t, inst.IpAddress, state.Instances[0].PublicIP, "state public_ip")
+	assert.Equal(t, inst.PrivateIpAddress, state.Instances[0].PrivateIP, "state private_ip")
+	assert.Len(t, state.ENIs, 1, "state network_interfaces")
+
+	resp, body := ec2Call(t, srv, region, "TerminateInstances", url.Values{"InstanceId.1": {id}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "TerminateInstances: %s", body)
+
+	assert.Empty(t, describeENIIDs(t, srv, region, nil), "unfiltered DescribeNetworkInterfaces after terminate")
+	resp, body = ec2Call(t, srv, region, "DescribeNetworkInterfaces", url.Values{"NetworkInterfaceId.1": {eniID}})
+	assert.Equal(t, "InvalidNetworkInterfaceID.NotFound", extractEC2Tag(body, "Code"), "deleted ENI by id: %s", body)
+	inst, _ = describeInstance(t, srv, region, id)
+	state = instanceState(t, srv)
+	assert.Empty(t, state.ENIs, "state network_interfaces after terminate")
+	require.Len(t, state.Instances, 1)
+	assert.Equal(t, inst.IpAddress, state.Instances[0].PublicIP, "state public_ip after terminate")
+	assert.Equal(t, inst.PrivateIpAddress, state.Instances[0].PrivateIP, "state private_ip after terminate")
 }
 
 func TestEC2_KeyPairImportDescribeDelete(t *testing.T) {

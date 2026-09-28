@@ -2,7 +2,11 @@ package repository
 
 import (
 	"errors"
+	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/redscaresu/fakeaws/models"
 )
@@ -39,7 +43,7 @@ func TestInstanceCRUDPlusFK(t *testing.T) {
 		ID: "i-1", SubnetID: "subnet-missing", AMIID: "ami-1", InstanceType: "t3.micro",
 		Region: testRegion, ARN: "arn", State: "running", CreatedAt: "t",
 	}
-	if err := r.CreateInstance(testAccount, bad); !errors.Is(err, models.ErrNotFound) {
+	if err := r.CreateInstance(testAccount, bad, &EC2NetworkInterface{ID: "eni-1"}); !errors.Is(err, models.ErrNotFound) {
 		t.Errorf("CreateInstance with missing subnet: want ErrNotFound, got %v", err)
 	}
 
@@ -47,7 +51,7 @@ func TestInstanceCRUDPlusFK(t *testing.T) {
 		ID: "i-1", SubnetID: subnetID, AMIID: "ami-1", InstanceType: "t3.micro",
 		Region: testRegion, ARN: "arn", State: "running", CreatedAt: "t",
 	}
-	if err := r.CreateInstance(testAccount, good); err != nil {
+	if err := r.CreateInstance(testAccount, good, &EC2NetworkInterface{ID: "eni-1"}); err != nil {
 		t.Fatalf("CreateInstance: %v", err)
 	}
 
@@ -67,7 +71,7 @@ func TestInstanceSubnetDeleteRESTRICT(t *testing.T) {
 		ID: "i-1", SubnetID: subnetID, AMIID: "ami-1", InstanceType: "t3.micro",
 		Region: testRegion, ARN: "arn", State: "running", CreatedAt: "t",
 	}
-	if err := r.CreateInstance(testAccount, inst); err != nil {
+	if err := r.CreateInstance(testAccount, inst, &EC2NetworkInterface{ID: "eni-1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -94,7 +98,7 @@ func TestInstanceTerminalStateRefusesTransition(t *testing.T) {
 		ID: "i-1", SubnetID: subnetID, AMIID: "ami-1", InstanceType: "t3.micro",
 		Region: testRegion, ARN: "arn", State: "running", CreatedAt: "t",
 	}
-	r.CreateInstance(testAccount, inst)
+	r.CreateInstance(testAccount, inst, &EC2NetworkInterface{ID: "eni-1"})
 
 	if err := r.SetInstanceState(testAccount, testRegion, "i-1", "terminated"); err != nil {
 		t.Fatalf("transition to terminated: %v", err)
@@ -104,6 +108,61 @@ func TestInstanceTerminalStateRefusesTransition(t *testing.T) {
 	if err := r.SetInstanceState(testAccount, testRegion, "i-1", "running"); !errors.Is(err, models.ErrConflict) {
 		t.Errorf("transition out of terminated: want ErrConflict, got %v", err)
 	}
+}
+
+// TestPrivateIP pins the subnet allocator: AWS keeps the first four
+// addresses and the last one, so a /28 holds 11 ENIs, and a requested
+// address must be one of those and free.
+func TestPrivateIP(t *testing.T) {
+	used := map[string]bool{}
+	for i := 4; i <= 14; i++ {
+		ip, err := privateIP("10.0.1.0/28", "", used)
+		require.NoError(t, err, "address %d", i)
+		assert.Equal(t, fmt.Sprintf("10.0.1.%d", i), ip)
+		used[ip] = true
+	}
+	_, err := privateIP("10.0.1.0/28", "", used)
+	assert.ErrorIs(t, err, models.ErrConflict, "a full /28")
+
+	ip, err := privateIP("10.0.1.7/24", "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "10.0.1.4", ip, "host bits in the cidr are masked off")
+
+	ip, err = privateIP("10.0.1.0/24", "10.0.1.50", map[string]bool{"10.0.1.4": true})
+	require.NoError(t, err)
+	assert.Equal(t, "10.0.1.50", ip, "a requested free address")
+	for _, want := range []string{"10.0.1.4", "10.0.1.1", "10.0.1.255", "10.0.2.5"} {
+		_, err = privateIP("10.0.1.0/24", want, map[string]bool{"10.0.1.4": true})
+		assert.ErrorIs(t, err, models.ErrConflict, "requested %s (in use, reserved or outside)", want)
+	}
+
+	_, err = privateIP("2001:db8::/64", "", nil)
+	assert.ErrorIs(t, err, models.ErrConflict, "IPv6 subnet cidr")
+}
+
+// TestCreateInstanceFullSubnetIsAtomic: when the subnet has no free
+// address the ENI insert fails and the instance row rolls back with it.
+func TestCreateInstanceFullSubnetIsAtomic(t *testing.T) {
+	r := setupRepo(t)
+	setupVPCSubnet(t, r)
+	small := &EC2Subnet{ID: "subnet-28", VPCID: "vpc-1", CidrBlock: "10.0.2.0/28", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}
+	require.NoError(t, r.CreateSubnet(testAccount, small))
+	create := func(n int) error {
+		inst := &EC2Instance{
+			ID: fmt.Sprintf("i-%d", n), SubnetID: small.ID, AMIID: "ami-1", InstanceType: "t3.micro",
+			Region: testRegion, ARN: "arn", State: "running", CreatedAt: "t",
+		}
+		return r.CreateInstance(testAccount, inst, &EC2NetworkInterface{ID: fmt.Sprintf("eni-%d", n)})
+	}
+	for n := 1; n <= 11; n++ {
+		require.NoError(t, create(n), "instance %d", n)
+	}
+	assert.ErrorIs(t, create(12), models.ErrConflict, "12th instance in a /28")
+	_, err := r.GetInstance(testAccount, testRegion, "i-12")
+	assert.ErrorIs(t, err, models.ErrNotFound, "failed launch left an instance row")
+	enis, err := r.ListNetworkInterfaces(testAccount, "")
+	require.NoError(t, err)
+	assert.Len(t, enis, 11)
 }
 
 func TestKeyPairCRUD(t *testing.T) {

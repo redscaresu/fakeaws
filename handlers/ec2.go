@@ -72,15 +72,12 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 		// subnet fixture (no scenario reads them back), so the no-op
 		// 200 response matches what the provider needs to proceed.
 		app.ec2NoOpSuccess(w, "ModifySubnetAttribute")
+
+	// ----- NetworkInterface (instance primary ENIs) -----
 	case "DescribeNetworkInterfaces":
-		// terraform-provider-aws's aws_subnet Delete preflight calls
-		// DescribeNetworkInterfaces to enumerate ENIs attached to the
-		// subnet (so it can wait for them to detach before deleting).
-		// fakeaws doesn't model ENIs as separate resources — they're
-		// auto-managed by instance / lb attachments — so we return an
-		// empty set, signalling "no ENIs to wait on, delete is safe."
-		awsproto.WriteEC2QueryRPCResponse(w, "DescribeNetworkInterfaces",
-			&ec2DescribeNetworkInterfacesResult{NetworkInterfaceSet: []ec2NetworkInterfaceXML{}})
+		app.ec2DescribeNetworkInterfaces(w, account, region, req)
+	case "ModifyNetworkInterfaceAttribute":
+		app.ec2ModifyNetworkInterfaceAttribute(w, account, region, req)
 
 	// ----- InternetGateway -----
 	case "CreateInternetGateway":
@@ -372,18 +369,6 @@ type ec2SubnetPrivateDnsOptionsXML struct {
 
 type ec2DescribeSubnetsResult struct {
 	SubnetSet []ec2SubnetXML `xml:"subnetSet>item"`
-}
-
-// ec2NetworkInterfaceXML is a placeholder for ENI items in the
-// DescribeNetworkInterfaces response. fakeaws returns an empty
-// network-interface set (no ENI modeling), so this type's full
-// shape doesn't matter — only the wrapper element naming does.
-type ec2NetworkInterfaceXML struct {
-	NetworkInterfaceId string `xml:"networkInterfaceId"`
-}
-
-type ec2DescribeNetworkInterfacesResult struct {
-	NetworkInterfaceSet []ec2NetworkInterfaceXML `xml:"networkInterfaceSet>item"`
 }
 
 type ec2CreateSubnetResult struct {
@@ -1399,14 +1384,66 @@ func sourcesState[T ec2RuleSource](srcs []T) []map[string]any {
 
 // ----- Instance handlers -----
 
+// ec2InstanceXML's network fields all come from the primary ENI; a
+// terminated instance has none.
+//
+// CRITICAL[ec2-instance-public-ip-from-primary-eni]: an instance
+// launched with NetworkInterface.1.AssociatePublicIpAddress=true MUST
+// describe with ipAddress equal to networkInterfaceSet[0].association
+// .publicIp, and one launched without MUST have neither element.
+// terraform-provider-aws sets associate_public_ip_address (ForceNew)
+// to association != nil, so a missing or stray association replaces
+// the instance on every plan. privateIpAddress lies in the subnet
+// CIDR, and groupSet is the ENI's groups, so a
+// ModifyNetworkInterfaceAttribute Groups change reads back.
 type ec2InstanceXML struct {
-	InstanceId    string              `xml:"instanceId"`
-	ImageId       string              `xml:"imageId"`
-	InstanceType  string              `xml:"instanceType"`
-	SubnetId      string              `xml:"subnetId"`
-	IamProfile    *ec2IamProfileXML   `xml:"iamInstanceProfile,omitempty"`
-	InstanceState ec2InstanceStateXML `xml:"instanceState"`
-	GroupSet      []ec2InstanceSGXML  `xml:"groupSet>item,omitempty"`
+	InstanceId          string                   `xml:"instanceId"`
+	ImageId             string                   `xml:"imageId"`
+	InstanceType        string                   `xml:"instanceType"`
+	SubnetId            string                   `xml:"subnetId"`
+	PrivateIpAddress    string                   `xml:"privateIpAddress,omitempty"`
+	IpAddress           string                   `xml:"ipAddress,omitempty"`
+	SourceDestCheck     *bool                    `xml:"sourceDestCheck,omitempty"`
+	IamProfile          *ec2IamProfileXML        `xml:"iamInstanceProfile,omitempty"`
+	InstanceState       ec2InstanceStateXML      `xml:"instanceState"`
+	GroupSet            []ec2InstanceSGXML       `xml:"groupSet>item,omitempty"`
+	NetworkInterfaceSet []ec2NetworkInterfaceXML `xml:"networkInterfaceSet>item,omitempty"`
+}
+
+// ec2NetworkInterfaceXML serves both an instance's networkInterfaceSet
+// item and a DescribeNetworkInterfaces item; the SDK ignores the
+// fields one shape has and the other lacks.
+type ec2NetworkInterfaceXML struct {
+	NetworkInterfaceId string                `xml:"networkInterfaceId"`
+	SubnetId           string                `xml:"subnetId"`
+	VpcId              string                `xml:"vpcId"`
+	OwnerId            string                `xml:"ownerId"`
+	Status             string                `xml:"status"`
+	InterfaceType      string                `xml:"interfaceType"`
+	PrivateIpAddress   string                `xml:"privateIpAddress"`
+	SourceDestCheck    bool                  `xml:"sourceDestCheck"`
+	GroupSet           []ec2InstanceSGXML    `xml:"groupSet>item"`
+	Attachment         ec2ENIAttachmentXML   `xml:"attachment"`
+	Association        *ec2ENIAssociationXML `xml:"association,omitempty"`
+}
+
+type ec2ENIAttachmentXML struct {
+	AttachmentId        string `xml:"attachmentId"`
+	InstanceId          string `xml:"instanceId"`
+	InstanceOwnerId     string `xml:"instanceOwnerId"`
+	DeviceIndex         int    `xml:"deviceIndex"`
+	NetworkCardIndex    int    `xml:"networkCardIndex"`
+	Status              string `xml:"status"`
+	DeleteOnTermination bool   `xml:"deleteOnTermination"`
+}
+
+type ec2ENIAssociationXML struct {
+	PublicIp  string `xml:"publicIp"`
+	IpOwnerId string `xml:"ipOwnerId"`
+}
+
+type ec2DescribeNetworkInterfacesResult struct {
+	NetworkInterfaceSet []ec2NetworkInterfaceXML `xml:"networkInterfaceSet>item"`
 }
 
 type ec2IamProfileXML struct {
@@ -1466,7 +1503,9 @@ func ec2InstanceStateForName(name string) ec2InstanceStateXML {
 	return ec2InstanceStateXML{Code: ec2InstanceStateCodes[name], Name: name}
 }
 
-func (app *Application) ec2InstanceToXML(account string, inst *repository.EC2Instance) ec2InstanceXML {
+// ec2InstanceToXML renders inst; eni is its primary ENI, nil once
+// terminated.
+func ec2InstanceToXML(inst *repository.EC2Instance, eni *repository.EC2NetworkInterface) ec2InstanceXML {
 	x := ec2InstanceXML{
 		InstanceId:    inst.ID,
 		ImageId:       inst.AMIID,
@@ -1480,22 +1519,55 @@ func (app *Application) ec2InstanceToXML(account string, inst *repository.EC2Ins
 			Id:  inst.IAMInstanceProfileName,
 		}
 	}
-	for _, sgID := range inst.VPCSecurityGroupIDs {
+	if eni == nil {
+		return x
+	}
+	eniXML := ec2ENIToXML(eni)
+	x.PrivateIpAddress = eni.PrivateIP
+	x.IpAddress = eni.PublicIP
+	x.SourceDestCheck = &eniXML.SourceDestCheck
+	x.GroupSet = eniXML.GroupSet
+	x.NetworkInterfaceSet = []ec2NetworkInterfaceXML{eniXML}
+	return x
+}
+
+func ec2ENIToXML(eni *repository.EC2NetworkInterface) ec2NetworkInterfaceXML {
+	x := ec2NetworkInterfaceXML{
+		NetworkInterfaceId: eni.ID,
+		SubnetId:           eni.SubnetID,
+		VpcId:              eni.VPCID,
+		OwnerId:            awsproto.FakeAccountID,
+		Status:             "in-use",
+		InterfaceType:      "interface",
+		PrivateIpAddress:   eni.PrivateIP,
+		SourceDestCheck:    eni.SourceDestCheck,
+		GroupSet:           []ec2InstanceSGXML{},
+		Attachment: ec2ENIAttachmentXML{
+			AttachmentId:        eni.AttachmentID,
+			InstanceId:          eni.InstanceID,
+			InstanceOwnerId:     awsproto.FakeAccountID,
+			Status:              "attached",
+			DeleteOnTermination: true,
+		},
+	}
+	for _, sgID := range eni.SecurityGroupIDs {
 		x.GroupSet = append(x.GroupSet, ec2InstanceSGXML{GroupId: sgID})
+	}
+	if eni.PublicIP != "" {
+		x.Association = &ec2ENIAssociationXML{PublicIp: eni.PublicIP, IpOwnerId: "amazon"}
 	}
 	return x
 }
 
-// parseSecurityGroupIDs reads SecurityGroupId.<n> params (the AWS
-// Query-RPC shape for vpc_security_group_ids).
-func parseSecurityGroupIDs(req awsproto.QueryRPCRequest) []string {
-	var ids []string
-	for k, vs := range req.Params {
-		if strings.HasPrefix(k, "SecurityGroupId.") && len(vs) > 0 {
-			ids = append(ids, vs[0])
-		}
+// queryListValues returns a flattened scalar list (<prefix>1,
+// <prefix>2, ...) in order, never nil. The SDK numbers lists from 1
+// without gaps.
+func queryListValues(p url.Values, prefix string) []string {
+	out := []string{}
+	for i := 1; p.Has(prefix + strconv.Itoa(i)); i++ {
+		out = append(out, p.Get(prefix+strconv.Itoa(i)))
 	}
-	return ids
+	return out
 }
 
 // parseInstanceIDs reads InstanceId.<n> params.
@@ -1509,11 +1581,83 @@ func parseInstanceIDs(req awsproto.QueryRPCRequest) []string {
 	return ids
 }
 
+// ec2InstanceNetwork is where RunInstances puts the primary ENI.
+type ec2InstanceNetwork struct {
+	subnetID          string
+	sgIDs             []string
+	privateIP         string // empty: the lowest free address
+	associatePublicIP bool
+}
+
+// errNICWithInstanceLevelPlacement is AWS's InvalidParameterCombination.
+var errNICWithInstanceLevelPlacement = errors.New("Network interfaces and an instance-level subnet ID, security groups or private IP may not be specified on the same request")
+
+// parseInstanceNetwork reads either the top-level SubnetId +
+// SecurityGroupId.N form or NetworkInterface.1.*, which the provider
+// sends whenever associate_public_ip_address is set. A top-level
+// launch gets no public IP (MapPublicIpOnLaunch is not modeled).
+func parseInstanceNetwork(p url.Values) (ec2InstanceNetwork, error) {
+	top := ec2InstanceNetwork{
+		subnetID:  p.Get("SubnetId"),
+		sgIDs:     queryListValues(p, "SecurityGroupId."),
+		privateIP: p.Get("PrivateIpAddress"),
+	}
+	nics := queryListItems(p, "NetworkInterface.")
+	if len(nics) == 0 {
+		return top, nil
+	}
+	if top.subnetID != "" || len(top.sgIDs) > 0 || top.privateIP != "" {
+		return ec2InstanceNetwork{}, errNICWithInstanceLevelPlacement
+	}
+	const nic = "NetworkInterface.1."
+	if len(nics) > 1 || nics[0] != nic || p.Get(nic+"DeviceIndex") != "0" ||
+		p.Get(nic+"NetworkInterfaceId") != "" || p.Get(nic+"DeleteOnTermination") == "false" {
+		return ec2InstanceNetwork{}, fmt.Errorf("fakeaws launches only a new primary network interface (NetworkInterface.1, DeviceIndex 0, deleted on termination): %w", models.ErrConflict)
+	}
+	return ec2InstanceNetwork{
+		subnetID:          p.Get(nic + "SubnetId"),
+		sgIDs:             queryListValues(p, nic+"SecurityGroupId."),
+		privateIP:         p.Get(nic + "PrivateIpAddress"),
+		associatePublicIP: p.Get(nic+"AssociatePublicIpAddress") == "true",
+	}, nil
+}
+
+// checkSubnetGroups looks up the subnet and refuses a security group
+// from another VPC (S44-T8 regression pattern; the load-bearing fakegcp
+// pass-27 finding ported to AWS). Both RunInstances forms and
+// ModifyNetworkInterfaceAttribute go through it, so they fail alike.
+func (app *Application) checkSubnetGroups(account, region, subnetID string, sgIDs []string) error {
+	subnet, err := app.repo.GetSubnet(account, region, subnetID)
+	if err != nil {
+		return err
+	}
+	for _, sgID := range sgIDs {
+		sg, err := app.repo.GetSecurityGroup(account, region, sgID)
+		if err != nil {
+			return err
+		}
+		if sg.VPCID != subnet.VPCID {
+			return fmt.Errorf("security group %q lives in vpc %q but subnet %q is in vpc %q: %w",
+				sgID, sg.VPCID, subnetID, subnet.VPCID, models.ErrNotFound)
+		}
+	}
+	return nil
+}
+
 func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	subnetID := req.Params.Get("SubnetId")
+	nw, err := parseInstanceNetwork(req.Params)
+	if errors.Is(err, errNICWithInstanceLevelPlacement) {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query,
+			http.StatusBadRequest, "InvalidParameterCombination", err.Error())
+		return
+	}
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
 	imageID := req.Params.Get("ImageId")
 	instanceType := req.Params.Get("InstanceType")
-	if subnetID == "" || imageID == "" || instanceType == "" {
+	if nw.subnetID == "" || imageID == "" || instanceType == "" {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("SubnetId, ImageId, InstanceType required: %w", models.ErrConflict))
 		return
@@ -1530,47 +1674,34 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	// produces noise without catching real bugs. Treat any well-formed
 	// `ami-*` value the caller hands us as a valid stub.
 	app.ensureAMIExists(account, region, imageID)
-	// Subnet/VPC pairing — if SecurityGroupId.<n> is given, the SGs'
-	// VPC must match the subnet's VPC (S44-T8 regression pattern; the
-	// load-bearing fakegcp pass-27 finding ported to AWS).
-	subnet, err := app.repo.GetSubnet(account, region, subnetID)
-	if err != nil {
+	if err := app.checkSubnetGroups(account, region, nw.subnetID, nw.sgIDs); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	sgIDs := parseSecurityGroupIDs(req)
-	for _, sgID := range sgIDs {
-		sg, err := app.repo.GetSecurityGroup(account, region, sgID)
-		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-			return
-		}
-		if sg.VPCID != subnet.VPCID {
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-				fmt.Errorf("security group %q lives in vpc %q but subnet %q is in vpc %q: %w",
-					sgID, sg.VPCID, subnetID, subnet.VPCID, models.ErrNotFound))
-			return
-		}
-	}
-	profileName := req.Params.Get("IamInstanceProfile.Name")
 	id := "i-" + ec2RandID()
 	inst := &repository.EC2Instance{
-		ID: id, SubnetID: subnetID, AMIID: imageID, InstanceType: instanceType,
-		IAMInstanceProfileName: profileName,
-		VPCSecurityGroupIDs:    sgIDs,
+		ID: id, SubnetID: nw.subnetID, AMIID: imageID, InstanceType: instanceType,
+		IAMInstanceProfileName: req.Params.Get("IamInstanceProfile.Name"),
 		State:                  "running",
 		Region:                 region,
 		ARN:                    awsproto.BuildEC2InstanceARN(region, id),
 		CreatedAt:              time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := app.repo.CreateInstance(account, inst); err != nil {
+	eni := &repository.EC2NetworkInterface{
+		ID: "eni-" + ec2RandID(), AttachmentID: "eni-attach-" + ec2RandID(),
+		SecurityGroupIDs: nw.sgIDs, PrivateIP: nw.privateIP, SourceDestCheck: true,
+	}
+	if nw.associatePublicIP {
+		eni.PublicIP = ec2DerivePublicIP(eni.ID)
+	}
+	if err := app.repo.CreateInstance(account, inst, eni); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "RunInstances", &ec2RunInstancesResult{
 		Reservation:  "r-" + ec2RandID(),
 		OwnerId:      awsproto.FakeAccountID,
-		InstancesSet: []ec2InstanceXML{app.ec2InstanceToXML(account, inst)},
+		InstancesSet: []ec2InstanceXML{ec2InstanceToXML(inst, eni)},
 	})
 }
 
@@ -1608,6 +1739,11 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 			return
 		}
 	}
+	enis, err := app.instanceENIs(account)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
 	out := ec2DescribeInstancesResult{
 		ReservationSet: make([]ec2ReservationXML, 0, len(instances)),
 	}
@@ -1615,17 +1751,139 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 		out.ReservationSet = append(out.ReservationSet, ec2ReservationXML{
 			ReservationId: "r-" + ec2RandID(),
 			OwnerId:       awsproto.FakeAccountID,
-			InstancesSet:  []ec2InstanceXML{app.ec2InstanceToXML(account, inst)},
+			InstancesSet:  []ec2InstanceXML{ec2InstanceToXML(inst, enis[inst.ID])},
 		})
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInstances", &out)
 }
 
-// ec2ModifyInstanceAttribute is intentionally minimal at v1 — the
-// terraform-provider-aws update path mostly uses it to adjust
-// `disable_api_termination` and SG membership; the latter is the
-// only thing we round-trip. State changes go through the dedicated
-// state-machine handlers (Start / Stop / Terminate).
+// instanceENIs maps instance id → primary ENI, account-wide.
+func (app *Application) instanceENIs(account string) (map[string]*repository.EC2NetworkInterface, error) {
+	enis, err := app.repo.ListNetworkInterfaces(account, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]*repository.EC2NetworkInterface, len(enis))
+	for _, eni := range enis {
+		out[eni.InstanceID] = eni
+	}
+	return out, nil
+}
+
+// ----- NetworkInterface handlers -----
+
+// eniFilterValues maps each DescribeNetworkInterfaces filter fakeaws
+// supports to the ENI's values for it. The provider's aws_subnet and
+// aws_security_group deletes list lingering ENIs by subnet-id and
+// group-id.
+var eniFilterValues = map[string]func(*repository.EC2NetworkInterface) []string{
+	"network-interface-id":   func(e *repository.EC2NetworkInterface) []string { return []string{e.ID} },
+	"attachment.instance-id": func(e *repository.EC2NetworkInterface) []string { return []string{e.InstanceID} },
+	"subnet-id":              func(e *repository.EC2NetworkInterface) []string { return []string{e.SubnetID} },
+	"group-id":               func(e *repository.EC2NetworkInterface) []string { return e.SecurityGroupIDs },
+}
+
+// ec2Filters reads Filter.<n>.Name / Filter.<n>.Value.<m> as name → values.
+func ec2Filters(p url.Values) map[string][]string {
+	out := map[string][]string{}
+	for _, f := range queryListItems(p, "Filter.") {
+		name := p.Get(f + "Name")
+		out[name] = append(out[name], queryListValues(p, f+"Value.")...)
+	}
+	return out
+}
+
+func writeENINotFound(w http.ResponseWriter, id string) {
+	awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusNotFound,
+		"InvalidNetworkInterfaceID.NotFound",
+		fmt.Sprintf("The networkInterface ID '%s' does not exist", id))
+}
+
+// ec2DescribeNetworkInterfaces lists instance ENIs. An unknown
+// NetworkInterfaceId.N is InvalidNetworkInterfaceID.NotFound, which
+// the provider reads as "gone"; an unsupported filter is refused
+// rather than ignored.
+func (app *Application) ec2DescribeNetworkInterfaces(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	filters := ec2Filters(req.Params)
+	for name := range filters {
+		if eniFilterValues[name] == nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
+				fmt.Errorf("DescribeNetworkInterfaces filter %q not supported by fakeaws: %w", name, models.ErrConflict))
+			return
+		}
+	}
+	enis, err := app.repo.ListNetworkInterfaces(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	ids := queryListValues(req.Params, "NetworkInterfaceId.")
+	for _, id := range ids {
+		if !slices.ContainsFunc(enis, func(e *repository.EC2NetworkInterface) bool { return e.ID == id }) {
+			writeENINotFound(w, id)
+			return
+		}
+	}
+	out := ec2DescribeNetworkInterfacesResult{NetworkInterfaceSet: []ec2NetworkInterfaceXML{}}
+	for _, eni := range enis {
+		if len(ids) > 0 && !slices.Contains(ids, eni.ID) {
+			continue
+		}
+		if eniMatches(eni, filters) {
+			out.NetworkInterfaceSet = append(out.NetworkInterfaceSet, ec2ENIToXML(eni))
+		}
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeNetworkInterfaces", &out)
+}
+
+// eniMatches reports whether eni has, for every filter, a value among
+// that filter's values.
+func eniMatches(eni *repository.EC2NetworkInterface, filters map[string][]string) bool {
+	for name, want := range filters {
+		if !slices.ContainsFunc(eniFilterValues[name](eni), func(v string) bool { return slices.Contains(want, v) }) {
+			return false
+		}
+	}
+	return true
+}
+
+// ec2ModifyNetworkInterfaceAttribute models the Groups attribute only:
+// the provider sends vpc_security_group_ids changes here, to the
+// instance's primary ENI, so they show up in the instance's groupSet.
+func (app *Application) ec2ModifyNetworkInterfaceAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	id := req.Params.Get("NetworkInterfaceId")
+	groups := queryListValues(req.Params, "SecurityGroupId.")
+	if id == "" || len(groups) == 0 {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
+			fmt.Errorf("NetworkInterfaceId and SecurityGroupId.N required (fakeaws models only the Groups attribute): %w", models.ErrConflict))
+		return
+	}
+	eni, err := app.repo.GetNetworkInterface(account, region, id)
+	if errors.Is(err, models.ErrNotFound) {
+		writeENINotFound(w, id)
+		return
+	}
+	if err == nil {
+		err = app.checkSubnetGroups(account, region, eni.SubnetID, groups)
+	}
+	if err == nil {
+		err = app.repo.UpdateNetworkInterface(account, region, id, func(e *repository.EC2NetworkInterface) {
+			e.SecurityGroupIDs = groups
+		})
+	}
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "ModifyNetworkInterfaceAttribute", nil)
+}
+
+// ec2ModifyInstanceAttribute is intentionally minimal at v1: only
+// SourceDestCheck round-trips, onto the primary ENI that
+// DescribeInstances reads it from (the provider sends it after create
+// for source_dest_check = false). Other attributes are accepted and
+// not stored. State changes go through the dedicated state-machine
+// handlers (Start / Stop / Terminate).
 func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	id := req.Params.Get("InstanceId")
 	if id == "" {
@@ -1633,13 +1891,29 @@ func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, accoun
 			fmt.Errorf("InstanceId required: %w", models.ErrConflict))
 		return
 	}
-	if _, err := app.repo.GetInstance(account, region, id); err != nil {
+	_, err := app.repo.GetInstance(account, region, id)
+	if v := req.Params.Get("SourceDestCheck.Value"); err == nil && v != "" {
+		err = app.setSourceDestCheck(account, id, v == "true")
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	// Existence check is enough at v1 — the fixture state suffices for
-	// terraform-provider-aws's expected refresh pattern.
 	awsproto.WriteEC2QueryRPCResponse(w, "ModifyInstanceAttribute", nil)
+}
+
+func (app *Application) setSourceDestCheck(account, instanceID string, on bool) error {
+	enis, err := app.instanceENIs(account)
+	if err != nil {
+		return err
+	}
+	eni := enis[instanceID]
+	if eni == nil {
+		return fmt.Errorf("instance %s has no network interface (terminated): %w", instanceID, models.ErrConflict)
+	}
+	return app.repo.UpdateNetworkInterface(account, eni.Region, eni.ID, func(e *repository.EC2NetworkInterface) {
+		e.SourceDestCheck = on
+	})
 }
 
 func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -1959,7 +2233,7 @@ type ec2DescribeInstanceAttributeResult struct {
 }
 
 type ec2AttributeStringValue struct {
-	Value string `xml:"value"`
+	Value string `xml:"value,omitempty"`
 }
 
 type ec2AttributeBoolValue struct {
@@ -1981,7 +2255,10 @@ func (app *Application) ec2DescribeInstanceAttribute(w http.ResponseWriter, acco
 	case "disableApiStop":
 		out.DisableApiStop = &ec2AttributeBoolValue{Value: false}
 	case "userData":
-		out.UserData = &ec2AttributeStringValue{Value: ""}
+		// fakeaws stores no user data, and AWS answers an instance
+		// without any with an empty <userData/>. A <value></value>
+		// reads back as user_data = sha1("") and plans a diff.
+		out.UserData = &ec2AttributeStringValue{}
 	case "ebsOptimized":
 		out.EbsOptimized = &ec2AttributeBoolValue{Value: false}
 	case "sourceDestCheck":
@@ -2070,6 +2347,7 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 		"routes":                   []any{},
 		"route_table_associations": []any{},
 		"eips":                     []any{},
+		"network_interfaces":       []any{},
 	}
 
 	vpcs, _ := app.repo.ListVPCs(account, "")
@@ -2091,9 +2369,16 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 	}
 	out["subnets"] = sOut
 
+	// Instance network fields come from the primary ENI; a terminated
+	// instance has none, so its IPs are "" and its groups [].
 	instances, _ := app.repo.ListInstances(account, "")
+	enis, _ := app.instanceENIs(account)
 	iOut := make([]map[string]any, 0, len(instances))
 	for _, inst := range instances {
+		eni := enis[inst.ID]
+		if eni == nil {
+			eni = &repository.EC2NetworkInterface{SecurityGroupIDs: []string{}}
+		}
 		// Codex pass 15 BLOCKING #2: include iam_instance_profile_name
 		// and vpc_security_group_ids — both are FK-bearing modeled
 		// fields. Previously /mock/state stripped them so an instance
@@ -2102,12 +2387,28 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 			"id": inst.ID, "subnet_id": inst.SubnetID, "ami_id": inst.AMIID,
 			"instance_type":             inst.InstanceType,
 			"iam_instance_profile_name": inst.IAMInstanceProfileName,
-			"vpc_security_group_ids":    inst.VPCSecurityGroupIDs,
+			"vpc_security_group_ids":    eni.SecurityGroupIDs,
+			"public_ip":                 eni.PublicIP,
+			"private_ip":                eni.PrivateIP,
 			"state":                     inst.State,
 			"region":                    inst.Region, "arn": inst.ARN,
 		})
 	}
 	out["instances"] = iOut
+
+	allENIs, _ := app.repo.ListNetworkInterfaces(account, "")
+	eniOut := make([]map[string]any, 0, len(allENIs))
+	for _, eni := range allENIs {
+		eniOut = append(eniOut, map[string]any{
+			"id": eni.ID, "instance_id": eni.InstanceID,
+			"subnet_id": eni.SubnetID, "vpc_id": eni.VPCID,
+			"private_ip": eni.PrivateIP, "public_ip": eni.PublicIP,
+			"security_group_ids": eni.SecurityGroupIDs,
+			"source_dest_check":  eni.SourceDestCheck,
+			"region":             eni.Region,
+		})
+	}
+	out["network_interfaces"] = eniOut
 
 	// Security groups — every SG, exactly once. Codex pass 4 BLOCKING
 	// #1 fix: previous version inferred from instance.VPCSecurityGroupIDs

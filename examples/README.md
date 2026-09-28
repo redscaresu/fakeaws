@@ -134,6 +134,7 @@ Configs that apply, can be updated, and destroy cleanly. These show the right wa
 | `working/dynamodb_table` | DynamoDB table with attribute + key schema + GSI |
 | `working/eks_cluster` | EKS cluster + node group with the IAM cluster + node roles (M57 wire-shape work + M61 closure makes the cluster's pre-Read flow pass) |
 | `working/iam_role` | IAM role + assume-role policy + policy attachment |
+| `working/instance_public_ip` | EC2 instance with `associate_public_ip_address = true` and two SGs, launched through `NetworkInterface.1.*`; the plan stays empty only if the primary ENI carries the public IP |
 | `working/rds_instance` | RDS subnet group + parameter group + Postgres DB instance (M61: full apply→plan-no-op→destroy lifecycle) |
 | `working/route53` | Route53 hosted zone + record set |
 | `working/s3_bucket` | S3 bucket + server-side encryption configuration (sub-resource reads use SeaweedFS in cross-repo infrafactory tests, see M59) |

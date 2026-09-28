@@ -4,11 +4,16 @@
 // compute lands in S44-T6 atop the networking schema from S44-T3.
 //
 // FK chain (compute side):
-//   ec2_instances.subnet_id        → ec2_subnets.id     (FK, RESTRICT)
-//   ec2_instances.iam_instance_profile_name
-//                                  → iam_instance_profiles.name (cross-service FK, nullable)
-//   ec2_instances.vpc_security_group_ids
-//                                  JSON column — handler validates at create/modify time
+//
+//	ec2_instances.subnet_id        → ec2_subnets.id     (FK, RESTRICT)
+//	ec2_instances.iam_instance_profile_name
+//	                               → iam_instance_profiles.name (cross-service FK, nullable)
+//	ec2_network_interfaces.instance_id
+//	                               → ec2_instances.id   (FK, CASCADE)
+//
+// Each instance has one primary ENI, which owns its private and public
+// IPs and its security groups (the instance's groupSet is read from
+// it). UNIQUE (subnet_id, private_ip) keeps private IPs distinct.
 //
 // ON DELETE RESTRICT on subnet_id is the load-bearing bit: a subnet
 // that still has running instances cannot be deleted; real EC2's
@@ -25,6 +30,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/netip"
 
 	"github.com/redscaresu/fakeaws/models"
 )
@@ -38,13 +45,24 @@ var ec2ComputeMigrations = []string{
 		ami_id                  TEXT NOT NULL,
 		instance_type           TEXT NOT NULL,
 		iam_instance_profile_name TEXT,
-		vpc_security_group_ids  TEXT NOT NULL DEFAULT '[]',
 		state                   TEXT NOT NULL DEFAULT 'running',
 		arn                     TEXT NOT NULL,
 		data                    TEXT NOT NULL,
 		created_at              TEXT NOT NULL,
 		PRIMARY KEY (account_id, id),
 		FOREIGN KEY (account_id, subnet_id) REFERENCES ec2_subnets(account_id, id) ON DELETE RESTRICT
+	)`,
+	`CREATE TABLE IF NOT EXISTS ec2_network_interfaces (
+		account_id  TEXT NOT NULL,
+		region      TEXT NOT NULL,
+		id          TEXT NOT NULL,
+		instance_id TEXT NOT NULL,
+		subnet_id   TEXT NOT NULL,
+		private_ip  TEXT NOT NULL,
+		data        TEXT NOT NULL,
+		PRIMARY KEY (account_id, id),
+		UNIQUE (account_id, subnet_id, private_ip),
+		FOREIGN KEY (account_id, instance_id) REFERENCES ec2_instances(account_id, id) ON DELETE CASCADE
 	)`,
 	// ec2_key_pairs is keyed by name (the AWS contract — names are
 	// per-account-per-region unique).
@@ -74,6 +92,7 @@ var ec2ComputeMigrations = []string{
 func init() {
 	registeredMigrations = append(registeredMigrations, ec2ComputeMigrations...)
 	prependResetTables([]string{
+		"ec2_network_interfaces",
 		"ec2_instances",
 		"ec2_key_pairs",
 		"ec2_amis",
@@ -83,16 +102,31 @@ func init() {
 // ----- Typed wire shapes -----
 
 type EC2Instance struct {
-	ID                      string   `json:"instance_id"`
-	SubnetID                string   `json:"subnet_id"`
-	AMIID                   string   `json:"ami_id"`
-	InstanceType            string   `json:"instance_type"`
-	IAMInstanceProfileName  string   `json:"iam_instance_profile_name,omitempty"`
-	VPCSecurityGroupIDs     []string `json:"vpc_security_group_ids,omitempty"`
-	State                   string   `json:"state"`
-	Region                  string   `json:"region"`
-	ARN                     string   `json:"arn"`
-	CreatedAt               string   `json:"created_at"`
+	ID                     string `json:"instance_id"`
+	SubnetID               string `json:"subnet_id"`
+	AMIID                  string `json:"ami_id"`
+	InstanceType           string `json:"instance_type"`
+	IAMInstanceProfileName string `json:"iam_instance_profile_name,omitempty"`
+	State                  string `json:"state"`
+	Region                 string `json:"region"`
+	ARN                    string `json:"arn"`
+	CreatedAt              string `json:"created_at"`
+}
+
+// EC2NetworkInterface is an instance's primary ENI (device index 0),
+// deleted when the instance terminates. PublicIP is empty unless the
+// launch asked for one.
+type EC2NetworkInterface struct {
+	ID               string   `json:"network_interface_id"`
+	AttachmentID     string   `json:"attachment_id"`
+	InstanceID       string   `json:"instance_id"`
+	SubnetID         string   `json:"subnet_id"`
+	VPCID            string   `json:"vpc_id"`
+	PrivateIP        string   `json:"private_ip"`
+	PublicIP         string   `json:"public_ip,omitempty"`
+	SecurityGroupIDs []string `json:"security_group_ids"`
+	SourceDestCheck  bool     `json:"source_dest_check"`
+	Region           string   `json:"region"`
 }
 
 type EC2KeyPair struct {
@@ -114,12 +148,17 @@ type EC2AMI struct {
 
 // ----- Instance CRUD -----
 
-func (r *Repository) CreateInstance(account string, inst *EC2Instance) error {
+// CreateInstance inserts inst and its primary ENI in one transaction.
+// It fills the ENI's instance, subnet, VPC and region from inst. The
+// ENI keeps a requested PrivateIP if that address is free, and
+// otherwise gets the lowest free one in the subnet.
+func (r *Repository) CreateInstance(account string, inst *EC2Instance, eni *EC2NetworkInterface) error {
 	// Validate parent subnet (FK enforces, but the explicit lookup
 	// produces a clean ErrNotFound rather than a SQLite constraint
 	// violation that maps awkwardly). Codex pass 7 BLOCKING #1 — parent
 	// must be in the same region.
-	if _, err := r.GetSubnet(account, inst.Region, inst.SubnetID); err != nil {
+	subnet, err := r.GetSubnet(account, inst.Region, inst.SubnetID)
+	if err != nil {
 		return err
 	}
 	// AMI must exist in this region (Codex pass 9 BLOCKING #1: real
@@ -135,7 +174,7 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance) error {
 			return err
 		}
 	}
-	for _, sgID := range inst.VPCSecurityGroupIDs {
+	for _, sgID := range eni.SecurityGroupIDs {
 		if _, err := r.GetSecurityGroup(account, inst.Region, sgID); err != nil {
 			return err
 		}
@@ -143,18 +182,79 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance) error {
 	if inst.State == "" {
 		inst.State = "running"
 	}
+	eni.InstanceID, eni.SubnetID, eni.VPCID, eni.Region = inst.ID, subnet.ID, subnet.VPCID, inst.Region
+
+	// SetMaxOpenConns(1): only tx may touch the db until Commit.
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	body, _ := json.Marshal(inst)
-	sgJSON, _ := json.Marshal(inst.VPCSecurityGroupIDs)
 	var profile *string
 	if inst.IAMInstanceProfileName != "" {
 		profile = &inst.IAMInstanceProfileName
 	}
-	_, err := r.db.Exec(
-		`INSERT INTO ec2_instances (account_id, region, id, subnet_id, ami_id, instance_type, iam_instance_profile_name, vpc_security_group_ids, state, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	if _, err := tx.Exec(
+		`INSERT INTO ec2_instances (account_id, region, id, subnet_id, ami_id, instance_type, iam_instance_profile_name, state, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		account, inst.Region, inst.ID, inst.SubnetID, inst.AMIID, inst.InstanceType,
-		profile, string(sgJSON), inst.State, inst.ARN, string(body), inst.CreatedAt,
-	)
-	return mapInsertError(err)
+		profile, inst.State, inst.ARN, string(body), inst.CreatedAt,
+	); err != nil {
+		return mapInsertError(err)
+	}
+	used, err := usedPrivateIPs(tx, account, subnet.ID)
+	if err != nil {
+		return err
+	}
+	if eni.PrivateIP, err = privateIP(subnet.CidrBlock, eni.PrivateIP, used); err != nil {
+		return err
+	}
+	eniBody, _ := json.Marshal(eni)
+	if _, err := tx.Exec(
+		`INSERT INTO ec2_network_interfaces (account_id, region, id, instance_id, subnet_id, private_ip, data) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		account, eni.Region, eni.ID, eni.InstanceID, eni.SubnetID, eni.PrivateIP, string(eniBody),
+	); err != nil {
+		return mapInsertError(err)
+	}
+	return tx.Commit()
+}
+
+func usedPrivateIPs(tx *sql.Tx, account, subnetID string) (map[string]bool, error) {
+	rows, err := tx.Query(`SELECT private_ip FROM ec2_network_interfaces WHERE account_id = ? AND subnet_id = ?`, account, subnetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	used := map[string]bool{}
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			return nil, err
+		}
+		used[ip] = true
+	}
+	return used, rows.Err()
+}
+
+// privateIP returns want if it is a free usable address in cidr or,
+// with want empty, the lowest free one. AWS reserves the first four
+// addresses and the last one of every subnet.
+func privateIP(cidr, want string, used map[string]bool) (string, error) {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil || !prefix.Addr().Is4() {
+		return "", fmt.Errorf("subnet cidr %q is not an IPv4 prefix: %w", cidr, models.ErrConflict)
+	}
+	prefix = prefix.Masked()
+	addr := prefix.Addr().Next().Next().Next().Next()
+	for next := addr.Next(); prefix.Contains(next); addr, next = next, next.Next() {
+		if !used[addr.String()] && (want == "" || want == addr.String()) {
+			return addr.String(), nil
+		}
+	}
+	if want != "" {
+		return "", fmt.Errorf("private IP %q is not a free, usable address in %s: %w", want, cidr, models.ErrConflict)
+	}
+	return "", fmt.Errorf("InsufficientFreeAddressesInSubnet: no free address in %s: %w", cidr, models.ErrConflict)
 }
 
 // GetInstance looks up an instance by id, optionally scoped to a
@@ -211,7 +311,8 @@ func (r *Repository) ListInstances(account, region string) ([]*EC2Instance, erro
 // instances at v1 — the state machine is collapsed to
 // pending → running → shutting-down → terminated. ModifyInstanceAttribute
 // is a no-op (concepts.md "Standing patterns" item 9 — terminal-state
-// refusal is enforced here).
+// refusal is enforced here). Terminating deletes the instance's ENIs
+// in the same transaction.
 func (r *Repository) SetInstanceState(account, region, id, state string) error {
 	current, err := r.GetInstance(account, region, id)
 	if err != nil {
@@ -222,11 +323,23 @@ func (r *Repository) SetInstanceState(account, region, id, state string) error {
 	}
 	current.State = state
 	body, _ := json.Marshal(current)
-	_, err = r.db.Exec(
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
 		`UPDATE ec2_instances SET state = ?, data = ? WHERE account_id = ? AND id = ?`,
 		state, string(body), account, id,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	if state == "terminated" {
+		if _, err := tx.Exec(`DELETE FROM ec2_network_interfaces WHERE account_id = ? AND instance_id = ?`, account, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (r *Repository) DeleteInstance(account, region, id string) error {
@@ -245,6 +358,69 @@ func (r *Repository) DeleteInstance(account, region, id string) error {
 		return models.ErrNotFound
 	}
 	return nil
+}
+
+// ----- NetworkInterface CRUD -----
+
+// ListNetworkInterfaces returns ENIs for the account, optionally
+// scoped to a region (empty = all regions).
+func (r *Repository) ListNetworkInterfaces(account, region string) ([]*EC2NetworkInterface, error) {
+	rows, err := r.db.Query(
+		`SELECT data FROM ec2_network_interfaces WHERE account_id = ? AND (? = '' OR region = ?) ORDER BY id`,
+		account, region, region,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*EC2NetworkInterface
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var eni EC2NetworkInterface
+		if err := json.Unmarshal([]byte(data), &eni); err != nil {
+			return nil, err
+		}
+		out = append(out, &eni)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) GetNetworkInterface(account, region, id string) (*EC2NetworkInterface, error) {
+	var data string
+	err := r.db.QueryRow(
+		`SELECT data FROM ec2_network_interfaces WHERE account_id = ? AND region = ? AND id = ?`,
+		account, region, id,
+	).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, models.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var eni EC2NetworkInterface
+	if err := json.Unmarshal([]byte(data), &eni); err != nil {
+		return nil, err
+	}
+	return &eni, nil
+}
+
+// UpdateNetworkInterface applies change to the ENI and saves it. The
+// caller validates the new values (e.g. groups in the ENI's VPC).
+func (r *Repository) UpdateNetworkInterface(account, region, id string, change func(*EC2NetworkInterface)) error {
+	eni, err := r.GetNetworkInterface(account, region, id)
+	if err != nil {
+		return err
+	}
+	change(eni)
+	body, _ := json.Marshal(eni)
+	_, err = r.db.Exec(
+		`UPDATE ec2_network_interfaces SET data = ? WHERE account_id = ? AND region = ? AND id = ?`,
+		string(body), account, region, id,
+	)
+	return err
 }
 
 // ----- KeyPair CRUD -----
