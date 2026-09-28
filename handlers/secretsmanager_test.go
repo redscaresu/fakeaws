@@ -1,6 +1,7 @@
 package handlers_test
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -150,4 +151,26 @@ func TestSecretsManager_VersionStages(t *testing.T) {
 	// AWSPREVIOUS is v1.
 	_, body = smCall(t, srv, "GetSecretValue", `{"SecretId":"x","VersionStage":"AWSPREVIOUS"}`)
 	assert.Contains(t, string(body), `"v1"`, "AWSPREVIOUS: %s", body)
+}
+
+// Tags changed after create are what DescribeSecret returns: the
+// provider re-tags through TagResource/UntagResource, never CreateSecret.
+func TestSecretsManager_TagResourceAndUntagResourcePersist(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	smCall(t, srv, "CreateSecret", `{"Name":"x","Tags":[{"Key":"run","Value":"1"},{"Key":"gone","Value":"g"}]}`)
+
+	resp, body := smCall(t, srv, "TagResource", `{"SecretId":"x","Tags":[{"Key":"run","Value":"2"},{"Key":"empty","Value":""}]}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "TagResource: %s", body)
+	resp, body = smCall(t, srv, "UntagResource", `{"SecretId":"x","TagKeys":["gone"]}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "UntagResource: %s", body)
+
+	resp, body = smCall(t, srv, "DescribeSecret", `{"SecretId":"x"}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeSecret: %s", body)
+	var got struct{ Tags []struct{ Key, Value string } }
+	require.NoError(t, json.Unmarshal(body, &got))
+	assert.ElementsMatch(t, []struct{ Key, Value string }{{"run", "2"}, {"empty", ""}}, got.Tags)
+
+	resp, body = smCall(t, srv, "TagResource", `{"SecretId":"missing","Tags":[{"Key":"k","Value":"v"}]}`)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "TagResource on a missing secret: %s", body)
+	assert.Contains(t, string(body), "ResourceNotFoundException")
 }

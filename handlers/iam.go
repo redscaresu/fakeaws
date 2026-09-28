@@ -198,11 +198,11 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		// Refresh-path read. With no persisted inline state, return
 		// an empty document.
 		app.iamGetRolePolicyEmpty(w, account, req)
-	case "ListRoleTags", "ListUserTags", "ListPolicyTags":
+	case "ListRoleTags", "ListUserTags", "ListPolicyTags", "ListInstanceProfileTags":
 		app.iamListTags(w, account, req, iamTaggedKinds[strings.TrimSuffix(strings.TrimPrefix(req.Action, "List"), "Tags")])
-	case "TagRole", "TagUser", "TagPolicy":
+	case "TagRole", "TagUser", "TagPolicy", "TagInstanceProfile":
 		app.iamTag(w, account, req, iamTaggedKinds[strings.TrimPrefix(req.Action, "Tag")])
-	case "UntagRole", "UntagUser", "UntagPolicy":
+	case "UntagRole", "UntagUser", "UntagPolicy", "UntagInstanceProfile":
 		app.iamUntag(w, account, req, iamTaggedKinds[strings.TrimPrefix(req.Action, "Untag")])
 	case "ListInstanceProfilesForRole":
 		app.iamListInstanceProfilesForRole(w, account, req)
@@ -616,6 +616,7 @@ type iamInstanceProfileXML struct {
 	Arn                 string       `xml:"Arn"`
 	CreateDate          string       `xml:"CreateDate"`
 	Roles               []iamRoleXML `xml:"Roles>member,omitempty"`
+	Tags                []iamTagXML  `xml:"Tags>member,omitempty"`
 }
 
 func instanceProfileToXML(p *repository.IAMInstanceProfile, attached *repository.IAMRole) iamInstanceProfileXML {
@@ -648,7 +649,15 @@ func (app *Application) iamCreateInstanceProfile(w http.ResponseWriter, account 
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
+	tags := queryTags(req.Params, "Tags.member.")
+	if err := app.tagCreated(account, repository.TagsIAMProfile, p.ARN, tags, func() error {
+		return app.repo.DeleteInstanceProfile(account, name)
+	}); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
 	out := instanceProfileToXML(p, nil)
+	out.Tags = iamTags(tags)
 	awsproto.WriteQueryRPCResponse(w, "CreateInstanceProfile", &out)
 }
 
@@ -662,7 +671,14 @@ func (app *Application) iamGetInstanceProfile(w http.ResponseWriter, account str
 	if p.AttachedRole != "" {
 		attached, _ = app.repo.GetRole(account, p.AttachedRole)
 	}
+	// aws_iam_instance_profile reads its tags from here.
+	tags, err := app.repo.ResourceTags(account, repository.TagsIAMProfile, p.ARN)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
 	out := instanceProfileToXML(p, attached)
+	out.Tags = iamTags(tags)
 	awsproto.WriteQueryRPCResponse(w, "GetInstanceProfile", &out)
 }
 
@@ -1224,9 +1240,10 @@ type iamTaggedKind struct {
 }
 
 var iamTaggedKinds = map[string]iamTaggedKind{
-	"Role":   {repository.TagsIAMRole, "RoleName", awsproto.BuildIAMRoleARN, "role with name"},
-	"User":   {repository.TagsIAMUser, "UserName", awsproto.BuildIAMUserARN, "user with name"},
-	"Policy": {repository.TagsIAMPolicy, "PolicyArn", func(arn string) string { return arn }, "policy"},
+	"Role":            {repository.TagsIAMRole, "RoleName", awsproto.BuildIAMRoleARN, "role with name"},
+	"User":            {repository.TagsIAMUser, "UserName", awsproto.BuildIAMUserARN, "user with name"},
+	"Policy":          {repository.TagsIAMPolicy, "PolicyArn", func(arn string) string { return arn }, "policy"},
+	"InstanceProfile": {repository.TagsIAMProfile, "InstanceProfileName", awsproto.BuildIAMInstanceProfileARN, "instance profile"},
 }
 
 func iamTags(tags map[string]string) []iamTagXML {

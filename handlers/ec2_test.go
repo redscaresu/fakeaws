@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1389,8 +1390,16 @@ func describedTags(t *testing.T, srv *httptest.Server, k taggedKind, id string) 
 	return tagSetIn(t, body)
 }
 
+// keyPairKind is outside taggedKinds: DescribeKeyPairs carries no
+// ownerId. Its tag calls name it by KeyPairId, not by name.
+var keyPairKind = taggedKind{"key-pair", func(t *testing.T, srv *httptest.Server, tags ...string) string {
+	return createOK(t, srv, "ImportKeyPair", "keyPairId", withTagSpec(url.Values{
+		"KeyName": {"tagged"}, "PublicKeyMaterial": {"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterial"},
+	}, 1, "key-pair", tags...))
+}, func(string) (string, url.Values) { return "DescribeKeyPairs", url.Values{"KeyName.1": {"tagged"}} }}
+
 func TestEC2_TagsRoundTripPerResourceType(t *testing.T) {
-	for _, k := range taggedKinds {
+	for _, k := range append(slices.Clone(taggedKinds), keyPairKind) {
 		t.Run(k.resourceType, func(t *testing.T) {
 			srv := newTestServer(t, ":memory:")
 			id := k.create(t, srv, "Name", "v1", "env", "dev", "team", "x")

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (tags on the rest of the taggable resources, 2026-09-28)
+- **Tags round-trip on EKS node groups and addons, IAM instance profiles and EC2 key pairs**, the resources the tag work below left out. Create-time tags (`tags` on CreateNodegroup/CreateAddon, `Tags.member.N` on CreateInstanceProfile, `TagSpecification.N` of type `key-pair` on ImportKeyPair) come back from DescribeNodegroup/DescribeAddon `tags`, GetInstanceProfile `Tags` and DescribeKeyPairs `tagSet`. EKS TagResource/UntagResource/ListTagsForResource pick the node group or addon by its ARN; Tag/Untag/ListInstanceProfileTags land; CreateTags/DeleteTags take a key pair's new `keyPairId` (`key-...`), which ImportKeyPair and DescribeKeyPairs now return. A key pair's tags go with it.
+- `examples/updates/update_tags_every_service` gains a Secrets Manager secret, an instance profile, a node group, an addon and a key pair; `coverage_matrix.yaml` names it for the last four instead of `updates_exempt`.
+
+### Fixed (Secrets Manager tag mutations, 2026-09-28)
+- **Secrets Manager TagResource and UntagResource persist.** Both were stubs that answered 200 and dropped the change, so a secret kept its create-time tags forever and a changed tag (a new provider `default_tags` value) showed as drift on every later plan. TagResource adds or overwrites the keys it names, UntagResource removes them, and DescribeSecret returns the result. A missing secret answers 404 `ResourceNotFoundException`.
+
 ### Added (tags on SQS, IAM, RDS, Route53, DynamoDB and EKS, 2026-09-28)
 - **Tags round-trip on SQS queues, IAM roles/users/policies, RDS instances/parameter groups/subnet groups, Route53 hosted zones, DynamoDB tables and EKS clusters.** Create-time tags are stored (`tags` on CreateQueue, `Tags.member.N` on CreateRole/CreateUser/CreatePolicy, `Tags.Tag.N` on CreateDBInstance/CreateDBParameterGroup/CreateDBSubnetGroup, `Tags` on CreateTable, `tags` on CreateCluster) and come back exactly, empty values and keys with `:` or `/` included, from ListQueueTags, List{Role,User,Policy}Tags and Get{Role,User,Policy}, RDS ListTagsForResource and DescribeDBInstances `TagList`, Route53 ListTagsForResource, ListTagsOfResource, and DescribeCluster `tags` / EKS ListTagsForResource.
 - **The tag mutations land**: TagQueue/UntagQueue, Tag/Untag{Role,User,Policy}, AddTagsToResource/RemoveTagsFromResource, ChangeTagsForResource (adds and removes in one transaction), and DynamoDB and EKS TagResource/UntagResource. Each changes only the keys it names. The SQS, RDS and Route53 tag calls were stubs that accepted and dropped tags, and listed none.

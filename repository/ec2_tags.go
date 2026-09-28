@@ -39,6 +39,12 @@ func init() {
 				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
 			END`, table))
 	}
+	// A key pair's row is keyed by name; its tags hang off the
+	// KeyPairId kept in its data.
+	registeredMigrations = append(registeredMigrations,
+		`CREATE TRIGGER IF NOT EXISTS ec2_key_pairs_drop_tags AFTER DELETE ON ec2_key_pairs BEGIN
+			DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = json_extract(OLD.data, '$.key_pair_id');
+		END`)
 	prependResetTables([]string{"ec2_tags"})
 }
 

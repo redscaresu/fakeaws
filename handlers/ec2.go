@@ -2205,13 +2205,16 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, re
 // ----- KeyPair handlers -----
 
 type ec2KeyPairXML struct {
-	KeyName        string `xml:"keyName"`
-	KeyFingerprint string `xml:"keyFingerprint"`
+	KeyPairId      string              `xml:"keyPairId,omitempty"`
+	KeyName        string              `xml:"keyName"`
+	KeyFingerprint string              `xml:"keyFingerprint"`
+	TagSet         []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
 }
 
-type ec2ImportKeyPairResult struct {
-	KeyName        string `xml:"keyName"`
-	KeyFingerprint string `xml:"keyFingerprint"`
+type ec2ImportKeyPairResult = ec2KeyPairXML
+
+func ec2KeyPairToXML(kp *repository.EC2KeyPair, tags map[string][]ec2ResourceTagXML) ec2KeyPairXML {
+	return ec2KeyPairXML{KeyPairId: kp.ID, KeyName: kp.Name, KeyFingerprint: kp.Fingerprint, TagSet: tags[kp.ID]}
 }
 
 type ec2DescribeKeyPairsResult struct {
@@ -2240,17 +2243,30 @@ func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region 
 			fmt.Errorf("KeyName and PublicKeyMaterial required: %w", models.ErrConflict))
 		return
 	}
-	fp := ec2KeyFingerprint(publicKey)
+	specs, refused := refuseTagSpecifications(w, req.Params, "key-pair")
+	if refused {
+		return
+	}
 	kp := &repository.EC2KeyPair{
-		Name: name, PublicKey: publicKey, Fingerprint: fp, Region: region,
+		ID:   "key-" + ec2RandID(),
+		Name: name, PublicKey: publicKey, Fingerprint: ec2KeyFingerprint(publicKey), Region: region,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := app.repo.CreateKeyPair(account, kp); err != nil {
+	tags := onResource(specs["key-pair"], kp.ID, "key-pair")
+	err := app.repo.CreateKeyPair(account, kp)
+	if err == nil {
+		err = app.tagNew(account, region, tags,
+			func() error { return app.repo.DeleteKeyPair(account, region, name) })
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	awsproto.WriteEC2QueryRPCResponse(w, "ImportKeyPair",
-		&ec2ImportKeyPairResult{KeyName: name, KeyFingerprint: fp})
+	out := ec2KeyPairToXML(kp, nil)
+	for _, t := range tags {
+		out.TagSet = append(out.TagSet, ec2ResourceTagXML{Key: t.Key, Value: t.Value})
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "ImportKeyPair", &out)
 }
 
 func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -2261,6 +2277,10 @@ func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, regi
 			wanted = append(wanted, vs[0])
 		}
 	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
+		return
+	}
 	out := ec2DescribeKeyPairsResult{KeySet: []ec2KeyPairXML{}}
 	if len(wanted) == 0 {
 		// no filter — list all in region
@@ -2270,7 +2290,7 @@ func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, regi
 			return
 		}
 		for _, kp := range kps {
-			out.KeySet = append(out.KeySet, ec2KeyPairXML{KeyName: kp.Name, KeyFingerprint: kp.Fingerprint})
+			out.KeySet = append(out.KeySet, ec2KeyPairToXML(kp, tags))
 		}
 	} else {
 		for _, name := range wanted {
@@ -2279,7 +2299,7 @@ func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, regi
 				awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 				return
 			}
-			out.KeySet = append(out.KeySet, ec2KeyPairXML{KeyName: kp.Name, KeyFingerprint: kp.Fingerprint})
+			out.KeySet = append(out.KeySet, ec2KeyPairToXML(kp, tags))
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeKeyPairs", &out)
@@ -2534,6 +2554,10 @@ var ec2TaggedKinds = []ec2TaggedKind{
 	}},
 	{"eni-", "network-interface", "InvalidNetworkInterfaceID.NotFound", func(app *Application, account, region, id string) error {
 		_, err := app.repo.GetNetworkInterface(account, region, id)
+		return err
+	}},
+	{"key-", "key-pair", "InvalidKeyPair.NotFound", func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetKeyPairByID(account, region, id)
 		return err
 	}},
 }

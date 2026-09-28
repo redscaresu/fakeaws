@@ -131,6 +131,7 @@ type EC2NetworkInterface struct {
 }
 
 type EC2KeyPair struct {
+	ID          string `json:"key_pair_id,omitempty"`
 	Name        string `json:"name"`
 	PublicKey   string `json:"public_key"`
 	Fingerprint string `json:"fingerprint"`
@@ -440,6 +441,27 @@ func (r *Repository) GetKeyPair(account, region, name string) (*EC2KeyPair, erro
 	err := r.db.QueryRow(
 		`SELECT data FROM ec2_key_pairs WHERE account_id = ? AND region = ? AND name = ?`,
 		account, region, name,
+	).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, models.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var kp EC2KeyPair
+	if err := json.Unmarshal([]byte(data), &kp); err != nil {
+		return nil, err
+	}
+	return &kp, nil
+}
+
+// GetKeyPairByID returns the key pair with this KeyPairId, the id EC2's
+// CreateTags and DeleteTags name it by.
+func (r *Repository) GetKeyPairByID(account, region, id string) (*EC2KeyPair, error) {
+	var data string
+	err := r.db.QueryRow(
+		`SELECT data FROM ec2_key_pairs WHERE account_id = ? AND region = ? AND json_extract(data, '$.key_pair_id') = ?`,
+		account, region, id,
 	).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound

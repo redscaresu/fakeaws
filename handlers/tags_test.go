@@ -124,10 +124,11 @@ func TestIAM_TagsRoundTrip(t *testing.T) {
 		{"User", "CreateUser", "GetUser", url.Values{"UserName": {"tagged"}}, "tagged", "nope"},
 		{"Policy", "CreatePolicy", "GetPolicy", url.Values{"PolicyName": {"tagged"}, "PolicyDocument": {policyDoc}},
 			"arn:aws:iam::000000000000:policy/tagged", "arn:aws:iam::000000000000:policy/nope"},
+		{"InstanceProfile", "CreateInstanceProfile", "GetInstanceProfile", url.Values{"InstanceProfileName": {"tagged"}}, "tagged", "nope"},
 	}
 	for _, k := range kinds {
 		t.Run(k.kind, func(t *testing.T) {
-			param := map[string]string{"Role": "RoleName", "User": "UserName", "Policy": "PolicyArn"}[k.kind]
+			param := map[string]string{"Role": "RoleName", "User": "UserName", "Policy": "PolicyArn", "InstanceProfile": "InstanceProfileName"}[k.kind]
 			resp, body := iamCall(t, srv, k.create, queryTagParams(k.params, "Tags.member.", tagsAtCreate))
 			require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", k.create, body)
 			assert.Equal(t, tagsAtCreate, xmlTags(t, body), "%s response", k.create)
@@ -305,50 +306,66 @@ func TestDynamoDB_TagsRoundTrip(t *testing.T) {
 	}
 }
 
+// The cluster, its node group and its addon each carry their own tags,
+// read from their Describe* and from ListTagsForResource on their ARN.
 func TestEKS_TagsRoundTrip(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	const region = "us-east-1"
-	const arn = "arn:aws:eks:us-east-1:000000000000:cluster/tagged"
-	tagsPath := "/eks/region/" + region + "/tags/" + url.PathEscape(arn)
-	clusterRole, _, sa, sb := eksSetupPrereqs(t, srv, region)
-	create, _ := json.Marshal(map[string]any{
-		"name": "tagged", "roleArn": clusterRole,
-		"resourcesVpcConfig": map[string]any{"subnetIds": []string{sa, sb}},
-		"tags":               tagsAtCreate,
-	})
-	resp, body := eksRequest(t, srv, http.MethodPost, "/eks/region/"+region+"/clusters", string(create))
-	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateCluster: %s", body)
-
-	listed := func() map[string]string {
-		resp, body := eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters/tagged", "")
-		require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeCluster: %s", body)
-		var described struct {
-			Cluster struct{ Tags map[string]string }
-		}
-		require.NoError(t, json.Unmarshal(body, &described))
-		resp, body = eksRequest(t, srv, http.MethodGet, tagsPath, "")
-		require.Equal(t, http.StatusOK, resp.StatusCode, "ListTagsForResource: %s", body)
-		var list struct{ Tags map[string]string }
-		require.NoError(t, json.Unmarshal(body, &list))
-		assert.Equal(t, described.Cluster.Tags, list.Tags, "ListTagsForResource agrees with DescribeCluster")
-		return described.Cluster.Tags
+	clusters := "/eks/region/" + region + "/clusters"
+	clusterRole, nodeRole, sa, sb := eksSetupPrereqs(t, srv, region)
+	kinds := []struct {
+		key, createPath, describePath, arn string
+		create                             map[string]any
+	}{
+		{"cluster", clusters, clusters + "/tagged", "arn:aws:eks:us-east-1:000000000000:cluster/tagged", map[string]any{
+			"name": "tagged", "roleArn": clusterRole,
+			"resourcesVpcConfig": map[string]any{"subnetIds": []string{sa, sb}},
+		}},
+		{"nodegroup", clusters + "/tagged/node-groups", clusters + "/tagged/node-groups/ng",
+			"arn:aws:eks:us-east-1:000000000000:nodegroup/tagged/ng/deterministic", map[string]any{
+				"nodegroupName": "ng", "nodeRole": nodeRole, "subnets": []string{sa, sb},
+			}},
+		{"addon", clusters + "/tagged/addons", clusters + "/tagged/addons/vpc-cni",
+			"arn:aws:eks:us-east-1:000000000000:addon/tagged/vpc-cni/uuid", map[string]any{"addonName": "vpc-cni"}},
 	}
-	assert.Equal(t, tagsAtCreate, listed(), "tags at create")
+	for _, k := range kinds {
+		t.Run(k.key, func(t *testing.T) {
+			tagsPath := "/eks/region/" + region + "/tags/" + url.PathEscape(k.arn)
+			k.create["tags"] = tagsAtCreate
+			create, _ := json.Marshal(k.create)
+			resp, body := eksRequest(t, srv, http.MethodPost, k.createPath, string(create))
+			require.Equal(t, http.StatusOK, resp.StatusCode, "create %s: %s", k.key, body)
 
-	add, _ := json.Marshal(map[string]any{"tags": tagsAdded})
-	resp, body = eksRequest(t, srv, http.MethodPost, tagsPath, string(add))
-	require.Equal(t, http.StatusOK, resp.StatusCode, "TagResource: %s", body)
-	assert.Equal(t, tagsAfterAdd(), listed(), "after TagResource")
+			listed := func() map[string]string {
+				resp, body := eksRequest(t, srv, http.MethodGet, k.describePath, "")
+				require.Equal(t, http.StatusOK, resp.StatusCode, "describe %s: %s", k.key, body)
+				var described map[string]struct{ Tags map[string]string }
+				require.NoError(t, json.Unmarshal(body, &described))
+				resp, body = eksRequest(t, srv, http.MethodGet, tagsPath, "")
+				require.Equal(t, http.StatusOK, resp.StatusCode, "ListTagsForResource: %s", body)
+				var list struct{ Tags map[string]string }
+				require.NoError(t, json.Unmarshal(body, &list))
+				assert.Equal(t, described[k.key].Tags, list.Tags, "ListTagsForResource agrees with describe")
+				return list.Tags
+			}
+			assert.Equal(t, tagsAtCreate, listed(), "tags at create")
 
-	resp, body = eksRequest(t, srv, http.MethodDelete, tagsPath+"?tagKeys="+url.QueryEscape(removedKey), "")
-	require.Equal(t, http.StatusOK, resp.StatusCode, "UntagResource: %s", body)
-	assert.Equal(t, tagsAfterRemove(), listed(), "after UntagResource")
+			add, _ := json.Marshal(map[string]any{"tags": tagsAdded})
+			resp, body = eksRequest(t, srv, http.MethodPost, tagsPath, string(add))
+			require.Equal(t, http.StatusOK, resp.StatusCode, "TagResource: %s", body)
+			assert.Equal(t, tagsAfterAdd(), listed(), "after TagResource")
 
-	missing := "/eks/region/" + region + "/tags/" + url.PathEscape(arn+"x")
-	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
-		resp, body = eksRequest(t, srv, method, missing+"?tagKeys=a", `{"tags":{"a":"b"}}`)
-		assert.Equal(t, http.StatusNotFound, resp.StatusCode, method)
-		assert.Contains(t, string(body), `"__type":"NotFoundException"`, method)
+			resp, body = eksRequest(t, srv, http.MethodDelete, tagsPath+"?tagKeys="+url.QueryEscape(removedKey), "")
+			require.Equal(t, http.StatusOK, resp.StatusCode, "UntagResource: %s", body)
+			assert.Equal(t, tagsAfterRemove(), listed(), "after UntagResource")
+
+			missing := "/eks/region/" + region + "/tags/" + url.PathEscape(k.arn+"x")
+			for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
+				resp, body = eksRequest(t, srv, method, missing+"?tagKeys=a", `{"tags":{"a":"b"}}`)
+				assert.Equal(t, http.StatusNotFound, resp.StatusCode, method)
+				assert.Contains(t, string(body), `"__type":"NotFoundException"`, method)
+			}
+		})
 	}
 }
 
