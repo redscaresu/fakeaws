@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -197,8 +198,12 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		// Refresh-path read. With no persisted inline state, return
 		// an empty document.
 		app.iamGetRolePolicyEmpty(w, account, req)
-	case "ListRoleTags":
-		app.iamListRoleTags(w, account, req)
+	case "ListRoleTags", "ListUserTags", "ListPolicyTags":
+		app.iamListTags(w, account, req, iamTaggedKinds[strings.TrimSuffix(strings.TrimPrefix(req.Action, "List"), "Tags")])
+	case "TagRole", "TagUser", "TagPolicy":
+		app.iamTag(w, account, req, iamTaggedKinds[strings.TrimPrefix(req.Action, "Tag")])
+	case "UntagRole", "UntagUser", "UntagPolicy":
+		app.iamUntag(w, account, req, iamTaggedKinds[strings.TrimPrefix(req.Action, "Untag")])
 	case "ListInstanceProfilesForRole":
 		app.iamListInstanceProfilesForRole(w, account, req)
 
@@ -307,14 +312,15 @@ func (app *Application) gatherIAMStateReal() map[string]any {
 // (payload field-name variations): we use the canonical AWS field
 // names exactly so terraform-provider-aws's parser doesn't complain.
 type iamRoleXML struct {
-	XMLName                  xml.Name `xml:"Role"`
-	RoleName                 string   `xml:"RoleName"`
-	Path                     string   `xml:"Path"`
-	Arn                      string   `xml:"Arn"`
-	AssumeRolePolicyDocument string   `xml:"AssumeRolePolicyDocument,omitempty"`
-	Description              string   `xml:"Description,omitempty"`
-	MaxSessionDuration       int      `xml:"MaxSessionDuration,omitempty"`
-	CreateDate               string   `xml:"CreateDate"`
+	XMLName                  xml.Name    `xml:"Role"`
+	RoleName                 string      `xml:"RoleName"`
+	Path                     string      `xml:"Path"`
+	Arn                      string      `xml:"Arn"`
+	AssumeRolePolicyDocument string      `xml:"AssumeRolePolicyDocument,omitempty"`
+	Description              string      `xml:"Description,omitempty"`
+	MaxSessionDuration       int         `xml:"MaxSessionDuration,omitempty"`
+	CreateDate               string      `xml:"CreateDate"`
+	Tags                     []iamTagXML `xml:"Tags>member,omitempty"`
 }
 
 func roleToXML(r *repository.IAMRole) iamRoleXML {
@@ -352,7 +358,15 @@ func (app *Application) iamCreateRole(w http.ResponseWriter, account string, req
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
+	tags := queryTags(req.Params, "Tags.member.")
+	if err := app.tagCreated(account, repository.TagsIAMRole, role.ARN, tags, func() error {
+		return app.repo.DeleteRole(account, name)
+	}); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
 	r := roleToXML(role)
+	r.Tags = iamTags(tags)
 	awsproto.WriteQueryRPCResponse(w, "CreateRole", &r)
 }
 
@@ -363,7 +377,13 @@ func (app *Application) iamGetRole(w http.ResponseWriter, account string, req aw
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
+	tags, err := app.repo.ResourceTags(account, repository.TagsIAMRole, role.ARN)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
 	r := roleToXML(role)
+	r.Tags = iamTags(tags)
 	awsproto.WriteQueryRPCResponse(w, "GetRole", &r)
 }
 
@@ -411,13 +431,14 @@ func (app *Application) iamDeleteRole(w http.ResponseWriter, account string, req
 // ----- Policy handlers -----
 
 type iamPolicyXML struct {
-	XMLName        xml.Name `xml:"Policy"`
-	PolicyName     string   `xml:"PolicyName"`
-	Path           string   `xml:"Path"`
-	Arn            string   `xml:"Arn"`
-	Description    string   `xml:"Description,omitempty"`
-	CreateDate     string   `xml:"CreateDate"`
-	DefaultVersion string   `xml:"DefaultVersionId,omitempty"`
+	XMLName        xml.Name    `xml:"Policy"`
+	PolicyName     string      `xml:"PolicyName"`
+	Path           string      `xml:"Path"`
+	Arn            string      `xml:"Arn"`
+	Description    string      `xml:"Description,omitempty"`
+	CreateDate     string      `xml:"CreateDate"`
+	DefaultVersion string      `xml:"DefaultVersionId,omitempty"`
+	Tags           []iamTagXML `xml:"Tags>member,omitempty"`
 }
 
 func policyToXML(p *repository.IAMPolicy) iamPolicyXML {
@@ -450,7 +471,15 @@ func (app *Application) iamCreatePolicy(w http.ResponseWriter, account string, r
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
+	tags := queryTags(req.Params, "Tags.member.")
+	if err := app.tagCreated(account, repository.TagsIAMPolicy, policy.ARN, tags, func() error {
+		return app.repo.DeletePolicy(account, name)
+	}); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
 	p := policyToXML(policy)
+	p.Tags = iamTags(tags)
 	awsproto.WriteQueryRPCResponse(w, "CreatePolicy", &p)
 }
 
@@ -467,7 +496,13 @@ func (app *Application) iamGetPolicy(w http.ResponseWriter, account string, req 
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
+	tags, err := app.repo.ResourceTags(account, repository.TagsIAMPolicy, policy.ARN)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
 	p := policyToXML(policy)
+	p.Tags = iamTags(tags)
 	awsproto.WriteQueryRPCResponse(w, "GetPolicy", &p)
 }
 
@@ -679,12 +714,13 @@ func (app *Application) iamRemoveRoleFromInstanceProfile(w http.ResponseWriter, 
 // ----- User + AccessKey handlers -----
 
 type iamUserXML struct {
-	XMLName    xml.Name `xml:"User"`
-	UserName   string   `xml:"UserName"`
-	Path       string   `xml:"Path"`
-	Arn        string   `xml:"Arn"`
-	UserId     string   `xml:"UserId"`
-	CreateDate string   `xml:"CreateDate"`
+	XMLName    xml.Name    `xml:"User"`
+	UserName   string      `xml:"UserName"`
+	Path       string      `xml:"Path"`
+	Arn        string      `xml:"Arn"`
+	UserId     string      `xml:"UserId"`
+	CreateDate string      `xml:"CreateDate"`
+	Tags       []iamTagXML `xml:"Tags>member,omitempty"`
 }
 
 func userToXML(u *repository.IAMUser) iamUserXML {
@@ -714,7 +750,15 @@ func (app *Application) iamCreateUser(w http.ResponseWriter, account string, req
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
+	tags := queryTags(req.Params, "Tags.member.")
+	if err := app.tagCreated(account, repository.TagsIAMUser, u.ARN, tags, func() error {
+		return app.repo.DeleteUser(account, name)
+	}); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
 	out := userToXML(u)
+	out.Tags = iamTags(tags)
 	awsproto.WriteQueryRPCResponse(w, "CreateUser", &out)
 }
 
@@ -724,7 +768,13 @@ func (app *Application) iamGetUser(w http.ResponseWriter, account string, req aw
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
+	tags, err := app.repo.ResourceTags(account, repository.TagsIAMUser, u.ARN)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
 	out := userToXML(u)
+	out.Tags = iamTags(tags)
 	awsproto.WriteQueryRPCResponse(w, "GetUser", &out)
 }
 
@@ -1164,16 +1214,62 @@ func (app *Application) iamListRolePolicies(w http.ResponseWriter, account strin
 	awsproto.WriteQueryRPCResponse(w, "ListRolePolicies", &iamListRolePoliciesResult{PolicyNames: []string{}})
 }
 
-// iamListRoleTags mirrors ListRolePolicies: provider Read calls it
-// post-create, default 404 breaks the apply loop. Returns an empty
-// Tags list when the role exists.
-func (app *Application) iamListRoleTags(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	name := req.Params.Get("RoleName")
-	if _, err := app.repo.GetRole(account, name); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+// iamTaggedKind is how IAM's Tag<Kind> / Untag<Kind> / List<Kind>Tags
+// calls name one kind of taggable entity.
+type iamTaggedKind struct {
+	table  repository.TaggedTable
+	param  string              // the request param naming the entity
+	arn    func(string) string // param value → the entity's ARN
+	entity string              // for the NoSuchEntity message
+}
+
+var iamTaggedKinds = map[string]iamTaggedKind{
+	"Role":   {repository.TagsIAMRole, "RoleName", awsproto.BuildIAMRoleARN, "role with name"},
+	"User":   {repository.TagsIAMUser, "UserName", awsproto.BuildIAMUserARN, "user with name"},
+	"Policy": {repository.TagsIAMPolicy, "PolicyArn", func(arn string) string { return arn }, "policy"},
+}
+
+func iamTags(tags map[string]string) []iamTagXML {
+	return tagList(tags, func(k, v string) iamTagXML { return iamTagXML{Key: k, Value: v} })
+}
+
+// iamWriteTagError writes a tag call's failure, NoSuchEntity for a
+// missing entity as IAM does.
+func iamWriteTagError(w http.ResponseWriter, kind iamTaggedKind, id string, err error) {
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
+			"NoSuchEntity", fmt.Sprintf("The %s %s cannot be found.", kind.entity, id))
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "ListRoleTags", &iamListRoleTagsResult{Tags: []iamTagXML{}})
+	awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+}
+
+func (app *Application) iamListTags(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest, kind iamTaggedKind) {
+	id := req.Params.Get(kind.param)
+	tags, err := app.repo.ResourceTags(account, kind.table, kind.arn(id))
+	if err != nil {
+		iamWriteTagError(w, kind, id, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, req.Action, &iamListTagsResult{Tags: iamTags(tags)})
+}
+
+func (app *Application) iamTag(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest, kind iamTaggedKind) {
+	id := req.Params.Get(kind.param)
+	if err := app.repo.TagResource(account, kind.table, kind.arn(id), queryTags(req.Params, "Tags.member.")); err != nil {
+		iamWriteTagError(w, kind, id, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, req.Action, nil)
+}
+
+func (app *Application) iamUntag(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest, kind iamTaggedKind) {
+	id := req.Params.Get(kind.param)
+	if err := app.repo.UntagResource(account, kind.table, kind.arn(id), queryListValues(req.Params, "TagKeys.member.")); err != nil {
+		iamWriteTagError(w, kind, id, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, req.Action, nil)
 }
 
 // iamListInstanceProfilesForRole is called by terraform-provider-aws
@@ -1202,7 +1298,7 @@ type iamTagXML struct {
 	Value string `xml:"Value"`
 }
 
-type iamListRoleTagsResult struct {
+type iamListTagsResult struct {
 	Tags        []iamTagXML `xml:"Tags>member"`
 	IsTruncated bool        `xml:"IsTruncated"`
 }

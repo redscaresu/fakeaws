@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -60,15 +61,11 @@ func (app *Application) handleSQS(w http.ResponseWriter, r *http.Request) {
 	case "DeleteMessage":
 		app.sqsDeleteMessage(w, account, region, req)
 	case "ListQueueTags":
-		// terraform-provider-aws's aws_sqs_queue Read flow always
-		// calls ListQueueTags after CreateQueue. We don't persist
-		// tags yet — return an empty Tags map so the Read flow
-		// completes without ResourceNotFoundException.
-		awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{"Tags": map[string]string{}})
-	case "TagQueue", "UntagQueue":
-		// No-op until we persist tags. Real AWS returns an empty body
-		// on success for both ops; the SDK is happy with {}.
-		awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{})
+		app.sqsListQueueTags(w, account, region, req)
+	case "TagQueue":
+		app.sqsTagQueue(w, account, region, req)
+	case "UntagQueue":
+		app.sqsUntagQueue(w, account, region, req)
 	case "SetQueueAttributes":
 		// aws_sqs_queue Update path patches attributes after the
 		// initial Create. We accept silently for now (the apply →
@@ -130,6 +127,7 @@ func (app *Application) sqsCreateQueue(w http.ResponseWriter, host, account, reg
 	var in struct {
 		QueueName  string            `json:"QueueName"`
 		Attributes map[string]string `json:"Attributes,omitempty"`
+		Tags       map[string]string `json:"tags,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &in); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON10, fmt.Errorf("%w: %v", models.ErrConflict, err))
@@ -162,6 +160,12 @@ func (app *Application) sqsCreateQueue(w http.ResponseWriter, host, account, reg
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateSQSQueue(account, q); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON10, err)
+		return
+	}
+	if err := app.tagCreated(account, repository.TagsSQSQueue, q.ARN, in.Tags, func() error {
+		return app.repo.DeleteSQSQueue(account, region, q.Name)
+	}); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON10, err)
 		return
 	}
@@ -236,6 +240,74 @@ func (app *Application) sqsDeleteQueue(w http.ResponseWriter, account, region st
 	json.Unmarshal(req.Body, &in)
 	if err := app.repo.DeleteSQSQueue(account, region, queueNameFromURL(in.QueueUrl)); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON10, err)
+		return
+	}
+	awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{})
+}
+
+// ----- Tag ops -----
+
+type sqsQueueTagsInput struct {
+	QueueUrl string            `json:"QueueUrl"`
+	Tags     map[string]string `json:"Tags,omitempty"`
+	TagKeys  []string          `json:"TagKeys,omitempty"`
+}
+
+// sqsTagCall decodes a tag op's body and returns it with the queue's
+// ARN. It writes the error itself and reports false on a bad body.
+func sqsTagCall(w http.ResponseWriter, region string, req awsproto.XAmzTargetRequest) (sqsQueueTagsInput, string, bool) {
+	var in sqsQueueTagsInput
+	if err := json.Unmarshal(req.Body, &in); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON10, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		return in, "", false
+	}
+	return in, awsproto.BuildSQSQueueARN(region, queueNameFromURL(in.QueueUrl)), true
+}
+
+// sqsWriteTagError writes a tag op's failure, NonExistentQueue for a
+// missing queue as SQS does.
+func sqsWriteTagError(w http.ResponseWriter, queueURL string, err error) {
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeJSON10, http.StatusBadRequest,
+			"AWS.SimpleQueueService.NonExistentQueue",
+			fmt.Sprintf("The specified queue does not exist: %s", queueURL))
+		return
+	}
+	awsproto.WriteAWSError(w, awsproto.ShapeJSON10, err)
+}
+
+func (app *Application) sqsListQueueTags(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
+	in, arn, ok := sqsTagCall(w, region, req)
+	if !ok {
+		return
+	}
+	tags, err := app.repo.ResourceTags(account, repository.TagsSQSQueue, arn)
+	if err != nil {
+		sqsWriteTagError(w, in.QueueUrl, err)
+		return
+	}
+	awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{"Tags": tags})
+}
+
+func (app *Application) sqsTagQueue(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
+	in, arn, ok := sqsTagCall(w, region, req)
+	if !ok {
+		return
+	}
+	if err := app.repo.TagResource(account, repository.TagsSQSQueue, arn, in.Tags); err != nil {
+		sqsWriteTagError(w, in.QueueUrl, err)
+		return
+	}
+	awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{})
+}
+
+func (app *Application) sqsUntagQueue(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
+	in, arn, ok := sqsTagCall(w, region, req)
+	if !ok {
+		return
+	}
+	if err := app.repo.UntagResource(account, repository.TagsSQSQueue, arn, in.TagKeys); err != nil {
+		sqsWriteTagError(w, in.QueueUrl, err)
 		return
 	}
 	awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{})

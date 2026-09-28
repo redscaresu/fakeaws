@@ -340,8 +340,7 @@ entries:
     working_dir_name: dynamodb_table
     misconfigured_exempt: true
     misconfigured_exempt_reason: "DynamoDB table at v1 has no cross-resource FK refs (item-level FKs are out of scope; handler-level table existence is asserted in TestDynamoDB_PutItemMissingTable404)."
-    updates_exempt: true
-    updates_exempt_reason: "Table mutation (billing_mode flip, GSI addition) is out of scope at v1; the table itself is set-once. S48-T6 reconsiders if scenarios require it."
+    updates_dir_name: update_tags_every_service
     integration_test_func_name: "^TestDynamoDB_TableLifecycle$"
 
   # EKS (S46-T3 handlers, S46-T10 e2e + these matrix entries).
@@ -350,8 +349,7 @@ entries:
     scenario_resource_type: kubernetes
     working_dir_name: eks_cluster
     misconfigured_dir_name: eks_node_group_subnet_outside_cluster
-    updates_exempt: true
-    updates_exempt_reason: "Cluster updates (version bumps, vpc_config changes) are no-ops at v1; lifecycle is exercised on the addon + nodegroup which both depend on the cluster."
+    updates_dir_name: update_tags_every_service
     integration_test_func_name: "^TestEKS_ClusterLifecycle$"
   - aws_service: eks
     aws_resource_type: aws_eks_node_group
@@ -388,8 +386,7 @@ entries:
     working_dir_name: route53
     misconfigured_exempt: true
     misconfigured_exempt_reason: "Non-empty zone delete refusal is asserted in TestRoute53_ChangeBatchTransactional + TestRegressionHostedZoneDeleteRefusedIfNonEmpty; standalone misconfigured tofu example would duplicate."
-    updates_exempt: true
-    updates_exempt_reason: "Zone configuration is set-once at v1 (no UpdateHostedZoneComment in scope)."
+    updates_dir_name: update_tags_every_service
     integration_test_func_name: "^TestRoute53_HostedZoneLifecycle$"
   - aws_service: route53
     aws_resource_type: aws_route53_record

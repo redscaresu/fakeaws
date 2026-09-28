@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -59,6 +60,12 @@ func (app *Application) handleDynamoDB(w http.ResponseWriter, r *http.Request) {
 		app.ddbDescribeContinuousBackups(w, account, region, req)
 	case "DescribeTimeToLive":
 		app.ddbDescribeTimeToLive(w, account, region, req)
+	case "ListTagsOfResource":
+		app.ddbListTagsOfResource(w, account, req)
+	case "TagResource":
+		app.ddbTagResource(w, account, req)
+	case "UntagResource":
+		app.ddbUntagResource(w, account, req)
 	default:
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
 			fmt.Errorf("DynamoDB operation %q not yet implemented in fakeaws v1: %w", req.Operation, models.ErrNotFound))
@@ -72,6 +79,20 @@ type ddbCreateTableInput struct {
 	AttributeDefinitions []ddbAttributeDef  `json:"AttributeDefinitions"`
 	KeySchema            []ddbKeySchemaElem `json:"KeySchema"`
 	BillingMode          string             `json:"BillingMode,omitempty"`
+	Tags                 []ddbTag           `json:"Tags,omitempty"`
+}
+
+type ddbTag struct {
+	Key   string `json:"Key"`
+	Value string `json:"Value"`
+}
+
+func ddbTagMap(tags []ddbTag) map[string]string {
+	out := make(map[string]string, len(tags))
+	for _, t := range tags {
+		out[t.Key] = t.Value
+	}
+	return out
 }
 
 type ddbAttributeDef struct {
@@ -155,6 +176,12 @@ func (app *Application) ddbCreateTable(w http.ResponseWriter, account, region st
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateDynamoDBTable(account, tab); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
+		return
+	}
+	if err := app.tagCreated(account, repository.TagsDynamoDBTable, tab.ARN, ddbTagMap(in.Tags), func() error {
+		return app.repo.DeleteDynamoDBTable(account, region, tab.Name)
+	}); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
 		return
 	}
@@ -249,6 +276,75 @@ func (app *Application) ddbDeleteTable(w http.ResponseWriter, account, region st
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
 		"TableDescription": ddbTableToDescription(tab),
 	})
+}
+
+// ----- Tag operations -----
+
+type ddbTagsInput struct {
+	ResourceArn string   `json:"ResourceArn"`
+	Tags        []ddbTag `json:"Tags,omitempty"`
+	TagKeys     []string `json:"TagKeys,omitempty"`
+}
+
+// ddbTagCall decodes a tag op's body. It writes the error itself and
+// reports false on a bad body.
+func ddbTagCall(w http.ResponseWriter, req awsproto.XAmzTargetRequest) (ddbTagsInput, bool) {
+	var in ddbTagsInput
+	if err := json.Unmarshal(req.Body, &in); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		return in, false
+	}
+	return in, true
+}
+
+// ddbWriteTagError writes a tag op's failure, a 400
+// ResourceNotFoundException for a missing table as DynamoDB does.
+func ddbWriteTagError(w http.ResponseWriter, arn string, err error) {
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeJSON11, http.StatusBadRequest,
+			"ResourceNotFoundException", fmt.Sprintf("Requested resource not found: ResourceArn: %s not found", arn))
+		return
+	}
+	awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
+}
+
+func (app *Application) ddbListTagsOfResource(w http.ResponseWriter, account string, req awsproto.XAmzTargetRequest) {
+	in, ok := ddbTagCall(w, req)
+	if !ok {
+		return
+	}
+	tags, err := app.repo.ResourceTags(account, repository.TagsDynamoDBTable, in.ResourceArn)
+	if err != nil {
+		ddbWriteTagError(w, in.ResourceArn, err)
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
+		"Tags": tagList(tags, func(k, v string) ddbTag { return ddbTag{Key: k, Value: v} }),
+	})
+}
+
+func (app *Application) ddbTagResource(w http.ResponseWriter, account string, req awsproto.XAmzTargetRequest) {
+	in, ok := ddbTagCall(w, req)
+	if !ok {
+		return
+	}
+	if err := app.repo.TagResource(account, repository.TagsDynamoDBTable, in.ResourceArn, ddbTagMap(in.Tags)); err != nil {
+		ddbWriteTagError(w, in.ResourceArn, err)
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+}
+
+func (app *Application) ddbUntagResource(w http.ResponseWriter, account string, req awsproto.XAmzTargetRequest) {
+	in, ok := ddbTagCall(w, req)
+	if !ok {
+		return
+	}
+	if err := app.repo.UntagResource(account, repository.TagsDynamoDBTable, in.ResourceArn, in.TagKeys); err != nil {
+		ddbWriteTagError(w, in.ResourceArn, err)
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
 }
 
 // ----- Item operations -----

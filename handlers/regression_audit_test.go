@@ -233,6 +233,7 @@ var knownNonServiceFiles = map[string]bool{
 	"handlers.go":            true,
 	"admin.go":               true,
 	"regression_manifest.go": true,
+	"tags.go":                true,
 }
 
 func serviceFilePrefixes(t *testing.T, dir string) map[string]bool {
