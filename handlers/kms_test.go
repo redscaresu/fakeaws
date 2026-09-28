@@ -214,3 +214,35 @@ func TestContract_kms_soft_delete_state_pending_deletion(t *testing.T) {
 	assert.False(t, described.KeyMetadata.Enabled, "Enabled=true after ScheduleKeyDeletion, want false")
 	assert.NotZero(t, described.KeyMetadata.DeletionDate, "DeletionDate not set in DescribeKey response after ScheduleKeyDeletion")
 }
+
+// TestKMS_KeyDescriptionRoundTrip pins that DescribeKey returns the
+// description CreateKey stored and UpdateKeyDescription replaced;
+// a hard-coded "" made every described aws_kms_key drift on plan.
+func TestKMS_KeyDescriptionRoundTrip(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+	describe := func(keyID string) string {
+		resp, body := kmsCall(t, srv, region, "DescribeKey", `{"KeyId":"`+keyID+`"}`)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeKey: %s", body)
+		var out struct{ KeyMetadata struct{ Description string } }
+		require.NoError(t, json.Unmarshal(body, &out), "decode DescribeKey: body=%s", body)
+		return out.KeyMetadata.Description
+	}
+
+	resp, body := kmsCall(t, srv, region, "CreateKey", `{"Description":"app key"}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateKey: %s", body)
+	var created struct {
+		KeyMetadata struct{ KeyId, Description string }
+	}
+	require.NoError(t, json.Unmarshal(body, &created), "decode CreateKey: body=%s", body)
+	keyID := created.KeyMetadata.KeyId
+	assert.Equal(t, "app key", created.KeyMetadata.Description)
+	assert.Equal(t, "app key", describe(keyID))
+
+	resp, body = kmsCall(t, srv, region, "UpdateKeyDescription", `{"KeyId":"`+keyID+`","Description":"rotated key"}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "UpdateKeyDescription: %s", body)
+	assert.Equal(t, "rotated key", describe(keyID))
+
+	resp, body = kmsCall(t, srv, region, "UpdateKeyDescription", `{"KeyId":"missing","Description":"x"}`)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "UpdateKeyDescription on unknown key: %s", body)
+}
