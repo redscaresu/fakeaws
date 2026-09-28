@@ -209,16 +209,26 @@ func (app *Application) eksDeleteCluster(w http.ResponseWriter, r *http.Request)
 
 // ----- Tags -----
 
-// eksTagARN is the cluster ARN a tag call's path names. It writes the
-// error itself and reports false for a malformed escape.
-func eksTagARN(w http.ResponseWriter, r *http.Request) (string, bool) {
+// eksTagARN is the ARN a tag call's path names and the table it lives
+// in, by its resource type: cluster/, nodegroup/ or addon/. It writes
+// the error itself and reports false for a malformed escape.
+func eksTagARN(w http.ResponseWriter, r *http.Request) (string, repository.TaggedTable, bool) {
 	arn, err := url.PathUnescape(chi.URLParam(r, "*"))
 	if err != nil {
 		awsproto.WriteServiceError(w, awsproto.ShapeJSONREST, http.StatusBadRequest,
 			"BadRequestException", fmt.Sprintf("invalid resource ARN: %v", err))
-		return "", false
+		return "", "", false
 	}
-	return arn, true
+	table := repository.TagsEKSCluster
+	if _, resource, ok := strings.Cut(arn, ":eks:"); ok {
+		switch {
+		case strings.Contains(resource, ":nodegroup/"):
+			table = repository.TagsEKSNodeGroup
+		case strings.Contains(resource, ":addon/"):
+			table = repository.TagsEKSAddon
+		}
+	}
+	return arn, table, true
 }
 
 // eksWriteTagError writes a tag call's failure: EKS's tag operations
@@ -235,11 +245,11 @@ func eksWriteTagError(w http.ResponseWriter, arn string, err error) {
 
 func (app *Application) eksListTagsForResource(w http.ResponseWriter, r *http.Request) {
 	const account = awsproto.FakeAccountID
-	arn, ok := eksTagARN(w, r)
+	arn, table, ok := eksTagARN(w, r)
 	if !ok {
 		return
 	}
-	tags, err := app.repo.ResourceTags(account, repository.TagsEKSCluster, arn)
+	tags, err := app.repo.ResourceTags(account, table, arn)
 	if err != nil {
 		eksWriteTagError(w, arn, err)
 		return
@@ -249,7 +259,7 @@ func (app *Application) eksListTagsForResource(w http.ResponseWriter, r *http.Re
 
 func (app *Application) eksTagResource(w http.ResponseWriter, r *http.Request) {
 	const account = awsproto.FakeAccountID
-	arn, ok := eksTagARN(w, r)
+	arn, table, ok := eksTagARN(w, r)
 	if !ok {
 		return
 	}
@@ -261,7 +271,7 @@ func (app *Application) eksTagResource(w http.ResponseWriter, r *http.Request) {
 			"BadRequestException", err.Error())
 		return
 	}
-	if err := app.repo.TagResource(account, repository.TagsEKSCluster, arn, in.Tags); err != nil {
+	if err := app.repo.TagResource(account, table, arn, in.Tags); err != nil {
 		eksWriteTagError(w, arn, err)
 		return
 	}
@@ -270,11 +280,11 @@ func (app *Application) eksTagResource(w http.ResponseWriter, r *http.Request) {
 
 func (app *Application) eksUntagResource(w http.ResponseWriter, r *http.Request) {
 	const account = awsproto.FakeAccountID
-	arn, ok := eksTagARN(w, r)
+	arn, table, ok := eksTagARN(w, r)
 	if !ok {
 		return
 	}
-	if err := app.repo.UntagResource(account, repository.TagsEKSCluster, arn, r.URL.Query()["tagKeys"]); err != nil {
+	if err := app.repo.UntagResource(account, table, arn, r.URL.Query()["tagKeys"]); err != nil {
 		eksWriteTagError(w, arn, err)
 		return
 	}
@@ -289,6 +299,7 @@ type eksCreateNodeGroupInput struct {
 	Subnets       []string               `json:"subnets"`
 	InstanceTypes []string               `json:"instanceTypes,omitempty"`
 	ScalingConfig map[string]json.Number `json:"scalingConfig,omitempty"`
+	Tags          map[string]string      `json:"tags,omitempty"`
 }
 
 type eksNodeGroupDescription struct {
@@ -301,6 +312,7 @@ type eksNodeGroupDescription struct {
 	ScalingConfig map[string]json.Number `json:"scalingConfig,omitempty"`
 	Status        string                 `json:"status"`
 	CreatedAt     float64                `json:"createdAt"`
+	Tags          map[string]string      `json:"tags,omitempty"`
 }
 
 func (app *Application) eksCreateNodeGroup(w http.ResponseWriter, r *http.Request) {
@@ -334,8 +346,16 @@ func (app *Application) eksCreateNodeGroup(w http.ResponseWriter, r *http.Reques
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
+	if err := app.tagCreated(account, repository.TagsEKSNodeGroup, ng.ARN, in.Tags, func() error {
+		return app.repo.DeleteEKSNodeGroup(account, region, clusterName, in.NodegroupName)
+	}); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
+		return
+	}
+	out := eksNodeGroupToDesc(ng)
+	out.Tags = in.Tags
 	awsproto.WriteJSONRESTResponse(w, http.StatusOK, map[string]any{
-		"nodegroup": eksNodeGroupToDesc(ng),
+		"nodegroup": out,
 	})
 }
 
@@ -365,8 +385,16 @@ func (app *Application) eksDescribeNodeGroup(w http.ResponseWriter, r *http.Requ
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
+	// aws_eks_node_group reads its tags from here.
+	tags, err := app.repo.ResourceTags(account, repository.TagsEKSNodeGroup, ng.ARN)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
+		return
+	}
+	out := eksNodeGroupToDesc(ng)
+	out.Tags = tags
 	awsproto.WriteJSONRESTResponse(w, http.StatusOK, map[string]any{
-		"nodegroup": eksNodeGroupToDesc(ng),
+		"nodegroup": out,
 	})
 }
 
@@ -392,17 +420,19 @@ func (app *Application) eksDeleteNodeGroup(w http.ResponseWriter, r *http.Reques
 // ----- Addon -----
 
 type eksCreateAddonInput struct {
-	AddonName    string `json:"addonName"`
-	AddonVersion string `json:"addonVersion,omitempty"`
+	AddonName    string            `json:"addonName"`
+	AddonVersion string            `json:"addonVersion,omitempty"`
+	Tags         map[string]string `json:"tags,omitempty"`
 }
 
 type eksAddonDescription struct {
-	AddonName    string  `json:"addonName"`
-	ClusterName  string  `json:"clusterName"`
-	AddonArn     string  `json:"addonArn"`
-	AddonVersion string  `json:"addonVersion,omitempty"`
-	Status       string  `json:"status"`
-	CreatedAt    float64 `json:"createdAt"`
+	AddonName    string            `json:"addonName"`
+	ClusterName  string            `json:"clusterName"`
+	AddonArn     string            `json:"addonArn"`
+	AddonVersion string            `json:"addonVersion,omitempty"`
+	Status       string            `json:"status"`
+	CreatedAt    float64           `json:"createdAt"`
+	Tags         map[string]string `json:"tags,omitempty"`
 }
 
 func (app *Application) eksCreateAddon(w http.ResponseWriter, r *http.Request) {
@@ -429,8 +459,16 @@ func (app *Application) eksCreateAddon(w http.ResponseWriter, r *http.Request) {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
+	if err := app.tagCreated(account, repository.TagsEKSAddon, a.ARN, in.Tags, func() error {
+		return app.repo.DeleteEKSAddon(account, region, clusterName, in.AddonName)
+	}); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
+		return
+	}
+	out := eksAddonToDesc(a)
+	out.Tags = in.Tags
 	awsproto.WriteJSONRESTResponse(w, http.StatusOK, map[string]any{
-		"addon": eksAddonToDesc(a),
+		"addon": out,
 	})
 }
 
@@ -448,8 +486,16 @@ func (app *Application) eksDescribeAddon(w http.ResponseWriter, r *http.Request)
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
 		return
 	}
+	// aws_eks_addon reads its tags from here.
+	tags, err := app.repo.ResourceTags(account, repository.TagsEKSAddon, a.ARN)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
+		return
+	}
+	out := eksAddonToDesc(a)
+	out.Tags = tags
 	awsproto.WriteJSONRESTResponse(w, http.StatusOK, map[string]any{
-		"addon": eksAddonToDesc(a),
+		"addon": out,
 	})
 }
 

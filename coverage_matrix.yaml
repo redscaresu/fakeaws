@@ -269,8 +269,7 @@ entries:
     working_exempt_reason: "Instance-profile lifecycle is asserted inline in TestCoverage_IAMInstanceProfileAndUser; standalone working/iam_instance_profile/ would duplicate."
     misconfigured_exempt: true
     misconfigured_exempt_reason: "No cross-resource FK gates that aren't already covered by the iam_attachment_missing_role example."
-    updates_exempt: true
-    updates_exempt_reason: "Profile metadata is set-once at v1 (path is the only field)."
+    updates_dir_name: update_tags_every_service
     integration_test_func_name: "^TestCoverage_IAMInstanceProfileAndUser$"
   - aws_service: iam
     aws_resource_type: aws_iam_user
@@ -308,8 +307,7 @@ entries:
     working_exempt_reason: "KeyPair Import/Describe/Delete is exercised in TestEC2_KeyPairImportDescribeDelete; aws-instance.yaml scenarios don't pin a key pair at v1."
     misconfigured_exempt: true
     misconfigured_exempt_reason: "Missing PublicKeyMaterial 409 + missing-name 404 covered in handler tests; tofu doesn't expose a meaningful misconfigure path."
-    updates_exempt: true
-    updates_exempt_reason: "KeyPair is set-once at v1 (delete + recreate)."
+    updates_dir_name: update_tags_every_service
     integration_test_func_name: "^TestEC2_KeyPairImportDescribeDelete$"
 
   # RDS — Aurora cluster + cluster parameter group (S45 surface).
@@ -356,8 +354,7 @@ entries:
     scenario_resource_type: kubernetes
     working_dir_name: eks_cluster
     misconfigured_dir_name: eks_node_group_subnet_outside_cluster
-    updates_exempt: true
-    updates_exempt_reason: "Nodegroup scaling_config / instance_types updates are no-ops at v1."
+    updates_dir_name: update_tags_every_service
     integration_test_func_name: "^TestEKS_NodeGroupSubnetMustBeInCluster$"
   - aws_service: eks
     aws_resource_type: aws_eks_addon
@@ -365,8 +362,7 @@ entries:
     working_dir_name: eks_cluster
     misconfigured_exempt: true
     misconfigured_exempt_reason: "Addon under a missing cluster surfaces as 404 — covered by the cluster-deletion CASCADES test in TestEKSCluster_DeleteCASCADESChildren."
-    updates_exempt: true
-    updates_exempt_reason: "Addon version bumps are no-ops at v1."
+    updates_dir_name: update_tags_every_service
     integration_test_func_name: "^TestEKS_AddonLifecycle$"
 
   # SQS (S46-T5 handlers, S46-T10 e2e + this matrix entry).

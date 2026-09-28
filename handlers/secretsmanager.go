@@ -68,9 +68,7 @@ func (app *Application) handleSecretsManager(w http.ResponseWriter, r *http.Requ
 			"Name": in.SecretId, "ARN": in.SecretId,
 		})
 	case "TagResource", "UntagResource":
-		// Tag mutations after create — accept silently. Persisted
-		// tags from CreateSecret already echo through DescribeSecret.
-		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+		app.smTagResource(w, account, region, req)
 	case "ListSecretVersionIds":
 		app.smListSecretVersionIds(w, account, region, req)
 	default:
@@ -187,6 +185,43 @@ func (app *Application) smDescribeSecret(w http.ResponseWriter, account, region 
 		resp["DeletedDate"] = secretEpoch(s.DeletedAt)
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, resp)
+}
+
+// smTagResource applies TagResource's tags, or removes UntagResource's
+// keys, on the tags DescribeSecret returns. The provider tags a secret
+// through these after create, so dropping them leaves a changed tag
+// (a new default_tags value) as drift on every later plan.
+func (app *Application) smTagResource(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		SecretId string                        `json:"SecretId"`
+		Tags     []struct{ Key, Value string } `json:"Tags,omitempty"`
+		TagKeys  []string                      `json:"TagKeys,omitempty"`
+	}
+	if err := json.Unmarshal(req.Body, &in); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		return
+	}
+	s, err := app.repo.GetSecretActiveOrPending(account, region, in.SecretId)
+	if err != nil {
+		awsproto.WriteServiceError(w, awsproto.ShapeJSON11, http.StatusNotFound,
+			"ResourceNotFoundException",
+			fmt.Sprintf("Secrets Manager can't find the specified secret: %s", in.SecretId))
+		return
+	}
+	if s.Tags == nil {
+		s.Tags = map[string]string{}
+	}
+	for _, t := range in.Tags {
+		s.Tags[t.Key] = t.Value
+	}
+	for _, k := range in.TagKeys {
+		delete(s.Tags, k)
+	}
+	if err := app.repo.SetSecretTags(account, s.ARN, s.Tags); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
 }
 
 // secretEpoch converts an RFC3339 timestamp into the seconds-since-

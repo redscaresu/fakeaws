@@ -67,16 +67,16 @@ func init() {
 // ----- Typed wire shapes -----
 
 type SecretsManagerSecret struct {
-	Name                  string            `json:"name"`
-	ARN                   string            `json:"arn"`
-	Description           string            `json:"description,omitempty"`
-	KMSKeyID              string            `json:"kms_key_id,omitempty"`
-	RecoveryWindowInDays  int               `json:"recovery_window_in_days"`
-	DeletedAt             string            `json:"deleted_at,omitempty"`
-	State                 string            `json:"state"`
-	Tags                  map[string]string `json:"tags,omitempty"`
-	Region                string            `json:"region"`
-	CreatedAt             string            `json:"created_at"`
+	Name                 string            `json:"name"`
+	ARN                  string            `json:"arn"`
+	Description          string            `json:"description,omitempty"`
+	KMSKeyID             string            `json:"kms_key_id,omitempty"`
+	RecoveryWindowInDays int               `json:"recovery_window_in_days"`
+	DeletedAt            string            `json:"deleted_at,omitempty"`
+	State                string            `json:"state"`
+	Tags                 map[string]string `json:"tags,omitempty"`
+	Region               string            `json:"region"`
+	CreatedAt            string            `json:"created_at"`
 }
 
 type SecretsManagerVersion struct {
@@ -108,6 +108,16 @@ func (r *Repository) CreateSecret(account string, s *SecretsManagerSecret) error
 		s.RecoveryWindowInDays, s.DeletedAt, s.State, tagsJSON, s.CreatedAt,
 	)
 	return mapInsertError(err)
+}
+
+// SetSecretTags replaces the tags of the secret with this ARN.
+func (r *Repository) SetSecretTags(account, arn string, tags map[string]string) error {
+	b, err := json.Marshal(tags)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(`UPDATE secretsmanager_secrets SET tags = ? WHERE account_id = ? AND arn = ?`, string(b), account, arn)
+	return err
 }
 
 // GetSecret returns the secret row regardless of state. Callers that

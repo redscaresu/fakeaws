@@ -24,18 +24,21 @@ const (
 	TagsIAMRole           TaggedTable = "iam_roles"
 	TagsIAMUser           TaggedTable = "iam_users"
 	TagsIAMPolicy         TaggedTable = "iam_policies"
+	TagsIAMProfile        TaggedTable = "iam_instance_profiles"
 	TagsRDSInstance       TaggedTable = "rds_db_instances"
 	TagsRDSParameterGroup TaggedTable = "rds_db_parameter_groups"
 	TagsRDSSubnetGroup    TaggedTable = "rds_db_subnet_groups"
 	TagsRoute53Zone       TaggedTable = "route53_hosted_zones"
 	TagsDynamoDBTable     TaggedTable = "dynamodb_tables"
 	TagsEKSCluster        TaggedTable = "eks_clusters"
+	TagsEKSNodeGroup      TaggedTable = "eks_node_groups"
+	TagsEKSAddon          TaggedTable = "eks_addons"
 )
 
 var taggedTables = []TaggedTable{
-	TagsSQSQueue, TagsIAMRole, TagsIAMUser, TagsIAMPolicy,
+	TagsSQSQueue, TagsIAMRole, TagsIAMUser, TagsIAMPolicy, TagsIAMProfile,
 	TagsRDSInstance, TagsRDSParameterGroup, TagsRDSSubnetGroup,
-	TagsRoute53Zone, TagsDynamoDBTable, TagsEKSCluster,
+	TagsRoute53Zone, TagsDynamoDBTable, TagsEKSCluster, TagsEKSNodeGroup, TagsEKSAddon,
 }
 
 func init() {
