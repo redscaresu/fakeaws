@@ -554,6 +554,145 @@ func TestContract_ec2_sg_rule_source_descriptions_round_trip(t *testing.T) {
 	}}, egress)
 }
 
+// ec2Error decodes an EC2 Query error body's first Code and Message.
+func ec2Error(t *testing.T, body []byte) (code, message string) {
+	t.Helper()
+	var out struct {
+		Code    string `xml:"Errors>Error>Code"`
+		Message string `xml:"Errors>Error>Message"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "decode EC2 error: %s", body)
+	return out.Code, out.Message
+}
+
+// sgPerm is one IpPermissions.1.* permission with an optional IPv4 source.
+func sgPerm(proto, from, to, cidr string) url.Values {
+	p := url.Values{"IpPermissions.1.IpProtocol": {proto}}
+	if from != "" {
+		p.Set("IpPermissions.1.FromPort", from)
+		p.Set("IpPermissions.1.ToPort", to)
+	}
+	if cidr != "" {
+		p.Set("IpPermissions.1.IpRanges.1.CidrIp", cidr)
+	}
+	return p
+}
+
+// TestEC2_SecurityGroupRuleValidation pins the InvalidParameterValue
+// refusals. Messages are real EC2's where one has been seen:
+//   - CIDR: "CIDR block ::/0 is malformed" (aws-cli#2846,
+//     hashicorp/terraform#14382)
+//   - port range: "TCP/UDP (from) port (-1) out of range" (aws-cli#1066)
+//   - protocol: "Invalid value 'esp' for IP protocol. Unknown protocol."
+//     (hashicorp/terraform#9092)
+//   - ICMP: "ICMP code (65535) out of range"
+//     (terraform-aws-modules/terraform-aws-security-group#7)
+//
+// Neither AWS nor moto documents a message for FromPort > ToPort, so
+// that one is fakeaws's own.
+func TestEC2_SecurityGroupRuleValidation(t *testing.T) {
+	const region = "us-east-1"
+	srv, sgID, _ := newSGPair(t, region)
+
+	cases := []struct {
+		name, action string
+		params       url.Values
+		fragment     string
+	}{
+		{"ipv4 /33", "AuthorizeSecurityGroupIngress", sgPerm("tcp", "22", "22", "10.0.0.0/33"), "CIDR block 10.0.0.0/33 is malformed"},
+		{"bogus cidr", "AuthorizeSecurityGroupIngress", sgPerm("tcp", "22", "22", "bogus"), "CIDR block bogus is malformed"},
+		{"bad ipv6 cidr", "AuthorizeSecurityGroupIngress", url.Values{
+			"IpPermissions.1.IpProtocol":            {"tcp"},
+			"IpPermissions.1.FromPort":              {"22"},
+			"IpPermissions.1.ToPort":                {"22"},
+			"IpPermissions.1.Ipv6Ranges.1.CidrIpv6": {"2001:db8::/129"},
+		}, "CIDR block 2001:db8::/129 is malformed"},
+		{"tcp 80->70", "AuthorizeSecurityGroupIngress", sgPerm("tcp", "80", "70", "10.0.0.0/8"), "Invalid port range 80-70 for protocol 'tcp'"},
+		{"tcp 70000", "AuthorizeSecurityGroupIngress", sgPerm("tcp", "80", "70000", "10.0.0.0/8"), "TCP/UDP (to) port (70000) out of range"},
+		{"protocol bogus", "AuthorizeSecurityGroupIngress", sgPerm("bogus", "80", "80", "10.0.0.0/8"), "Invalid value 'bogus' for IP protocol"},
+		{"protocol 256", "AuthorizeSecurityGroupIngress", sgPerm("256", "", "", "10.0.0.0/8"), "Invalid value '256' for IP protocol"},
+		{"protocol 6 80->70", "AuthorizeSecurityGroupIngress", sgPerm("6", "80", "70", "10.0.0.0/8"), "Invalid port range 80-70 for protocol '6'"},
+		{"icmp type 256", "AuthorizeSecurityGroupIngress", sgPerm("icmp", "256", "0", "10.0.0.0/8"), "ICMP type (256) out of range"},
+		{"egress icmpv6 code 300", "AuthorizeSecurityGroupEgress", url.Values{
+			"IpPermissions.1.IpProtocol":            {"icmpv6"},
+			"IpPermissions.1.FromPort":              {"128"},
+			"IpPermissions.1.ToPort":                {"300"},
+			"IpPermissions.1.Ipv6Ranges.1.CidrIpv6": {"::/0"},
+		}, "ICMP code (300) out of range"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.params.Set("GroupId", sgID)
+			resp, body := ec2Call(t, srv, region, tc.action, tc.params)
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+			code, msg := ec2Error(t, body)
+			assert.Equal(t, "InvalidParameterValue", code)
+			assert.Contains(t, msg, tc.fragment)
+		})
+	}
+
+	ingress, egress := describeSGRules(t, srv, region, sgID)
+	assert.Empty(t, ingress, "refused ingress rules must not be stored")
+	assert.Empty(t, egress, "refused egress rules must not be stored")
+}
+
+// TestEC2_SecurityGroupRulePositiveControls pins the edge rules EC2
+// accepts, so the validation above does not over-refuse.
+func TestEC2_SecurityGroupRulePositiveControls(t *testing.T) {
+	const region = "us-east-1"
+	srv, sgID, _ := newSGPair(t, region)
+
+	for name, params := range map[string]url.Values{
+		"all protocols":  sgPerm("-1", "", "", "0.0.0.0/0"),
+		"tcp 0-65535":    sgPerm("tcp", "0", "65535", "10.0.0.0/8"),
+		"icmp -1/-1":     sgPerm("icmp", "-1", "-1", "10.0.0.0/8"),
+		"protocol 6 80":  sgPerm("6", "80", "80", "10.0.0.0/8"),
+		"ipv6 ::/0 icmp": {"IpPermissions.1.IpProtocol": {"icmpv6"}, "IpPermissions.1.FromPort": {"-1"}, "IpPermissions.1.ToPort": {"-1"}, "IpPermissions.1.Ipv6Ranges.1.CidrIpv6": {"::/0"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sgAuthorize(t, srv, region, "AuthorizeSecurityGroupIngress", sgID, params)
+		})
+	}
+}
+
+// TestEC2_SecurityGroupRuleSourceGroupMustExist: a same-account
+// Groups.N.GroupId must name a group (moto's InvalidGroup.NotFound
+// message); another account's reference is admitted unchecked.
+func TestEC2_SecurityGroupRuleSourceGroupMustExist(t *testing.T) {
+	const region = "us-east-1"
+	srv, sgID, peerID := newSGPair(t, region)
+	const missing = "sg-0000000000000dead"
+
+	resp, body := ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{
+		"GroupId":                          {sgID},
+		"IpPermissions.1.IpProtocol":       {"tcp"},
+		"IpPermissions.1.FromPort":         {"443"},
+		"IpPermissions.1.ToPort":           {"443"},
+		"IpPermissions.1.Groups.1.GroupId": {missing},
+	})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	code, msg := ec2Error(t, body)
+	assert.Equal(t, "InvalidGroup.NotFound", code)
+	assert.Equal(t, "The security group '"+missing+"' does not exist", msg)
+
+	sgAuthorize(t, srv, region, "AuthorizeSecurityGroupIngress", sgID, url.Values{
+		"IpPermissions.1.IpProtocol":       {"tcp"},
+		"IpPermissions.1.FromPort":         {"443"},
+		"IpPermissions.1.ToPort":           {"443"},
+		"IpPermissions.1.Groups.1.GroupId": {peerID},
+	})
+	sgAuthorize(t, srv, region, "AuthorizeSecurityGroupIngress", sgID, url.Values{
+		"IpPermissions.1.IpProtocol":       {"tcp"},
+		"IpPermissions.1.FromPort":         {"8443"},
+		"IpPermissions.1.ToPort":           {"8443"},
+		"IpPermissions.1.Groups.1.GroupId": {missing},
+		"IpPermissions.1.Groups.1.UserId":  {"111122223333"},
+	})
+	ingress, _ := describeSGRules(t, srv, region, sgID)
+	assert.Equal(t, []sgRuleSourceXML{{GroupId: peerID}}, sgPermByPort(ingress, 443).Groups, "existing group applies")
+	assert.Equal(t, []sgRuleSourceXML{{GroupId: missing, UserId: "111122223333"}}, sgPermByPort(ingress, 8443).Groups, "other account admitted")
+}
+
 func TestEC2_RunInstancesAndTerminate(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	const region = "us-east-1"
