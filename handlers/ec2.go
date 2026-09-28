@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"maps"
@@ -135,6 +136,10 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	// ----- AMI (read-only fixture) -----
 	case "DescribeImages":
 		app.ec2DescribeImages(w, account, region, req)
+
+	// ----- Resources fakeaws never creates (the scope sweep lists them) -----
+	case "DescribeVolumes", "DescribeNatGateways", "DescribeSnapshots", "DescribeLaunchTemplates":
+		ec2DescribeNone(w, req)
 
 	// ----- InstanceType (read-only fixture) -----
 	// terraform-provider-aws calls DescribeInstanceTypes during the
@@ -1004,12 +1009,22 @@ func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, regio
 		&ec2AllocateAddressResult{AllocationId: eip.AllocationID, PublicIp: eip.PublicIP, Domain: eip.Domain})
 }
 
-// ec2FindAddresses looks up each AllocationId.N. It writes the error
-// itself, InvalidAllocationID.NotFound for a missing one as EC2 does,
-// and reports false.
+// ec2FindAddresses looks up each AllocationId.N or, with none, lists
+// every address in the region. It writes the error itself,
+// InvalidAllocationID.NotFound for a missing one as EC2 does, and
+// reports false.
 func (app *Application) ec2FindAddresses(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) ([]*repository.EC2EIP, bool) {
+	ids := queryListValues(req.Params, "AllocationId.")
+	if len(ids) == 0 {
+		eips, err := app.repo.ListEIPs(account, region)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return nil, false
+		}
+		return eips, true
+	}
 	var out []*repository.EC2EIP
-	for _, id := range queryListValues(req.Params, "AllocationId.") {
+	for _, id := range ids {
 		eip, err := app.repo.GetEIP(account, region, id)
 		if errors.Is(err, models.ErrNotFound) {
 			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
@@ -1026,9 +1041,12 @@ func (app *Application) ec2FindAddresses(w http.ResponseWriter, account, region 
 }
 
 // ec2DescribeAddresses answers the AllocationId.N lookup the provider
-// makes. With no AllocationId it describes nothing (full list scan
-// deferred; the provider's import path always supplies one).
+// makes and, with none, the scope sweep's list of every address.
+// Filter.N and PublicIp.N are refused rather than ignored.
 func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if refuseUnmodelled(w, req, "Filter.", "PublicIp.") {
+		return
+	}
 	eips, ok := app.ec2FindAddresses(w, account, region, req)
 	if !ok {
 		return
@@ -1289,47 +1307,65 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 		&ec2CreateSecurityGroupResult{GroupId: sg.ID})
 }
 
-func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	// GroupId.<n> filter — most common from terraform-provider-aws.
-	wanted := []string{}
-	for k, vs := range req.Params {
-		if strings.HasPrefix(k, "GroupId.") && len(vs) > 0 {
-			wanted = append(wanted, vs[0])
+// ec2FindSecurityGroups looks up each GroupId.N or, with none, lists
+// every group in the region. It writes the error itself and reports
+// false.
+func (app *Application) ec2FindSecurityGroups(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) ([]*repository.EC2SecurityGroup, bool) {
+	ids := queryListValues(req.Params, "GroupId.")
+	if len(ids) == 0 {
+		sgs, err := app.repo.ListSecurityGroups(account, region)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return nil, false
 		}
+		return sgs, true
 	}
-	if len(wanted) == 0 {
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("DescribeSecurityGroups without GroupId.<n> filter not yet supported: %w", models.ErrConflict))
+	var out []*repository.EC2SecurityGroup
+	for _, id := range ids {
+		sg, err := app.repo.GetSecurityGroup(account, region, id)
+		// terraform-provider-aws's destroy wait-loop polls
+		// DescribeSecurityGroups({sg-id}) after DeleteSecurityGroup
+		// and treats EXACTLY the AWS code "InvalidGroup.NotFound"
+		// as "deletion complete". A generic ResourceNotFoundException
+		// (the default mapDomainError gives) is treated as an
+		// unexpected hard error and the wait bails out, leaving
+		// the SG marked as undeleted in state. Surface the
+		// service-specific code on this read path so destroy
+		// drains cleanly. Same pattern as the WriteServiceError
+		// note for RDS's DBInstanceNotFound.
+		if errors.Is(err, models.ErrNotFound) {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query,
+				http.StatusNotFound, "InvalidGroup.NotFound",
+				fmt.Sprintf("The security group ID '%s' does not exist", id))
+			return nil, false
+		}
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return nil, false
+		}
+		out = append(out, sg)
+	}
+	return out, true
+}
+
+// ec2DescribeSecurityGroups answers the provider's GroupId.N lookup
+// and, with none, the scope sweep's list of every group. Filter.N and
+// GroupName.N are refused rather than ignored.
+func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if refuseUnmodelled(w, req, "Filter.", "GroupName.") {
+		return
+	}
+	sgs, ok := app.ec2FindSecurityGroups(w, account, region, req)
+	if !ok {
 		return
 	}
 	tags, ok := app.tagSets(w, account)
 	if !ok {
 		return
 	}
-	out := ec2DescribeSecurityGroupsResult{SecurityGroupSet: make([]ec2SecurityGroupXML, 0, len(wanted))}
-	for _, id := range wanted {
-		sg, err := app.repo.GetSecurityGroup(account, region, id)
-		if err != nil {
-			// terraform-provider-aws's destroy wait-loop polls
-			// DescribeSecurityGroups({sg-id}) after DeleteSecurityGroup
-			// and treats EXACTLY the AWS code "InvalidGroup.NotFound"
-			// as "deletion complete". A generic ResourceNotFoundException
-			// (the default mapDomainError gives) is treated as an
-			// unexpected hard error and the wait bails out, leaving
-			// the SG marked as undeleted in state. Surface the
-			// service-specific code on this read path so destroy
-			// drains cleanly. Same pattern as the WriteServiceError
-			// note for RDS's DBInstanceNotFound.
-			if errors.Is(err, models.ErrNotFound) {
-				awsproto.WriteServiceError(w, awsproto.ShapeEC2Query,
-					http.StatusNotFound, "InvalidGroup.NotFound",
-					fmt.Sprintf("The security group ID '%s' does not exist", id))
-				return
-			}
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-			return
-		}
-		ing, eg, err := app.repo.GetSecurityGroupRules(account, region, id)
+	out := ec2DescribeSecurityGroupsResult{SecurityGroupSet: make([]ec2SecurityGroupXML, 0, len(sgs))}
+	for _, sg := range sgs {
+		ing, eg, err := app.repo.GetSecurityGroupRules(account, region, sg.ID)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
@@ -2393,15 +2429,12 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 			wanted = append(wanted, vs[0])
 		}
 	}
-	out := ec2DescribeImagesResult{ImagesSet: []ec2ImageXML{}}
+	var amis []*repository.EC2AMI
 	if len(wanted) == 0 {
-		amis, err := app.repo.ListAMIs(account, region)
-		if err != nil {
+		var err error
+		if amis, err = app.repo.ListAMIs(account, region); err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
-		}
-		for _, a := range amis {
-			out.ImagesSet = append(out.ImagesSet, ec2AMIToXML(a))
 		}
 	} else {
 		for _, id := range wanted {
@@ -2410,10 +2443,63 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 				awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 				return
 			}
+			amis = append(amis, a)
+		}
+	}
+	// Owner.N keeps images of those owners, "self" meaning the caller:
+	// the scope sweep's Owner.1=self sees none of the fixtures. There
+	// are no disabled images, so IncludeDisabled changes nothing.
+	owners := queryListValues(req.Params, "Owner.")
+	out := ec2DescribeImagesResult{ImagesSet: []ec2ImageXML{}}
+	for _, a := range amis {
+		if len(owners) == 0 || slices.Contains(owners, a.OwnerID) || a.OwnerID == account && slices.Contains(owners, "self") {
 			out.ImagesSet = append(out.ImagesSet, ec2AMIToXML(a))
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeImages", &out)
+}
+
+// ec2NoneSets names the result set of each Describe for a resource
+// fakeaws never creates.
+var ec2NoneSets = map[string]string{
+	"DescribeVolumes":         "volumeSet",
+	"DescribeNatGateways":     "natGatewaySet",
+	"DescribeSnapshots":       "snapshotSet",
+	"DescribeLaunchTemplates": "launchTemplates",
+}
+
+type ec2EmptySet struct {
+	XMLName xml.Name
+}
+
+type ec2DescribeNoneResult struct {
+	Set ec2EmptySet
+}
+
+// ec2DescribeNone answers a Describe in ec2NoneSets with its real
+// result, an empty set, and refuses Filter.N rather than ignoring it.
+// ponytail: an id lookup (VolumeId.N, ...) answers empty, not the
+// service's NotFound code; add the codes when a caller looks one up.
+func ec2DescribeNone(w http.ResponseWriter, req awsproto.QueryRPCRequest) {
+	if refuseUnmodelled(w, req, "Filter.") {
+		return
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, req.Action,
+		&ec2DescribeNoneResult{Set: ec2EmptySet{XMLName: xml.Name{Local: ec2NoneSets[req.Action]}}})
+}
+
+// refuseUnmodelled answers 409 when req carries a param under one of
+// prefixes, a filter fakeaws does not model, rather than ignoring it
+// and describing everything. It reports whether it answered.
+func refuseUnmodelled(w http.ResponseWriter, req awsproto.QueryRPCRequest, prefixes ...string) bool {
+	for k := range req.Params {
+		if slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(k, p) }) {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
+				fmt.Errorf("%s parameter %q not supported by fakeaws: %w", req.Action, k, models.ErrConflict))
+			return true
+		}
+	}
+	return false
 }
 
 func ec2AMIToXML(a *repository.EC2AMI) ec2ImageXML {

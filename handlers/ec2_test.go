@@ -15,9 +15,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/redscaresu/fakeaws/handlers"
 	"github.com/redscaresu/fakeaws/handlers/awsproto"
 )
 
@@ -1563,4 +1568,172 @@ func TestContract_ec2_tags_round_trip_in_tagset(t *testing.T) {
 	resp, _ = ec2Call(t, srv, tagRegion, "CreateTags", tagParams(url.Values{"ResourceId.1": {id}}, "Tag.", "Name", "v2"))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, map[string]string{"Name": "v2"}, describedTags(t, srv, k, id))
+}
+
+// ----- The AWS scope sweep's Describes, through aws-sdk-go-v2 -----
+
+const sweepRegion = "us-east-1"
+
+// sweepClient is an aws-sdk-go-v2 EC2 client on srv in sweepRegion.
+func sweepClient(srv *httptest.Server) *ec2.Client {
+	return ec2.New(ec2.Options{
+		Region:           sweepRegion,
+		BaseEndpoint:     aws.String(srv.URL + "/ec2/region/" + sweepRegion),
+		Credentials:      aws.AnonymousCredentials{},
+		HTTPClient:       srv.Client(),
+		RetryMaxAttempts: 1,
+	})
+}
+
+// sweepFilter is a Filter.N none of the sweep's Describes model.
+var sweepFilter = []ec2types.Filter{{Name: aws.String("tag:Owner"), Values: []string{"sweep"}}}
+
+// assertRefused asserts err is fakeaws's 409 for an unmodelled param.
+func assertRefused(t *testing.T, err error, msg string) {
+	t.Helper()
+	var re *awshttp.ResponseError
+	if assert.ErrorAs(t, err, &re, msg) {
+		assert.Equal(t, http.StatusConflict, re.HTTPStatusCode(), msg)
+	}
+}
+
+func TestRegressionSweepDescribeAddressesListsEveryAddress(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	c, ctx := sweepClient(srv), t.Context()
+	alloc, err := c.AllocateAddress(ctx, &ec2.AllocateAddressInput{Domain: ec2types.DomainTypeVpc})
+	require.NoError(t, err)
+	resp, body := ec2Call(t, srv, "eu-west-2", "AllocateAddress", nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "AllocateAddress eu-west-2: %s", body)
+
+	out, err := c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{})
+	require.NoError(t, err)
+	require.Len(t, out.Addresses, 1, "the region's address, not eu-west-2's")
+	assert.Equal(t, aws.ToString(alloc.AllocationId), aws.ToString(out.Addresses[0].AllocationId))
+
+	_, err = c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{Filters: sweepFilter})
+	assertRefused(t, err, "Filter.N")
+	_, err = c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{PublicIps: []string{aws.ToString(alloc.PublicIp)}})
+	assertRefused(t, err, "PublicIp.N")
+}
+
+func TestRegressionSweepDescribeSecurityGroupsListsEveryGroup(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	c, ctx := sweepClient(srv), t.Context()
+	vpc, err := c.CreateVpc(ctx, &ec2.CreateVpcInput{CidrBlock: aws.String("10.0.0.0/16")})
+	require.NoError(t, err)
+	sg, err := c.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
+		GroupName: aws.String("web"), Description: aws.String("web"), VpcId: vpc.Vpc.VpcId,
+	})
+	require.NoError(t, err)
+
+	out, err := c.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{MaxResults: aws.Int32(1000)})
+	require.NoError(t, err)
+	require.Len(t, out.SecurityGroups, 1)
+	assert.Equal(t, aws.ToString(sg.GroupId), aws.ToString(out.SecurityGroups[0].GroupId))
+	assert.Equal(t, "web", aws.ToString(out.SecurityGroups[0].GroupName))
+
+	_, err = c.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{Filters: sweepFilter})
+	assertRefused(t, err, "Filter.N")
+	_, err = c.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupNames: []string{"web"}})
+	assertRefused(t, err, "GroupName.N")
+}
+
+func TestRegressionSweepDescribeImagesOwnerSelf(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	c, ctx := sweepClient(srv), t.Context()
+	imageIDs := func(in *ec2.DescribeImagesInput) []string {
+		t.Helper()
+		out, err := c.DescribeImages(ctx, in)
+		require.NoError(t, err)
+		var ids []string
+		for _, img := range out.Images {
+			ids = append(ids, aws.ToString(img.ImageId))
+		}
+		return ids
+	}
+
+	assert.Empty(t, imageIDs(&ec2.DescribeImagesInput{Owners: []string{"self"}, IncludeDisabled: aws.Bool(true)}),
+		"none of the fixtures is the caller's")
+	assert.Equal(t, []string{handlers.AL2023AMIID}, imageIDs(&ec2.DescribeImagesInput{ImageIds: []string{handlers.AL2023AMIID}}))
+	assert.ElementsMatch(t, []string{"ami-0ubuntu2004", "ami-0ubuntu2204"},
+		imageIDs(&ec2.DescribeImagesInput{Owners: []string{"099720109477"}}), "Owner.N keeps that owner's images")
+}
+
+func TestRegressionSweepDescribesNeverCreated(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	c, ctx := sweepClient(srv), t.Context()
+	describes := map[string]func([]ec2types.Filter) (any, error){
+		"DescribeVolumes": func(f []ec2types.Filter) (any, error) {
+			out, err := c.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{Filters: f, MaxResults: aws.Int32(500)})
+			if err != nil {
+				return nil, err
+			}
+			return out.Volumes, nil
+		},
+		"DescribeNatGateways": func(f []ec2types.Filter) (any, error) {
+			out, err := c.DescribeNatGateways(ctx, &ec2.DescribeNatGatewaysInput{Filter: f, MaxResults: aws.Int32(1000)})
+			if err != nil {
+				return nil, err
+			}
+			return out.NatGateways, nil
+		},
+		"DescribeSnapshots": func(f []ec2types.Filter) (any, error) {
+			out, err := c.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{Filters: f, OwnerIds: []string{"self"}, MaxResults: aws.Int32(1000)})
+			if err != nil {
+				return nil, err
+			}
+			return out.Snapshots, nil
+		},
+		"DescribeLaunchTemplates": func(f []ec2types.Filter) (any, error) {
+			out, err := c.DescribeLaunchTemplates(ctx, &ec2.DescribeLaunchTemplatesInput{Filters: f, MaxResults: aws.Int32(200)})
+			if err != nil {
+				return nil, err
+			}
+			return out.LaunchTemplates, nil
+		},
+	}
+	for action, describe := range describes {
+		t.Run(action, func(t *testing.T) {
+			list, err := describe(nil)
+			require.NoError(t, err)
+			assert.NotNil(t, list, "the result set element is present")
+			assert.Empty(t, list)
+			_, err = describe(sweepFilter)
+			assertRefused(t, err, "Filter.N")
+		})
+	}
+}
+
+func TestRegressionSweepTerminatedInstanceENIGone(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	c, ctx := sweepClient(srv), t.Context()
+	vpc, err := c.CreateVpc(ctx, &ec2.CreateVpcInput{CidrBlock: aws.String("10.0.0.0/16")})
+	require.NoError(t, err)
+	subnet, err := c.CreateSubnet(ctx, &ec2.CreateSubnetInput{VpcId: vpc.Vpc.VpcId, CidrBlock: aws.String("10.0.1.0/24")})
+	require.NoError(t, err)
+	run, err := c.RunInstances(ctx, &ec2.RunInstancesInput{
+		ImageId: aws.String(handlers.AL2023AMIID), InstanceType: ec2types.InstanceTypeT3Micro,
+		SubnetId: subnet.Subnet.SubnetId, MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
+	})
+	require.NoError(t, err)
+	require.Len(t, run.Instances, 1)
+	id := aws.ToString(run.Instances[0].InstanceId)
+
+	enis, err := c.DescribeNetworkInterfaces(ctx, &ec2.DescribeNetworkInterfacesInput{})
+	require.NoError(t, err)
+	require.Len(t, enis.NetworkInterfaces, 1, "the running instance's ENI")
+	require.NotNil(t, enis.NetworkInterfaces[0].Attachment)
+	assert.Equal(t, id, aws.ToString(enis.NetworkInterfaces[0].Attachment.InstanceId))
+
+	_, err = c.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: []string{id}})
+	require.NoError(t, err)
+	enis, err = c.DescribeNetworkInterfaces(ctx, &ec2.DescribeNetworkInterfacesInput{})
+	require.NoError(t, err)
+	assert.Empty(t, enis.NetworkInterfaces, "a terminated instance's ENI is gone")
+	insts, err := c.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{id}})
+	require.NoError(t, err)
+	require.Len(t, insts.Reservations, 1)
+	require.Len(t, insts.Reservations[0].Instances, 1)
+	require.NotNil(t, insts.Reservations[0].Instances[0].State)
+	assert.Equal(t, ec2types.InstanceStateNameTerminated, insts.Reservations[0].Instances[0].State.Name)
 }

@@ -346,9 +346,9 @@ func TestCoverage_EC2ErrorPaths(t *testing.T) {
 	resp, _ = ec2Call(t, srv, region, "DeleteKeyPair", url.Values{"KeyName": {"missing"}})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteKeyPair missing")
 
-	// DescribeSecurityGroups missing GroupId.<n> filter → 409.
-	resp, _ = ec2Call(t, srv, region, "DescribeSecurityGroups", nil)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DescribeSecurityGroups no filter")
+	// DescribeSecurityGroups with an unmodelled Filter.N → 409.
+	resp, _ = ec2Call(t, srv, region, "DescribeSecurityGroups", url.Values{"Filter.1.Name": {"group-name"}, "Filter.1.Value.1": {"default"}})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DescribeSecurityGroups Filter.N")
 
 	// Authorize on missing GroupId → 409 (no body).
 	resp, _ = ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", nil)

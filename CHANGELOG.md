@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (the EC2 Describes the AWS scope sweep calls, 2026-09-28)
+- **An unfiltered DescribeAddresses lists every Elastic IP in the region**; it described nothing without `AllocationId.N`. DescribeAddressesAttribute does the same.
+- **An unfiltered DescribeSecurityGroups lists every group in the region**; it answered 409.
+- **DescribeImages honours `Owner.N`**, with `self` meaning the caller, so `Owner.1=self` returns none of the fixtures; it ignored the owner and returned them all. `IncludeDisabled=true` is accepted and changes nothing, since no image is disabled. `ImageId.N` lookups are unchanged.
+- **DescribeVolumes, DescribeNatGateways, DescribeSnapshots and DescribeLaunchTemplates** answer their real result, an empty `volumeSet` / `natGatewaySet` / `snapshotSet` / `launchTemplates`, since fakeaws creates none of them. They were 404.
+- Each of these refuses a param it does not model with 409 instead of ignoring it: `Filter.N` everywhere, plus `PublicIp.N` on DescribeAddresses and `GroupName.N` on DescribeSecurityGroups.
+- The unfiltered DescribeNetworkInterfaces already omits a terminated instance's ENI; `TestRegressionSweepTerminatedInstanceENIGone` pins it.
+- The tests drive these through `aws-sdk-go-v2` (a new test dependency). `coverage_matrix.yaml` gains `aws_ami`, `aws_network_interface`, `aws_ebs_volume`, `aws_nat_gateway`, `aws_ebs_snapshot` and `aws_launch_template` rows, and the `aws_eip` and `aws_security_group` rows name their sweep tests.
+
 ### Fixed (instance profile roles, Aurora clusters, cluster parameter groups and EIPs converge, 2026-09-28)
 - **An instance profile's role reads back.** A role in a list was marshalled as `<Role>`, not `<member>`, so GetInstanceProfile looked roleless: the next plan showed `+ role` and its apply failed AddRoleToInstanceProfile 409. The role and instance profile shapes lose their `XMLName` and CreateRole/GetRole/CreateInstanceProfile/GetInstanceProfile wrap them instead, which also fixes ListRoles and ListInstanceProfiles.
 - **`aws_rds_cluster` stops planning a replacement.** DescribeDBClusters returns `EngineMode` (`provisioned` unless CreateDBCluster sent one), and echoes the `Port`, `BackupRetentionPeriod`, `PreferredBackupWindow`, `PreferredMaintenanceWindow`, `DatabaseName`, `StorageEncrypted`, `CopyTagsToSnapshot`, `IAMDatabaseAuthenticationEnabled`, `AvailabilityZones` and `VpcSecurityGroups` CreateDBCluster was given, with RDS's defaults for the unset ones (port 3306 for MySQL engines, else 5432; retention 1), plus `Endpoint`/`ReaderEndpoint`. DescribeGlobalClusters answers an empty list. DeleteDBCluster returns the cluster in `deleting` state, and a missing cluster answers 404 `DBClusterNotFoundFault`.
