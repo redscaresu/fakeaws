@@ -676,23 +676,14 @@ func TestRegressionStateGatherAccountWide(t *testing.T) {
 	assert.Contains(t, state, "odd-secret", "/mock/state.secretsmanager.secrets missing odd-region secret: %s", state)
 }
 
-// TestRegressionRunInstancesAutoSeedsUnknownAMI pins the
-// 2026-05-30 policy reversal: RunInstances now auto-seeds any
-// well-formed `ami-*` reference instead of rejecting unknown AMIs.
-//
-// Why the change: the LLM picks example AMI IDs from AWS docs
-// (`ami-0c55b159cbfafe1f0`, `ami-0abc1234...`) and gating the test
-// loop on whether each exact ID is pre-seeded produced noise without
-// catching real bugs. Per the feedback_mock_design principle (mocks
-// optimize for fast feedback, not realism), AMI-existence checking
-// has been demoted from a hard error to a lazy auto-vivify. Reject
-// only obviously malformed inputs (no `ami-` prefix, or empty).
-//
-// Real EC2 semantics are preserved for the malformed-input path —
-// that's still where a real bug would be (a typo'd argument or
-// missing variable interpolation), and rejecting it gives the LLM a
-// clean error to act on.
-func TestRegressionRunInstancesAutoSeedsUnknownAMI(t *testing.T) {
+// TestRegressionRunInstancesRefusesUnknownAMI reverses the 2026-05-30
+// auto-seed: RunInstances with an ImageId the fixtures do not know
+// answers 400 InvalidAMIID.NotFound, as real EC2 does, and does not
+// seed it. The hallucinated ami-0c55b159cbfafe1f0 an LLM run wrote from
+// memory is gone or a paid Marketplace image on real AWS, so it must
+// fail at Layer 2 too (infrafactory HLD 2026-09-27-aws-web-stack,
+// lines 285-288). Fails if the auto-seed returns.
+func TestRegressionRunInstancesRefusesUnknownAMI(t *testing.T) {
 	srv := newTestServerForRegression(t)
 	const region = "us-east-1"
 
@@ -706,24 +697,43 @@ func TestRegressionRunInstancesAutoSeedsUnknownAMI(t *testing.T) {
 		"AvailabilityZone": {"us-east-1a"},
 	})
 	subnetID := xmlExtract(body, "subnetId")
+	run := func(ami string) (*http.Response, []byte) {
+		return ec2PostRegression(t, srv, region, "RunInstances", url.Values{
+			"SubnetId":     {subnetID},
+			"ImageId":      {ami},
+			"InstanceType": {"t3.micro"},
+			"MinCount":     {"1"}, "MaxCount": {"1"},
+		})
+	}
 
-	// Well-formed but unknown ami-* → auto-seeded, RunInstances succeeds.
-	resp, body := ec2PostRegression(t, srv, region, "RunInstances", url.Values{
-		"SubnetId":     {subnetID},
-		"ImageId":      {"ami-not-yet-seeded"},
-		"InstanceType": {"t3.micro"},
-		"MinCount":     {"1"}, "MaxCount": {"1"},
-	})
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "RunInstances with well-formed unknown AMI (auto-seed) body=%s", body)
+	for _, ami := range []string{"ami-0c55b159cbfafe1f0", "not-an-ami-id"} {
+		resp, body := run(ami)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "RunInstances %s body=%s", ami, body)
+		assert.Contains(t, string(body), "InvalidAMIID.NotFound", "RunInstances %s", ami)
+	}
 
-	// Malformed AMI (no `ami-` prefix) → still rejected, the typo case.
-	resp, body = ec2PostRegression(t, srv, region, "RunInstances", url.Values{
-		"SubnetId":     {subnetID},
-		"ImageId":      {"not-an-ami-id"},
-		"InstanceType": {"t3.micro"},
-		"MinCount":     {"1"}, "MaxCount": {"1"},
+	resp, body := ec2PostRegression(t, srv, region, "DescribeImages", url.Values{
+		"ImageId.1": {"ami-0c55b159cbfafe1f0"},
 	})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "RunInstances with malformed AMI body=%s", body)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "refused AMI was seeded: %s", body)
+
+	for _, ami := range []string{"ami-0abcd1234", handlers.AL2023AMIID} {
+		resp, body := run(ami)
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "RunInstances fixture %s body=%s", ami, body)
+	}
+}
+
+// TestRegressionDescribeImagesListsAL2023Fixture pins the Amazon Linux
+// 2023 fixture SSM's public parameter resolves to: listed in every
+// region, al2023-named, distinct from the amzn2 fixture.
+func TestRegressionDescribeImagesListsAL2023Fixture(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	assert.NotEqual(t, "ami-0abcd1234", handlers.AL2023AMIID)
+	for _, region := range []string{"us-east-1", "eu-west-2"} {
+		resp, body := ec2PostRegression(t, srv, region, "DescribeImages", url.Values{})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeImages %s body=%s", region, body)
+		assert.Regexp(t, `<imageId>`+handlers.AL2023AMIID+`</imageId>\s*<name>al2023-ami-`, string(body), "DescribeImages %s", region)
+	}
 }
 
 // TestRegressionDescribeInstanceTypesSynthesizesForAnyType pins the

@@ -960,7 +960,7 @@ func (app *Application) iamAttachRolePolicy(w http.ResponseWriter, account strin
 	// ever calling CreatePolicy. fakeaws's repo only knows about
 	// customer-created policies, so a managed-ARN attach fails 404
 	// even though it's legal usage. Lazy-seed the managed policy
-	// here on first reference, mirroring the AMI auto-seed pattern.
+	// here on first reference.
 	if strings.HasPrefix(policyARN, "arn:aws:iam::aws:policy/") {
 		_ = app.repo.SeedManagedPolicy(account, policyARN)
 	}

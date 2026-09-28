@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (RunInstances refuses unknown AMIs; AL2023 fixture, 2026-09-28)
+- **Reverses the 2026-05-30 AMI auto-seed.** RunInstances with an `ImageId` the fixtures do not know answers 400 `InvalidAMIID.NotFound`, as real EC2 does, and seeds nothing, so `DescribeImages` still does not know it. `ensureAMIExists` is gone. LLM sweeps that write a documentation AMI such as `ami-0c55b159cbfafe1f0` now fail at Layer 2 until infrafactory's aws-layer-neutral-hcl resolver lands and hands the model a fixture id.
+- **Amazon Linux 2023 fixture** `ami-0al2023x8664` (`al2023-ami-2023.6.20241010.0-kernel-6.1-x86_64`), exported as `handlers.AL2023AMIID` for the SSM public parameter, is seeded in every region beside `ami-0abcd1234` (amzn2).
+- New `examples/misconfigured/instance_unknown_ami` (`expected.txt`: `InvalidAMIID.NotFound`).
+
 ### Added (STS GetCallerIdentity, 2026-09-28)
 - **STS lands** (`handlers/sts.go`, Query-RPC at `POST /sts` and `/sts/`): `GetCallerIdentity` answers Account `000000000000` (`awsproto.FakeAccountID`), a fixed UserId and Arn `arn:aws:iam::000000000000:user/fakeaws`. Every other STS action (e.g. `AssumeRole`) answers 501 with an `UNIMPLEMENTED: POST /sts Action=<action>` log line. `sts` joins `LandedServices`; `TestContract_sts_caller_identity_fake_account` pins the account.
 - **`examples/working/env_endpoints` drops its `skip_*` flags**: the provider validates credentials against fakeaws STS, `allowed_account_ids = ["000000000000"]` fails the apply if the Arn names another account, and a precondition on `data.aws_caller_identity` fails it if Account does. New `coverage_matrix.yaml` row `aws_caller_identity` points at it.
