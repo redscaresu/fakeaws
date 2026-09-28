@@ -22,7 +22,6 @@ type knownRedEntry struct {
 // "<tree>/<dir>". An entry that starts passing, or fails any other
 // way, fails the harness: fix the example or update the entry.
 var knownRed = map[string]knownRedEntry{
-	"working/basic_instance": {stage: "plan", fragment: "user_data", owner: "fakeaws-subnet-and-instance-attributes"},
 	// main.tf separates arguments with ';', which HCL rejects.
 	"working/eks_cluster": {stage: "init", fragment: "Invalid character", owner: "none: follow-up"},
 	"working/s3_bucket":   {stage: "apply", fragment: "GetBucketPolicy", owner: "none: follow-up"},
