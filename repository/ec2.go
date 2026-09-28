@@ -3,13 +3,13 @@
 // Per fakeaws/PLAN.md § "Phase 2 — Networking + compute (S44)" — the
 // FK chain that gates correctness:
 //
-//                    ec2_vpcs
-//                       │
-//        ┌──────────────┼─────────────┐
-//        │              │             │
-//   ec2_subnets  ec2_route_tables  ec2_security_groups
-//        │              │
-//   ec2_instances  ec2_routes
+//	                 ec2_vpcs
+//	                    │
+//	     ┌──────────────┼─────────────┐
+//	     │              │             │
+//	ec2_subnets  ec2_route_tables  ec2_security_groups
+//	     │              │
+//	ec2_instances  ec2_routes
 //
 // This file ships networking only: VPCs, Subnets, InternetGateways,
 // RouteTables, RouteTableAssociations, Routes, SecurityGroups, EIPs.
@@ -17,7 +17,9 @@
 // repository/ec2_compute.go.
 //
 // Server-stamped IDs follow AWS convention:
-//   vpc-, subnet-, sg-, rtb-, igw-, rtbassoc-, eipalloc-, eni-
+//
+//	vpc-, subnet-, sg-, rtb-, igw-, rtbassoc-, eipalloc-, eni-
+//
 // Each handler synthesises an id at create time; the repo never
 // honours an id smuggled in from the client (per concepts.md
 // "Standing patterns" item 14 — server-stamped fields never trusted).
@@ -166,6 +168,9 @@ type EC2Subnet struct {
 	ARN              string `json:"arn"`
 	State            string `json:"state"`
 	CreatedAt        string `json:"created_at"`
+	// MapPublicIPOnLaunch gives a launch that does not set
+	// AssociatePublicIpAddress a public IP.
+	MapPublicIPOnLaunch bool `json:"map_public_ip_on_launch"`
 }
 
 type EC2InternetGateway struct {
@@ -390,6 +395,21 @@ func (r *Repository) ListSubnets(account, region, vpcID string) ([]*EC2Subnet, e
 		out = append(out, &s)
 	}
 	return out, rows.Err()
+}
+
+// UpdateSubnet applies change to the subnet and saves it.
+func (r *Repository) UpdateSubnet(account, region, id string, change func(*EC2Subnet)) error {
+	s, err := r.GetSubnet(account, region, id)
+	if err != nil {
+		return err
+	}
+	change(s)
+	body, _ := json.Marshal(s)
+	_, err = r.db.Exec(
+		`UPDATE ec2_subnets SET data = ? WHERE account_id = ? AND region = ? AND id = ?`,
+		string(body), account, s.Region, id,
+	)
+	return err
 }
 
 func (r *Repository) DeleteSubnet(account, region, id string) error {

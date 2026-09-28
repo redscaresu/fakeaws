@@ -1,6 +1,7 @@
 package handlers_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -1011,4 +1012,115 @@ func TestEC2_EIPLifecycle(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "ReleaseAddress")
 	resp, _ = ec2Call(t, srv, region, "ReleaseAddress", url.Values{"AllocationId": {allocID}})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ReleaseAddress on already-released")
+}
+
+func setMapPublicIPOnLaunch(t *testing.T, srv *httptest.Server, region, subnet string, v bool) {
+	t.Helper()
+	resp, body := ec2Call(t, srv, region, "ModifySubnetAttribute", url.Values{
+		"SubnetId": {subnet}, "MapPublicIpOnLaunch.Value": {strconv.FormatBool(v)},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ModifySubnetAttribute: %s", body)
+}
+
+// TestEC2_ModifySubnetAttribute_MapPublicIpOnLaunch: the provider
+// waits for DescribeSubnets to echo the value it set, so a no-op
+// taints the subnet.
+func TestEC2_ModifySubnetAttribute_MapPublicIpOnLaunch(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	n := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+
+	describe := func() string {
+		resp, body := ec2Call(t, srv, region, "DescribeSubnets", url.Values{"SubnetId.1": {n.subnet}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeSubnets: %s", body)
+		return extractEC2Tag(body, "mapPublicIpOnLaunch")
+	}
+	assert.Equal(t, "false", describe(), "default")
+	setMapPublicIPOnLaunch(t, srv, region, n.subnet, true)
+	assert.Equal(t, "true", describe(), "after true")
+	setMapPublicIPOnLaunch(t, srv, region, n.subnet, false)
+	assert.Equal(t, "false", describe(), "after false")
+
+	// Another attribute leaves the flag alone.
+	setMapPublicIPOnLaunch(t, srv, region, n.subnet, true)
+	resp, body := ec2Call(t, srv, region, "ModifySubnetAttribute", url.Values{
+		"SubnetId": {n.subnet}, "EnableDns64.Value": {"false"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ModifySubnetAttribute EnableDns64: %s", body)
+	assert.Equal(t, "true", describe(), "after EnableDns64")
+
+	resp, body = ec2Call(t, srv, region, "ModifySubnetAttribute", url.Values{
+		"SubnetId": {"subnet-missing"}, "MapPublicIpOnLaunch.Value": {"true"},
+	})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "unknown subnet: %s", body)
+}
+
+// TestEC2_RunInstances_MapPublicIpOnLaunch: a launch that does not
+// set AssociatePublicIpAddress gets a public IP only in a flagged
+// subnet; an explicit false still wins there.
+func TestEC2_RunInstances_MapPublicIpOnLaunch(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	flagged := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+	unflagged := newInstanceNet(t, srv, region, "10.1.0.0/16", "10.1.1.0/24")
+	setMapPublicIPOnLaunch(t, srv, region, flagged.subnet, true)
+
+	inst, body := describeInstance(t, srv, region, runInstance(t, srv, region, topLevelParams(flagged.subnet, flagged.sgs)))
+	require.Len(t, inst.ENIs, 1, "networkInterfaceSet: %s", body)
+	assert.NotEmpty(t, inst.IpAddress, "flagged subnet: %s", body)
+	assert.Equal(t, inst.ENIs[0].PublicIp, inst.IpAddress, "flagged subnet")
+
+	for name, params := range map[string]url.Values{
+		"unflagged subnet":               topLevelParams(unflagged.subnet, unflagged.sgs),
+		"flagged subnet, explicit false": nicParams(flagged.subnet, flagged.sgs, false),
+	} {
+		_, body := describeInstance(t, srv, region, runInstance(t, srv, region, params))
+		assert.NotContains(t, body, "<ipAddress>", name)
+		assert.NotContains(t, body, "<association>", name)
+	}
+}
+
+// TestEC2_DescribeInstanceAttribute_UserData: RunInstances' base64
+// UserData reads back unchanged, and an instance without any answers
+// an empty <userData/>.
+func TestEC2_DescribeInstanceAttribute_UserData(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	n := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+	userData := base64.StdEncoding.EncodeToString([]byte("#!/bin/bash\necho hello\n"))
+
+	withData := topLevelParams(n.subnet, n.sgs)
+	withData.Set("UserData", userData)
+	for name, c := range map[string]struct {
+		params url.Values
+		want   string
+	}{
+		"with UserData":    {withData, userData},
+		"without UserData": {topLevelParams(n.subnet, n.sgs), ""},
+	} {
+		id := runInstance(t, srv, region, c.params)
+		resp, body := ec2Call(t, srv, region, "DescribeInstanceAttribute", url.Values{
+			"InstanceId": {id}, "Attribute": {"userData"},
+		})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", name, body)
+		var out struct {
+			UserData *struct {
+				Value *string `xml:"value"`
+			} `xml:"userData"`
+		}
+		require.NoError(t, xml.Unmarshal(body, &out), "%s: %s", name, body)
+		require.NotNil(t, out.UserData, "%s: <userData> missing: %s", name, body)
+		if c.want == "" {
+			assert.Nil(t, out.UserData.Value, "%s: <value> reads back as sha1(\"\"): %s", name, body)
+			continue
+		}
+		require.NotNil(t, out.UserData.Value, "%s: %s", name, body)
+		assert.Equal(t, c.want, *out.UserData.Value, name)
+	}
+
+	resp, body := ec2Call(t, srv, region, "DescribeInstanceAttribute", url.Values{
+		"InstanceId": {"i-missing"}, "Attribute": {"userData"},
+	})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "unknown instance: %s", body)
+	assert.Equal(t, "InvalidInstanceID.NotFound", extractEC2Tag(body, "Code"))
 }

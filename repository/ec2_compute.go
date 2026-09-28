@@ -107,6 +107,7 @@ type EC2Instance struct {
 	AMIID                  string `json:"ami_id"`
 	InstanceType           string `json:"instance_type"`
 	IAMInstanceProfileName string `json:"iam_instance_profile_name,omitempty"`
+	UserData               string `json:"user_data,omitempty"` // base64, as RunInstances sent it
 	State                  string `json:"state"`
 	Region                 string `json:"region"`
 	ARN                    string `json:"arn"`

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/redscaresu/fakeaws/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const testRegion = "us-east-1"
@@ -254,4 +256,19 @@ func TestEC2_CrossRegionFKRejected(t *testing.T) {
 	if _, err := r.GetVPC(testAccount, "", "vpc-1"); err != nil {
 		t.Errorf("GetVPC(\"\", vpc-1): empty region must still return the row, got %v", err)
 	}
+}
+
+func TestUpdateSubnet(t *testing.T) {
+	r := setupRepo(t)
+	require.NoError(t, r.CreateVPC(testAccount, &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
+	require.NoError(t, r.CreateSubnet(testAccount, &EC2Subnet{ID: "subnet-1", VPCID: "vpc-1", CidrBlock: "10.0.1.0/24", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
+
+	require.NoError(t, r.UpdateSubnet(testAccount, testRegion, "subnet-1", func(s *EC2Subnet) { s.MapPublicIPOnLaunch = true }))
+	got, err := r.GetSubnet(testAccount, testRegion, "subnet-1")
+	require.NoError(t, err)
+	assert.True(t, got.MapPublicIPOnLaunch)
+	assert.Equal(t, "10.0.1.0/24", got.CidrBlock, "other fields survive")
+
+	err = r.UpdateSubnet(testAccount, testRegion, "subnet-missing", func(*EC2Subnet) {})
+	assert.ErrorIs(t, err, models.ErrNotFound)
 }
