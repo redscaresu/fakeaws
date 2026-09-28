@@ -131,6 +131,7 @@ Configs that apply, can be updated, and destroy cleanly. These show the right wa
 | Example | What it demonstrates |
 |---|---|
 | `working/basic_instance` | EC2 instance with key pair + AMI lookup against the fixture set |
+| `working/env_endpoints` | One VPC with no `endpoints` block: the provider takes its endpoint from `AWS_ENDPOINT_URL_EC2`, which only the harness sets. Run by hand, it reaches real AWS with fake keys and fails |
 | `working/dynamodb_table` | DynamoDB table with attribute + key schema + GSI |
 | `working/eks_cluster` | EKS cluster + node group with the IAM cluster + node roles (M57 wire-shape work + M61 closure makes the cluster's pre-Read flow pass) |
 | `working/iam_role` | IAM role + assume-role policy + policy attachment |
@@ -171,7 +172,9 @@ Update scenarios that verify in-place resource modifications work correctly. Eac
 
 ## Provider version pin
 
-All examples use `hashicorp/aws ~> 5.70` per `concepts.md` "Resolved decisions" item 14. Provider bumps require an explicit PR updating every `required_providers` block + the prompts + the e2e harness.
+All examples pin `hashicorp/aws` to exactly `5.100.0` per `concepts.md` "Resolved decisions" item 14. Provider bumps require an explicit PR updating every `required_providers` block. The infrafactory side (prompts, e2e harness) lands in aws-layer-neutral-hcl.
+
+The harness runs every `tofu` call in `smokeEnv` (`examples/smoke_env_test.go`): inherited `AWS_*` vars dropped, fake keys, IMDS and shared config files unreachable, `AWS_ENDPOINT_URL_<SVC>` pointing every service at fakeaws, and (for everything but `init`) a dead `HTTPS_PROXY`/`HTTP_PROXY` at `127.0.0.1:9`, so a request that misses fakeaws fails instead of reaching AWS.
 
 ---
 
