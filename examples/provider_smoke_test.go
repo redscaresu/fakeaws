@@ -117,7 +117,7 @@ func walkExamplesAndRun(t *testing.T, tree string, run func(t *testing.T, dir st
 
 func runWorkingExample(t *testing.T, dir string) *stageErr {
 	t.Helper()
-	return runSteps(dir,
+	return runSteps(t, dir,
 		step{"init", []string{"init"}},
 		step{"apply", []string{"apply", "-auto-approve"}},
 		step{"plan", []string{"plan", "-detailed-exitcode"}},
@@ -132,10 +132,10 @@ func runMisconfiguredExample(t *testing.T, dir string) *stageErr {
 	expectedString := strings.TrimSpace(string(expected))
 	require.NotEmpty(t, expectedString, "misconfigured example expected.txt is empty — must contain the AWS error code we expect")
 
-	if failure := runSteps(dir, step{"init", []string{"init"}}); failure != nil {
+	if failure := runSteps(t, dir, step{"init", []string{"init"}}); failure != nil {
 		return failure
 	}
-	failure := runSteps(dir, step{"apply", []string{"apply", "-auto-approve"}})
+	failure := runSteps(t, dir, step{"apply", []string{"apply", "-auto-approve"}})
 	if failure == nil {
 		return &stageErr{stage: "apply", out: fmt.Sprintf("apply UNEXPECTEDLY succeeded; expected failure containing %q", expectedString)}
 	}
@@ -155,7 +155,7 @@ func runUpdatesExample(t *testing.T, dir string) *stageErr {
 		require.NoError(t, err, "updates example missing %s", p)
 	}
 
-	return runSteps(dir,
+	return runSteps(t, dir,
 		step{"init", []string{"init"}},
 		step{"apply v1", []string{"apply", "-auto-approve", "-var-file=" + v1}},
 		step{"plan v1", []string{"plan", "-detailed-exitcode", "-var-file=" + v1}},
@@ -183,12 +183,15 @@ func (e *stageErr) Error() string {
 	return fmt.Sprintf("tofu %s failed:\n%s", e.stage, e.out)
 }
 
-// runSteps runs steps in order and stops at the first non-zero exit.
-// For `plan -detailed-exitcode` that covers both 1 (error) and 2 (diff).
-func runSteps(dir string, steps ...step) *stageErr {
+// runSteps runs steps in order, each in smokeEnv, and stops at the first
+// non-zero exit. For `plan -detailed-exitcode` that covers both 1
+// (error) and 2 (diff).
+func runSteps(t *testing.T, dir string, steps ...step) *stageErr {
+	t.Helper()
 	for _, s := range steps {
 		cmd := exec.Command("tofu", append(s.args, "-input=false", "-no-color")...)
 		cmd.Dir = dir
+		cmd.Env = smokeEnv(t, s.args[0])
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return &stageErr{stage: s.stage, out: fmt.Sprintf("%v\n%s", err, out)}
 		}

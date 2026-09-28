@@ -118,10 +118,11 @@ keys, exact status codes, default fields) surfaces here.
 
 ## Provider version pin
 
-This mock targets `hashicorp/aws ~> 5.70`. Bumps require an explicit PR
-that updates this README, every `examples/*/required_providers` block,
-every `prompts/aws/*.md` template, and the e2e harness's provider
-config — together. Single source of truth for the constraint string is
+This mock targets exactly `hashicorp/aws 5.100.0`, the one provider
+binary the smoke harness runs. Bumps require an explicit PR that
+updates this README and every `examples/*/*/main.tf` `required_providers`
+block together. The infrafactory side (prompts, e2e harness) lands in
+aws-layer-neutral-hcl. Single source of truth for the version is
 `coverage_matrix.yaml`'s header comment.
 
 ## Testing examples

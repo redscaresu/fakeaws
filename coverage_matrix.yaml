@@ -27,10 +27,11 @@
 # - integration_test_func_name: regex matching ≥1 TestXxx in handlers_test.go
 #   (default: ^Test.*<aws_resource_type-camel-cased>.*)
 #
-# AWS provider version pin: hashicorp/aws ~> 5.70 (concepts.md § Resolved
-# decisions item 14). Bumps require a single PR updating this comment, every
-# example's required_providers block, every prompt template, and the e2e
-# harness's provider config.
+# AWS provider version pin: hashicorp/aws exactly 5.100.0 (concepts.md §
+# Resolved decisions item 14). Bumps require a single PR updating this
+# comment and every example's required_providers block. The infrafactory
+# side (prompt templates, e2e harness provider config) lands in
+# aws-layer-neutral-hcl.
 
 entries:
   # IAM (S43-T6 handlers, S43-T14 e2e + this matrix entry).

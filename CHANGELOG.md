@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (exact provider pin + scrubbed smoke env, 2026-09-28)
+- **`hashicorp/aws` pinned to exactly `5.100.0`** in every `examples/*/*/main.tf` (was a 5.70 range that resolved to 5.100.0). README, `examples/README.md`, `concepts.md` and `coverage_matrix.yaml` record the pin; the infrafactory side lands in aws-layer-neutral-hcl.
+- **The smoke harness runs every `tofu` call in `smokeEnv`** (`examples/smoke_env_test.go`): inherited `AWS_*` vars dropped, fake keys, `AWS_EC2_METADATA_DISABLED=true`, shared config/credentials files at non-existent paths, `AWS_ENDPOINT_URL_<SVC>` for every `LandedServices` id plus STS and SSM, and for apply/plan/destroy a dead proxy at `127.0.0.1:9`. Ungated unit tests pin the scrub and the endpoint coverage.
+- **New `examples/working/env_endpoints`**: one VPC with no `endpoints` block, proving the env endpoint form. The gated `TestSmokeEnvFailsClosed` drops `AWS_ENDPOINT_URL_EC2` and asserts apply dies on the dead proxy within two minutes.
+- **`updates/update_rds_parameter_group` passes; removed from `knownRed`.** Its destroy flaked (failed 3 of 4 runs): tofu deletes the parameter groups in parallel with the instance, which names its group through a variable, and `DeleteDBParameterGroup` on the still-referenced group answered a generic 409 `ResourceInUseException` that the provider does not retry. It now answers real RDS's 400 `InvalidDBParameterGroupState`, which terraform-provider-aws retries for 3m while the instance delete finishes. `TestRegressionRDSParameterGroupInUseDeleteIsRetryable` pins it.
+
 ### Added (subnet MapPublicIpOnLaunch and instance UserData persist, 2026-09-28)
 - **ModifySubnetAttribute `MapPublicIpOnLaunch.Value`** is stored on the subnet and echoed by `DescribeSubnets` `mapPublicIpOnLaunch`; before it was a no-op, so the provider's wait for the new value timed out and tainted the subnet. Other attributes stay accepted and unstored. An unknown subnet is 404. `/mock/state` `ec2.subnets[]` gains `map_public_ip_on_launch`.
 - **RunInstances into a flagged subnet** gets a public IP (`ipAddress` and the ENI's `association`) when the launch does not set `AssociatePublicIpAddress`; an explicit `NetworkInterface.1.AssociatePublicIpAddress=false` still wins.
