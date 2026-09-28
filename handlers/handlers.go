@@ -100,6 +100,7 @@ func (app *Application) RegisterRoutes(r chi.Router) {
 	app.registerRoute53Routes(r)
 	app.registerSecretsManagerRoutes(r)
 	app.registerKMSRoutes(r)
+	app.registerSTSRoutes(r)
 	// Everything else 501s with an UNIMPLEMENTED log line so the next
 	// caller sees what's missing — no Moto-style silent fallback.
 	r.NotFound(unimplementedHandler)
@@ -110,7 +111,13 @@ func (app *Application) RegisterRoutes(r chi.Router) {
 // concepts.md § "Anti-patterns explicitly forbidden" — no silent 200s.
 // Callers see exactly what's missing.
 func unimplementedHandler(w http.ResponseWriter, r *http.Request) {
-	log.Printf("UNIMPLEMENTED: %s %s", r.Method, r.URL.Path)
+	writeUnimplemented(w, r.Method+" "+r.URL.Path)
+}
+
+// writeUnimplemented is unimplementedHandler for a dispatcher that
+// routed the request but does not model its action; what names it.
+func writeUnimplemented(w http.ResponseWriter, what string) {
+	log.Printf("UNIMPLEMENTED: %s", what)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotImplemented)
 	_, _ = w.Write([]byte(`{"error":"unimplemented","message":"fakeaws does not yet model this endpoint; see logs for the method+path"}`))

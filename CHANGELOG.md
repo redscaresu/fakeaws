@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (STS GetCallerIdentity, 2026-09-28)
+- **STS lands** (`handlers/sts.go`, Query-RPC at `POST /sts` and `/sts/`): `GetCallerIdentity` answers Account `000000000000` (`awsproto.FakeAccountID`), a fixed UserId and Arn `arn:aws:iam::000000000000:user/fakeaws`. Every other STS action (e.g. `AssumeRole`) answers 501 with an `UNIMPLEMENTED: POST /sts Action=<action>` log line. `sts` joins `LandedServices`; `TestContract_sts_caller_identity_fake_account` pins the account.
+- **`examples/working/env_endpoints` drops its `skip_*` flags**: the provider validates credentials against fakeaws STS, `allowed_account_ids = ["000000000000"]` fails the apply if the Arn names another account, and a precondition on `data.aws_caller_identity` fails it if Account does. New `coverage_matrix.yaml` row `aws_caller_identity` points at it.
+
 ### Changed (exact provider pin + scrubbed smoke env, 2026-09-28)
 - **`hashicorp/aws` pinned to exactly `5.100.0`** in every `examples/*/*/main.tf` (was a 5.70 range that resolved to 5.100.0). README, `examples/README.md`, `concepts.md` and `coverage_matrix.yaml` record the pin; the infrafactory side lands in aws-layer-neutral-hcl.
 - **The smoke harness runs every `tofu` call in `smokeEnv`** (`examples/smoke_env_test.go`): inherited `AWS_*` vars dropped, fake keys, `AWS_EC2_METADATA_DISABLED=true`, shared config/credentials files at non-existent paths, `AWS_ENDPOINT_URL_<SVC>` for every `LandedServices` id plus STS and SSM, and for apply/plan/destroy a dead proxy at `127.0.0.1:9`. Ungated unit tests pin the scrub and the endpoint coverage.

@@ -20,7 +20,7 @@ fork story alive — narrow in coverage, deep in the few services we ship.
 
 ## Status
 
-Ten services across five wire formats. The S43–S48 codex review loop
+Eleven services across five wire formats. The S43–S48 codex review loop
 closed at pass 17 with zero allowlist entries; post-S48 polish landed
 the M51 Query-RPC envelope rewrite, M57 per-resource field parity, M61
 full RDS lifecycle, M62 full Secrets Manager lifecycle, and the
@@ -44,6 +44,7 @@ The 17 review passes are archived under `docs/review-passes/passN.md`.
 | Route53 | XML REST | `/route53/2013-04-01/...` | hosted zone + record set; full lifecycle ✓ — DelegationSet/NameServers, ListTagsForResource, GetDNSSEC, rrset filter + trailing-dot normalisation |
 | Secrets Manager | JSON 1.1 + X-Amz-Target | `POST /secretsmanager/region/<region>` | apply / plan-no-op / destroy ✓ (M62: ARN-or-name SecretId, epoch timestamps, VersionIdsToStages, GetResourcePolicy + ListSecretVersionIds) |
 | KMS | JSON 1.1 + X-Amz-Target | `POST /kms/region/<region>` | apply / plan-no-op / destroy ✓ — CreateKey / DescribeKey / GetKeyPolicy / ListAliases / ListResourceTags / EnableKeyRotation / GetKeyRotationStatus / TagResource / ScheduleKeyDeletion / CancelKeyDeletion / EnableKey / DisableKey; in-memory keyed state, **soft-delete** on schedule (KeyState transitions to `PendingDeletion`; DescribeKey returns 200 with that state — matches real AWS lifecycle so `terraform-provider-aws`'s destroy wait-loop completes cleanly) |
+| STS | Query-RPC + XML | `POST /sts` | `GetCallerIdentity` only: account `000000000000`, fixed UserId, Arn `arn:aws:iam::000000000000:user/fakeaws`, so the provider needs no `skip_*` flags and `allowed_account_ids = ["000000000000"]` holds; other actions 501 |
 
 Per-resource details + load-bearing FK contracts live in `PLAN.md`;
 the M61/M62 wire-shape lessons are documented in `AGENTS.md` under
