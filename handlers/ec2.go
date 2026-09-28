@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -1249,6 +1250,9 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 			fmt.Errorf("at least one IpPermissions.<n>.* required: %w", models.ErrConflict))
 		return
 	}
+	if app.refuseIpPermissions(w, account, region, add) {
+		return
+	}
 	existing, err := loadSGRules(app, account, region, sgID, direction)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
@@ -1291,6 +1295,99 @@ func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, accou
 		action = "RevokeSecurityGroupEgress"
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, action, nil)
+}
+
+// refuseIpPermissions writes the error real EC2 answers for the first
+// permission it would refuse, and reports whether it wrote one. The
+// provider only checks CIDRs at plan time, so bad ports and protocols
+// reach us. A group pair naming another account's UserId is admitted:
+// the fake cannot see other accounts.
+func (app *Application) refuseIpPermissions(w http.ResponseWriter, account, region string, perms []ec2IpPermission) bool {
+	for _, p := range perms {
+		if msg := ipPermissionProblem(p); msg != "" {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue", msg)
+			return true
+		}
+		for _, g := range p.UserIdGroupPairs {
+			if g.UserId != "" && g.UserId != account {
+				continue
+			}
+			_, err := app.repo.GetSecurityGroup(account, region, g.GroupId)
+			if errors.Is(err, models.ErrNotFound) {
+				awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+					"InvalidGroup.NotFound", fmt.Sprintf("The security group '%s' does not exist", g.GroupId))
+				return true
+			}
+			if err != nil {
+				awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ipPermissionProblem returns the InvalidParameterValue message EC2
+// gives for p, or "" when EC2 accepts it. Sources for each message are
+// cited in TestEC2_SecurityGroupRuleValidation.
+func ipPermissionProblem(p ec2IpPermission) string {
+	for _, r := range p.IpRanges {
+		if pfx, err := netip.ParsePrefix(r.CidrIp); err != nil || !pfx.Addr().Is4() {
+			return fmt.Sprintf("CIDR block %s is malformed", r.CidrIp)
+		}
+	}
+	for _, r := range p.Ipv6Ranges {
+		if pfx, err := netip.ParsePrefix(r.CidrIpv6); err != nil || !pfx.Addr().Is6() {
+			return fmt.Sprintf("CIDR block %s is malformed", r.CidrIpv6)
+		}
+	}
+	switch strings.ToLower(p.IpProtocol) {
+	case "tcp", "udp", "6", "17":
+		return tcpUDPPortProblem(p)
+	case "icmp", "icmpv6", "1", "58":
+		return icmpProblem(p)
+	case "-1":
+		// A literal "all" falls through and is refused, as EC2 does
+		// (terraform-provider-aws#1793); the provider sends -1 for it.
+		return ""
+	}
+	if n, err := strconv.Atoi(p.IpProtocol); err != nil || n < 0 || n > 255 {
+		return fmt.Sprintf("Invalid value '%s' for IP protocol. Unknown protocol.", p.IpProtocol)
+	}
+	return ""
+}
+
+func tcpUDPPortProblem(p ec2IpPermission) string {
+	const maxPort = 65535
+	for _, end := range []struct {
+		name string
+		port int
+	}{{"from", p.FromPort}, {"to", p.ToPort}} {
+		if end.port < 0 || end.port > maxPort {
+			return fmt.Sprintf("TCP/UDP (%s) port (%d) out of range", end.name, end.port)
+		}
+	}
+	if p.FromPort > p.ToPort {
+		return fmt.Sprintf("Invalid port range %d-%d for protocol '%s': the from port is greater than the to port",
+			p.FromPort, p.ToPort, p.IpProtocol)
+	}
+	return ""
+}
+
+// icmpProblem checks FromPort as the ICMP type and ToPort as the code;
+// -1 means all, and all types takes only all codes.
+func icmpProblem(p ec2IpPermission) string {
+	const maxICMP = 255
+	if p.FromPort < -1 || p.FromPort > maxICMP {
+		return fmt.Sprintf("ICMP type (%d) out of range", p.FromPort)
+	}
+	if p.ToPort < -1 || p.ToPort > maxICMP {
+		return fmt.Sprintf("ICMP code (%d) out of range", p.ToPort)
+	}
+	if p.FromPort == -1 && p.ToPort != -1 {
+		return fmt.Sprintf("ICMP code (%d) must be -1 when the ICMP type is -1 (all types)", p.ToPort)
+	}
+	return ""
 }
 
 func loadSGRules(app *Application, account, region, id, direction string) ([]ec2IpPermission, error) {
