@@ -38,6 +38,9 @@ type kmsKey struct {
 	// persistence the resource Update wait-loop diverges and apply
 	// times out. Same fix shape as RotationEnabled (S77).
 	Tags map[string]string
+	// Description is what CreateKey or UpdateKeyDescription last sent;
+	// DescribeKey echoes it so a described aws_kms_key has no drift.
+	Description string
 }
 
 type kmsState struct {
@@ -77,6 +80,8 @@ func (app *Application) handleKMS(w http.ResponseWriter, r *http.Request) {
 		app.kmsSetKeyRotation(w, req, true)
 	case "DisableKeyRotation":
 		app.kmsSetKeyRotation(w, req, false)
+	case "UpdateKeyDescription":
+		app.kmsUpdateKeyDescription(w, req)
 	case "ListResourceTags":
 		app.kmsListResourceTags(w, req)
 	case "TagResource":
@@ -101,7 +106,8 @@ func (app *Application) handleKMS(w http.ResponseWriter, r *http.Request) {
 
 func (app *Application) kmsCreateKey(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
-		Tags []struct {
+		Description string `json:"Description"`
+		Tags        []struct {
 			TagKey   string `json:"TagKey"`
 			TagValue string `json:"TagValue"`
 		} `json:"Tags"`
@@ -113,11 +119,12 @@ func (app *Application) kmsCreateKey(w http.ResponseWriter, account, region stri
 	keyID := hex.EncodeToString(b[:4]) + "-" + hex.EncodeToString(b[4:6]) + "-" + hex.EncodeToString(b[6:8]) + "-" + hex.EncodeToString(b[8:10]) + "-" + hex.EncodeToString(b[10:16])
 	arn := fmt.Sprintf("arn:aws:kms:%s:%s:key/%s", region, awsproto.FakeAccountID, keyID)
 	k := &kmsKey{
-		KeyID:   keyID,
-		ARN:     arn,
-		State:   "Enabled",
-		Created: time.Now().UTC(),
-		Tags:    map[string]string{},
+		KeyID:       keyID,
+		ARN:         arn,
+		State:       "Enabled",
+		Created:     time.Now().UTC(),
+		Tags:        map[string]string{},
+		Description: in.Description,
 	}
 	for _, t := range in.Tags {
 		k.Tags[t.TagKey] = t.TagValue
@@ -254,6 +261,28 @@ func (app *Application) kmsSetKeyRotation(w http.ResponseWriter, req awsproto.XA
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
 }
 
+// kmsUpdateKeyDescription replaces the key's description. The provider
+// polls DescribeKey after this call until the description matches.
+func (app *Application) kmsUpdateKeyDescription(w http.ResponseWriter, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		KeyId       string `json:"KeyId"`
+		Description string `json:"Description"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+	kmsStore.mu.Lock()
+	k, ok := kmsStore.keys[in.KeyId]
+	if ok {
+		k.Description = in.Description
+	}
+	kmsStore.mu.Unlock()
+	if !ok {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
+			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+}
+
 // kmsListResourceTags returns the persisted tag set for the requested
 // key. Real AWS pairs each tag as {TagKey, TagValue}; the
 // terraform-provider-aws Read flow rebuilds the resource Tags map
@@ -357,7 +386,7 @@ func kmsKeyMetadata(k *kmsKey) map[string]any {
 		"Arn":                   k.ARN,
 		"CreationDate":          float64(k.Created.Unix()),
 		"Enabled":               k.State == "Enabled",
-		"Description":           "",
+		"Description":           k.Description,
 		"KeyUsage":              "ENCRYPT_DECRYPT",
 		"KeyState":              k.State,
 		"Origin":                "AWS_KMS",
