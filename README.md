@@ -29,14 +29,14 @@ endpoints + envelope/error-code mismatches resolved (EC2 wire shape
 correction, DescribeInstanceTypes / DescribeTags / DescribeInstanceAttribute
 / DescribeRouteTables routeSet+associationSet / ModifySubnetAttribute,
 DynamoDB DescribeContinuousBackups + DescribeTimeToLive, eight Route53
-fixes, IAM destroy preflight + managed-ARN auto-seed, full KMS handler).
+fixes, IAM destroy preflight + managed-policy ARNs created on first attach, full KMS handler).
 The 17 review passes are archived under `docs/review-passes/passN.md`.
 
 | Service | Wire format | Endpoint | TF lifecycle |
 | ------- | ----------- | -------- | ------------ |
-| IAM | Query-RPC + XML | `POST /iam` | apply / plan-no-op / destroy ✓ — managed-ARN auto-seed, user/role inline policies, attached-policy preflight |
+| IAM | Query-RPC + XML | `POST /iam` | apply / plan-no-op / destroy ✓ — managed-policy ARNs created on first attach, user/role inline policies, attached-policy preflight |
 | S3 | XML REST | `/s3/<bucket>/<key>?<sub-resource>` | apply / plan-no-op / destroy ✓ (S3 bucket sub-resource reads are limited — for `terraform-provider-aws`'s full Read flow infrafactory pairs fakeaws with SeaweedFS, see M59) |
-| EC2 | Query-RPC + XML (`ShapeEC2Query` envelope) | `POST /ec2/region/<region>` | VPC + Subnet + IGW + RouteTable + Route + EIP + SG + Instance + KeyPair + AMI fixture; full lifecycle ✓ — InvalidGroup.NotFound / InvalidInstanceID.NotFound / InvalidRouteTableID.NotFound destroy-wait codes, AMI auto-seed, terminated-instance GC on subnet delete |
+| EC2 | Query-RPC + XML (`ShapeEC2Query` envelope) | `POST /ec2/region/<region>` | VPC + Subnet + IGW + RouteTable + Route + EIP + SG + Instance + KeyPair + AMI fixtures (amzn2, AL2023, Ubuntu); full lifecycle ✓ — InvalidGroup.NotFound / InvalidInstanceID.NotFound / InvalidRouteTableID.NotFound destroy-wait codes, unknown AMIs refused with InvalidAMIID.NotFound, terminated-instance GC on subnet delete |
 | RDS | Query-RPC + XML | `POST /rds/region/<region>` | DB Instance + Subnet/Parameter/Cluster Groups + Clusters; full lifecycle ✓ (M61: DbiResourceId stability, service-specific 404 codes, DeleteDBInstance envelope, user-field persistence) |
 | DynamoDB | JSON 1.1 + X-Amz-Target | `POST /dynamodb/region/<region>` | apply / plan-no-op / destroy ✓ — refresh-path DescribeContinuousBackups + DescribeTimeToLive |
 | EKS | JSON-REST | `/eks/region/<region>/clusters/...` | cluster + node group; full lifecycle ✓ |

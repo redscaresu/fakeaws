@@ -1680,14 +1680,17 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	// BLOCKING #1) so RunInstances and DescribeImages stay consistent
 	// regardless of which region the caller picked.
 	app.ensureAMIFixturesForRegion(account, region)
-	// Auto-seed the caller's AMI id when it's not in the fixture set.
-	// Real AWS rejects unknown AMIs, but mocks optimize for fast
-	// feedback (feedback_mock_design memory): the LLM frequently picks
-	// example AMI IDs from AWS docs (ami-0c55b159..., ami-0123abcd...)
-	// and gating test scenarios on whether those exact IDs are seeded
-	// produces noise without catching real bugs. Treat any well-formed
-	// `ami-*` value the caller hands us as a valid stub.
-	app.ensureAMIExists(account, region, imageID)
+	// Real EC2 refuses an ImageId it does not know, so a hallucinated
+	// AMI (ami-0c55b159cbfafe1f0) fails here as it would on AWS.
+	if _, err := app.repo.GetAMI(account, region, imageID); err != nil {
+		if errors.Is(err, models.ErrNotFound) {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				"InvalidAMIID.NotFound", fmt.Sprintf("The image id '[%s]' does not exist", imageID))
+			return
+		}
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
 	subnet, err := app.checkSubnetGroups(account, region, nw.subnetID, nw.sgIDs)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
@@ -2151,37 +2154,20 @@ func ec2AMIToXML(a *repository.EC2AMI) ec2ImageXML {
 	}
 }
 
+// AL2023AMIID is the Amazon Linux 2023 fixture, the image SSM's public
+// al2023-ami-kernel-default-x86_64 parameter resolves to.
+const AL2023AMIID = "ami-0al2023x8664"
+
 // ec2AMIFixtures is the canonical fixture list seeded at startup. The
-// AWS provider's documentation examples reference Amazon Linux 2 and
+// AWS provider's documentation examples reference Amazon Linux and
 // Ubuntu LTS images by canonical name; we cover both so scenarios can
 // pass in either. Per concepts.md "Standing patterns" item 8 — fixture
 // state, never derived from real AWS.
 var ec2AMIFixtures = []repository.EC2AMI{
 	{ID: "ami-0abcd1234", Name: "amzn2-ami-hvm-2.0", OwnerID: "amazon", VirtualizationType: "hvm", RootDeviceName: "/dev/xvda"},
+	{ID: AL2023AMIID, Name: "al2023-ami-2023.6.20241010.0-kernel-6.1-x86_64", OwnerID: "amazon", VirtualizationType: "hvm", RootDeviceName: "/dev/xvda"},
 	{ID: "ami-0ubuntu2004", Name: "ubuntu/images/hvm-ssd/ubuntu-focal-20.04", OwnerID: "099720109477", VirtualizationType: "hvm", RootDeviceName: "/dev/sda1"},
 	{ID: "ami-0ubuntu2204", Name: "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04", OwnerID: "099720109477", VirtualizationType: "hvm", RootDeviceName: "/dev/sda1"},
-}
-
-// ensureAMIExists auto-seeds a stub AMI fixture when the caller's
-// ImageId isn't already known. Idempotent — re-entry is harmless
-// because repository SeedAMI uses INSERT OR IGNORE. Skips invalid
-// shapes (empty, non-`ami-` prefix) so we still surface obvious bad
-// input as a real error.
-func (app *Application) ensureAMIExists(account, region, imageID string) {
-	if imageID == "" || !strings.HasPrefix(imageID, "ami-") {
-		return
-	}
-	if _, err := app.repo.GetAMI(account, region, imageID); err == nil {
-		return
-	}
-	_ = app.repo.SeedAMI(account, &repository.EC2AMI{
-		ID:                 imageID,
-		Name:               imageID, // synthesised — the caller picked it
-		OwnerID:            "amazon",
-		VirtualizationType: "hvm",
-		RootDeviceName:     "/dev/xvda",
-		Region:             region,
-	})
 }
 
 // ec2InstanceTypeXML mirrors a single InstanceTypeInfo entry in a
@@ -2214,9 +2200,8 @@ type ec2DescribeInstanceTypesResult struct {
 // `aws_instance` state fields (memory, vcpu, hypervisor). The set of
 // real-world instance types is huge and grows constantly, so we
 // synthesise a plausible fixture for whatever the caller asks for
-// rather than enumerating. Same justification as ensureAMIExists:
-// mocks optimize for fast feedback, not for rejecting unknown
-// fixture data.
+// rather than enumerating: mocks optimize for fast feedback, not for
+// rejecting unknown fixture data.
 func (app *Application) ec2DescribeInstanceTypes(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	var wanted []string
 	for k, vs := range req.Params {
