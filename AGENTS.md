@@ -43,7 +43,7 @@ fakeaws/
 ├── coverage_matrix.yaml       # source of truth for S48-T7 audit
 ├── .gitleaks.toml             # examples/.*\.tf$ allowlist
 ├── .githooks/pre-commit       # gitleaks → go test, in that order
-├── .github/workflows/ci.yml   # six required jobs
+├── .github/workflows/ci.yml   # eight jobs incl. provider-smoke
 ├── Makefile                   # install-hooks, build, test, test-coverage
 └── README.md, AGENTS.md, concepts.md, go.mod
 ```
@@ -85,7 +85,9 @@ fakeaws/
 
 Adding a directory to any of the three trees auto-registers — no per-example test wiring. Each subdirectory is its own `t.Run` sub-test.
 
-Gating: `INFRAFACTORY_ENABLE_E2E=1` + a reachable fakeaws at the default port (`http://127.0.0.1:8082`). Without the env var, the test `t.Skip`s with a clear message — mirroring the gating pattern infrafactory uses for tofu-driven e2e tests.
+Where it runs: the **`provider-smoke` job in this repo's `.github/workflows/ci.yml`**, on every pull request — OpenTofu 1.12.6, fakeaws built and started on `:8082` (the examples hardcode it), then `INFRAFACTORY_ENABLE_E2E=1 go test ./examples/ -v -count=1 -timeout 30m`. Locally: start fakeaws on `:8082` and run the same command. Without the env var, the test `t.Skip`s with a clear message — mirroring the gating pattern infrafactory uses for tofu-driven e2e tests. The harness POSTs `/mock/reset` before each example.
+
+Known-red examples: `examples/known_red_test.go::knownRed` maps `<tree>/<dir>` → `{stage, fragment, owner}`. A listed example must fail at that stage with that fragment in its output (logged, no `t.Skip`); if it passes the harness fails with "remove it from knownRed", and if it fails any other way the harness fails. Anything not listed must pass. Fixing a known-red example means deleting its entry in the same PR.
 
 **When you add a new resource handler**: add an `examples/working/<resource>/` config that exercises CRUD. If your handler models a documented error path, add an `examples/misconfigured/<resource>/` config + `expected.txt` pinning the AWS error code. If your handler has Update semantics distinct from Create, add an `examples/updates/<resource>/` v1→v2 pair.
 
@@ -165,6 +167,8 @@ fakeaws is **reactive**: declined Smithy codegen (see `concepts.md` § "Why no S
 
 - Aggregate `handlers/...` coverage ≥ 80% at the end of each phase
   (parsed from the `total:` line of `go tool cover -func=cov.out`).
-- 6 required CI jobs: `lint`, `build`, `test`, `gitleaks`,
-  `regression-seed-audit`, `coverage-audit`, `coverage`.
+- 8 CI jobs: `lint`, `build`, `test`, `gitleaks`,
+  `regression-seed-audit`, `coverage-audit`, `coverage`, `provider-smoke`.
+  `provider-smoke` (the provider smoke harness above) is a required
+  status check on `main`.
 - No `--no-verify`. No bare `t.Skip()`. No silent partial implementations.

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (provider smoke in CI, 2026-09-28)
+- **`provider-smoke` CI job.** Builds fakeaws, starts it on `:8082`, installs OpenTofu 1.12.6 and runs `INFRAFACTORY_ENABLE_E2E=1 go test ./examples/` on every pull request. The harness previously ran only by hand; its header wrongly said infrafactory CI ran it.
+- **Known-red tracking.** `examples/known_red_test.go::knownRed` records each red example's failing stage, output fragment and owner. A listed example that passes, or fails another way, fails the harness; an unlisted failure fails as before. `TestCheckKnownRed` (ungated, runs in the `test` job) pins the decision.
+- The harness POSTs `/mock/reset` before each example, and fails instead of skipping when `tofu` is missing with the E2E gate set.
+
 ### Added (M68 + M69 + M73 + M77 + M82 + M85, 2026-05-28)
 - **M68 — SQS QueueUrl bug.** `CreateQueue` now derives the QueueUrl from `X-Forwarded-Host` / `r.Host` (path-style `<host>/<account>/<queue>`); previously hardcoded `sqs.us-east-1.fakeaws.local` which the AWS SDK couldn't reach. Added `ListQueueTags` + `TagQueue` + `UntagQueue` + `SetQueueAttributes` no-op stubs and the AWS-spec `AWS.SimpleQueueService.NonExistentQueue` 400 (was generic 404) so destroy-wait converges.
 - **M69 — IAM GetPolicyVersion + ListPolicyVersions handlers** added at `handlers/iam.go`. terraform-provider-aws calls these immediately after CreatePolicy; without them `aws_iam_policy` failed apply with ResourceNotFoundException. Returns URL-encoded PolicyDocument matching real IAM's CreatePolicy → v1 default-version contract.
