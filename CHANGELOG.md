@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (subnet MapPublicIpOnLaunch and instance UserData persist, 2026-09-28)
+- **ModifySubnetAttribute `MapPublicIpOnLaunch.Value`** is stored on the subnet and echoed by `DescribeSubnets` `mapPublicIpOnLaunch`; before it was a no-op, so the provider's wait for the new value timed out and tainted the subnet. Other attributes stay accepted and unstored. An unknown subnet is 404. `/mock/state` `ec2.subnets[]` gains `map_public_ip_on_launch`.
+- **RunInstances into a flagged subnet** gets a public IP (`ipAddress` and the ENI's `association`) when the launch does not set `AssociatePublicIpAddress`; an explicit `NetworkInterface.1.AssociatePublicIpAddress=false` still wins.
+- **RunInstances stores `UserData`** (base64, as sent) and `DescribeInstanceAttribute userData` returns it; an instance without user data still answers an empty `<userData/>`, and an unknown instance is `InvalidInstanceID.NotFound`.
+- New `examples/updates/update_subnet_map_public_ip` (v1 false, v2 true); the `aws_subnet` coverage row names it instead of `updates_exempt`. `examples/working/instance_public_ip` sets `user_data`.
+
 ### Added (instance primary ENIs with private and public IPs, 2026-09-28)
 - **RunInstances accepts `NetworkInterface.1.*`.** `DeviceIndex`, `SubnetId`, `SecurityGroupId.N`, `AssociatePublicIpAddress` and `DeleteOnTermination` launch an instance with no top-level `SubnetId` (409 before); the provider uses this form whenever `associate_public_ip_address` is set. Both forms run the same subnet lookup and SG-VPC check, so they fail with the same error. `SubnetId`, `SecurityGroupId.N` or `PrivateIpAddress` next to `NetworkInterface.1.*` is `InvalidParameterCombination` (400). A second interface, an existing `NetworkInterfaceId` or `DeleteOnTermination=false` is refused (409).
 - **Each instance gets a primary ENI** (new `ec2_network_interfaces` table, reset with the rest) holding the requested private IP (`PrivateIpAddress` or `NetworkInterface.1.PrivateIpAddress`; 409 if it is taken, reserved or outside the subnet) or else the lowest free one in the subnet CIDR (AWS's first four and last addresses skipped; a full subnet is 409), `sourceDestCheck` true, the security groups, and a public IP (203.0.113.0/24) only with `AssociatePublicIpAddress=true`. The instance and its ENI are inserted in one transaction.

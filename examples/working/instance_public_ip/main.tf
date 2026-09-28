@@ -3,7 +3,7 @@
 # SubnetId) and reads associate_public_ip_address back as "the primary
 # ENI has an association"; the attribute is ForceNew, so the post-apply
 # plan is empty only if DescribeInstances returns that ENI with its
-# public IP. No user_data: RunInstances does not persist it yet.
+# public IP. user_data reads back from DescribeInstanceAttribute.
 
 terraform {
   required_providers {
@@ -54,6 +54,7 @@ resource "aws_instance" "web" {
   subnet_id                   = aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.web.id, aws_security_group.ssh.id]
   associate_public_ip_address = true
+  user_data                   = "#!/bin/bash\necho hello\n"
 }
 
 output "public_ip" {

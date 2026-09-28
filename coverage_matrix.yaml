@@ -155,8 +155,7 @@ entries:
     scenario_resource_type: networking
     working_dir_name: vpc_network
     misconfigured_dir_name: instance_missing_subnet
-    updates_exempt: true
-    updates_exempt_reason: "Subnet immutable at v1 (CIDR + AZ set on create); update flows are exercised on dependent resources (route_table_association, instance)."
+    updates_dir_name: update_subnet_map_public_ip
     integration_test_func_name: "^TestEC2_SubnetCRUDAndFK$"
   - aws_service: ec2
     aws_resource_type: aws_internet_gateway

@@ -66,12 +66,7 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "DeleteSubnet":
 		app.ec2DeleteSubnet(w, account, region, req)
 	case "ModifySubnetAttribute":
-		// terraform-provider-aws calls this after CreateSubnet to
-		// toggle MapPublicIpOnLaunch / AssignIpv6AddressOnCreation /
-		// EnableDns64. We don't persist these scalar flags on the
-		// subnet fixture (no scenario reads them back), so the no-op
-		// 200 response matches what the provider needs to proceed.
-		app.ec2NoOpSuccess(w, "ModifySubnetAttribute")
+		app.ec2ModifySubnetAttribute(w, account, region, req)
 
 	// ----- NetworkInterface (instance primary ENIs) -----
 	case "DescribeNetworkInterfaces":
@@ -438,6 +433,24 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeSubnets", &out)
 }
 
+// ec2ModifySubnetAttribute stores MapPublicIpOnLaunch, which the
+// provider waits to read back from DescribeSubnets. The other
+// attributes it sends (AssignIpv6AddressOnCreation, EnableDns64, ...)
+// are accepted and not stored: no scenario reads them back.
+func (app *Application) ec2ModifySubnetAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	v := req.Params.Get("MapPublicIpOnLaunch.Value")
+	err := app.repo.UpdateSubnet(account, region, req.Params.Get("SubnetId"), func(s *repository.EC2Subnet) {
+		if v != "" {
+			s.MapPublicIPOnLaunch = v == "true"
+		}
+	})
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	app.ec2NoOpSuccess(w, "ModifySubnetAttribute")
+}
+
 func (app *Application) ec2DeleteSubnet(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	subnetID := req.Params.Get("SubnetId")
 	// Lazily GC any terminated instances in this subnet so the FK
@@ -529,6 +542,7 @@ func ec2SubnetToXML(s *repository.EC2Subnet) ec2SubnetXML {
 		AvailableIpAddressCount: available,
 		OwnerId:                 awsproto.FakeAccountID,
 		SubnetArn:               s.ARN,
+		MapPublicIpOnLaunch:     s.MapPublicIPOnLaunch,
 		PrivateDnsNameOptionsOnLaunch: &ec2SubnetPrivateDnsOptionsXML{
 			HostnameType:                 "ip-name",
 			EnableResourceNameDnsARecord: false,
@@ -1586,7 +1600,7 @@ type ec2InstanceNetwork struct {
 	subnetID          string
 	sgIDs             []string
 	privateIP         string // empty: the lowest free address
-	associatePublicIP bool
+	associatePublicIP string // "true", "false", or "" for the subnet's default
 }
 
 // errNICWithInstanceLevelPlacement is AWS's InvalidParameterCombination.
@@ -1594,8 +1608,8 @@ var errNICWithInstanceLevelPlacement = errors.New("Network interfaces and an ins
 
 // parseInstanceNetwork reads either the top-level SubnetId +
 // SecurityGroupId.N form or NetworkInterface.1.*, which the provider
-// sends whenever associate_public_ip_address is set. A top-level
-// launch gets no public IP (MapPublicIpOnLaunch is not modeled).
+// sends whenever associate_public_ip_address is set. Without an
+// AssociatePublicIpAddress the subnet's MapPublicIpOnLaunch decides.
 func parseInstanceNetwork(p url.Values) (ec2InstanceNetwork, error) {
 	top := ec2InstanceNetwork{
 		subnetID:  p.Get("SubnetId"),
@@ -1618,7 +1632,7 @@ func parseInstanceNetwork(p url.Values) (ec2InstanceNetwork, error) {
 		subnetID:          p.Get(nic + "SubnetId"),
 		sgIDs:             queryListValues(p, nic+"SecurityGroupId."),
 		privateIP:         p.Get(nic + "PrivateIpAddress"),
-		associatePublicIP: p.Get(nic+"AssociatePublicIpAddress") == "true",
+		associatePublicIP: p.Get(nic + "AssociatePublicIpAddress"),
 	}, nil
 }
 
@@ -1626,22 +1640,22 @@ func parseInstanceNetwork(p url.Values) (ec2InstanceNetwork, error) {
 // from another VPC (S44-T8 regression pattern; the load-bearing fakegcp
 // pass-27 finding ported to AWS). Both RunInstances forms and
 // ModifyNetworkInterfaceAttribute go through it, so they fail alike.
-func (app *Application) checkSubnetGroups(account, region, subnetID string, sgIDs []string) error {
+func (app *Application) checkSubnetGroups(account, region, subnetID string, sgIDs []string) (*repository.EC2Subnet, error) {
 	subnet, err := app.repo.GetSubnet(account, region, subnetID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, sgID := range sgIDs {
 		sg, err := app.repo.GetSecurityGroup(account, region, sgID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if sg.VPCID != subnet.VPCID {
-			return fmt.Errorf("security group %q lives in vpc %q but subnet %q is in vpc %q: %w",
+			return nil, fmt.Errorf("security group %q lives in vpc %q but subnet %q is in vpc %q: %w",
 				sgID, sg.VPCID, subnetID, subnet.VPCID, models.ErrNotFound)
 		}
 	}
-	return nil
+	return subnet, nil
 }
 
 func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -1674,7 +1688,8 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	// produces noise without catching real bugs. Treat any well-formed
 	// `ami-*` value the caller hands us as a valid stub.
 	app.ensureAMIExists(account, region, imageID)
-	if err := app.checkSubnetGroups(account, region, nw.subnetID, nw.sgIDs); err != nil {
+	subnet, err := app.checkSubnetGroups(account, region, nw.subnetID, nw.sgIDs)
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -1682,6 +1697,7 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	inst := &repository.EC2Instance{
 		ID: id, SubnetID: nw.subnetID, AMIID: imageID, InstanceType: instanceType,
 		IAMInstanceProfileName: req.Params.Get("IamInstanceProfile.Name"),
+		UserData:               req.Params.Get("UserData"),
 		State:                  "running",
 		Region:                 region,
 		ARN:                    awsproto.BuildEC2InstanceARN(region, id),
@@ -1691,7 +1707,7 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		ID: "eni-" + ec2RandID(), AttachmentID: "eni-attach-" + ec2RandID(),
 		SecurityGroupIDs: nw.sgIDs, PrivateIP: nw.privateIP, SourceDestCheck: true,
 	}
-	if nw.associatePublicIP {
+	if nw.associatePublicIP == "true" || (nw.associatePublicIP == "" && subnet.MapPublicIPOnLaunch) {
 		eni.PublicIP = ec2DerivePublicIP(eni.ID)
 	}
 	if err := app.repo.CreateInstance(account, inst, eni); err != nil {
@@ -1717,13 +1733,7 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 				// the response as "instance is gone, deletion complete"
 				// instead of a generic hard error. Mirrors the SG /
 				// RouteTable fix earlier in this session.
-				if errors.Is(err, models.ErrNotFound) {
-					awsproto.WriteServiceError(w, awsproto.ShapeEC2Query,
-						http.StatusNotFound, "InvalidInstanceID.NotFound",
-						fmt.Sprintf("The instance ID '%s' does not exist", id))
-					return
-				}
-				awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+				writeInstanceError(w, id, err)
 				return
 			}
 			instances = append(instances, inst)
@@ -1791,6 +1801,18 @@ func ec2Filters(p url.Values) map[string][]string {
 		out[name] = append(out[name], queryListValues(p, f+"Value.")...)
 	}
 	return out
+}
+
+// writeInstanceError answers a failed instance lookup, with
+// InvalidInstanceID.NotFound for a missing instance.
+func writeInstanceError(w http.ResponseWriter, id string, err error) {
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query,
+			http.StatusNotFound, "InvalidInstanceID.NotFound",
+			fmt.Sprintf("The instance ID '%s' does not exist", id))
+		return
+	}
+	awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 }
 
 func writeENINotFound(w http.ResponseWriter, id string) {
@@ -1864,7 +1886,7 @@ func (app *Application) ec2ModifyNetworkInterfaceAttribute(w http.ResponseWriter
 		return
 	}
 	if err == nil {
-		err = app.checkSubnetGroups(account, region, eni.SubnetID, groups)
+		_, err = app.checkSubnetGroups(account, region, eni.SubnetID, groups)
 	}
 	if err == nil {
 		err = app.repo.UpdateNetworkInterface(account, region, id, func(e *repository.EC2NetworkInterface) {
@@ -2219,9 +2241,9 @@ func (app *Application) ec2DescribeInstanceTypes(w http.ResponseWriter, account,
 // ec2DescribeInstanceAttributeResult is the response wrapper for one
 // scalar attribute lookup. terraform-provider-aws issues one of these
 // per attribute it wants to read; the response varies per attribute
-// name. We synthesise the AWS default for the requested attribute
-// rather than tracking attribute state on the instance fixture —
-// none of our scenarios mutate these attributes after create.
+// name. userData is the instance's stored RunInstances UserData; the
+// rest are synthesised AWS defaults — none of our scenarios mutate
+// them after create.
 type ec2DescribeInstanceAttributeResult struct {
 	InstanceId                        string                   `xml:"instanceId"`
 	InstanceInitiatedShutdownBehavior *ec2AttributeStringValue `xml:"instanceInitiatedShutdownBehavior,omitempty"`
@@ -2255,10 +2277,15 @@ func (app *Application) ec2DescribeInstanceAttribute(w http.ResponseWriter, acco
 	case "disableApiStop":
 		out.DisableApiStop = &ec2AttributeBoolValue{Value: false}
 	case "userData":
-		// fakeaws stores no user data, and AWS answers an instance
-		// without any with an empty <userData/>. A <value></value>
-		// reads back as user_data = sha1("") and plans a diff.
-		out.UserData = &ec2AttributeStringValue{}
+		// An instance without user data answers an empty <userData/>:
+		// a <value></value> reads back as user_data = sha1("") and
+		// plans a diff.
+		inst, err := app.repo.GetInstance(account, region, instanceID)
+		if err != nil {
+			writeInstanceError(w, instanceID, err)
+			return
+		}
+		out.UserData = &ec2AttributeStringValue{Value: inst.UserData}
 	case "ebsOptimized":
 		out.EbsOptimized = &ec2AttributeBoolValue{Value: false}
 	case "sourceDestCheck":
@@ -2365,6 +2392,7 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 		sOut = append(sOut, map[string]any{
 			"id": s.ID, "vpc_id": s.VPCID, "cidr_block": s.CidrBlock,
 			"availability_zone": s.AvailabilityZone, "region": s.Region, "arn": s.ARN,
+			"map_public_ip_on_launch": s.MapPublicIPOnLaunch,
 		})
 	}
 	out["subnets"] = sOut
