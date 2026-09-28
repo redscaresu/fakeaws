@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (security group rules keep the whole ip_permissions shape, 2026-09-28)
+- **Every rule source round-trips.** `AuthorizeSecurityGroup{Ingress,Egress}` and the matching Revokes now parse `IpRanges` (`CidrIp`, `Description`), `Ipv6Ranges`, `Groups` (UserIdGroupPairs: `GroupId`, `UserId`, `Description`) and `PrefixListIds`; before, only IPv4 CIDRs survived, so an inline `ipv6_cidr_blocks` or `security_groups` rule planned a diff after every apply. `DescribeSecurityGroups` echoes each source on its own item with its description (`CRITICAL[ec2-sg-rule-source-descriptions-round-trip]`).
+- **Rules are per source, as in AWS.** Authorize adds a source to the permission with the same protocol and ports; Revoke removes only the named sources (revoking `::/0` keeps `0.0.0.0/0` on the same port) and drops a permission once it has none left.
+- **`/mock/state` exports rules.** Each `ec2.security_groups[]` entry gains `ip_permissions` and `ip_permissions_egress`: `from_port`, `to_port`, `ip_protocol`, `ip_ranges[{cidr_ip, description}]`, `ipv6_ranges[{cidr_ipv6, description}]`, `user_id_group_pairs[{group_id, user_id, description}]`, `prefix_list_ids[{prefix_list_id, description}]`. Every key is always present and lists are never null. Pinned by `TestEC2_SecurityGroupStateRulesGolden`.
+- New `examples/working/security_group_full_shape` (IPv6 ingress, SG-to-SG rule, allow-all egress; provider pinned to 5.100.0).
+
 ### Added (provider smoke in CI, 2026-09-28)
 - **`provider-smoke` CI job.** Builds fakeaws, starts it on `:8082`, installs OpenTofu 1.12.6 and runs `INFRAFACTORY_ENABLE_E2E=1 go test ./examples/` on every pull request. The harness previously ran only by hand; its header wrongly said infrafactory CI ran it.
 - **Known-red tracking.** `examples/known_red_test.go::knownRed` records each red example's failing stage, output fragment and owner. A listed example that passes, or fails another way, fails the harness; an unlisted failure fails as before. `TestCheckKnownRed` (ungated, runs in the `test` job) pins the decision.
