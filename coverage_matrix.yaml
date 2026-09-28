@@ -200,7 +200,7 @@ entries:
     misconfigured_exempt: true
     misconfigured_exempt_reason: "Duplicate-name and missing-VPC failures asserted in TestEC2_SecurityGroupCRUDPlusRules + the post-merge regression test."
     updates_dir_name: update_security_group_rules
-    integration_test_func_name: "^TestEC2_SecurityGroupCRUDPlusRules$"
+    integration_test_func_name: "^(TestEC2_SecurityGroupCRUDPlusRules|TestRegressionSweepDescribeSecurityGroupsListsEveryGroup)$"
   # Codex pass 12 BLOCKING fix — aws_security_group_rule is a
   # landed surface (Authorize/Revoke ingress + egress paths,
   # exercised by the update_security_group_rules example) but was
@@ -299,7 +299,65 @@ entries:
     misconfigured_exempt: true
     misconfigured_exempt_reason: "Domain=standard rejection asserted in TestEC2_EIPLifecycle; standalone misconfigured tofu example would duplicate."
     updates_dir_name: update_default_tags
-    integration_test_func_name: "^TestEC2_EIPLifecycle$"
+    integration_test_func_name: "^(TestEC2_EIPLifecycle|TestRegressionSweepDescribeAddressesListsEveryAddress)$"
+
+  # EC2 — the Describes infrafactory's AWS scope sweep lists. The
+  # unfiltered DescribeAddresses and DescribeSecurityGroups are named on
+  # the aws_eip and aws_security_group rows. scenario_resource_type
+  # omitted: read surfaces, not generator resources.
+  - aws_service: ec2
+    aws_resource_type: aws_ami
+    working_exempt: true
+    working_exempt_reason: "Read-only AMI fixtures; fakeaws creates no images. DescribeImages by ImageId.N and Owner.N (Owner.1=self lists none of the fixtures) is pinned in TestEC2_DescribeImagesFixtures and TestRegressionSweepDescribeImagesOwnerSelf."
+    misconfigured_dir_name: instance_unknown_ami
+    updates_exempt: true
+    updates_exempt_reason: "The fixtures are immutable."
+    integration_test_func_name: "^(TestEC2_DescribeImagesFixtures|TestRegressionSweepDescribeImagesOwnerSelf)$"
+  - aws_service: ec2
+    aws_resource_type: aws_network_interface
+    working_exempt: true
+    working_exempt_reason: "Only an instance's primary ENI exists, applied by working/basic_instance; an unfiltered DescribeNetworkInterfaces omits a terminated instance's ENI (TestRegressionSweepTerminatedInstanceENIGone)."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "No CreateNetworkInterface path; an unmodelled Filter.N is refused 409 in TestEC2_TerminateInstancesDeletesENI."
+    updates_exempt: true
+    updates_exempt_reason: "The Groups attribute update is pinned in TestEC2_ModifyNetworkInterfaceAttributeGroups and applied through aws_instance's vpc_security_group_ids."
+    integration_test_func_name: "^(TestEC2_TerminateInstancesDeletesENI|TestRegressionSweepTerminatedInstanceENIGone)$"
+  - aws_service: ec2
+    aws_resource_type: aws_ebs_volume
+    working_exempt: true
+    working_exempt_reason: "Describe-only: fakeaws creates no volumes, so DescribeVolumes answers an empty set (TestRegressionSweepDescribesNeverCreated)."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "No create path to misconfigure; an unmodelled Filter.N is refused 409 (TestRegressionSweepDescribesNeverCreated)."
+    updates_exempt: true
+    updates_exempt_reason: "No create path, so nothing to update."
+    integration_test_func_name: "^TestRegressionSweepDescribesNeverCreated$"
+  - aws_service: ec2
+    aws_resource_type: aws_nat_gateway
+    working_exempt: true
+    working_exempt_reason: "Describe-only: fakeaws creates no NAT gateways, so DescribeNatGateways answers an empty set (TestRegressionSweepDescribesNeverCreated)."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "No create path to misconfigure; an unmodelled Filter.N is refused 409 (TestRegressionSweepDescribesNeverCreated)."
+    updates_exempt: true
+    updates_exempt_reason: "No create path, so nothing to update."
+    integration_test_func_name: "^TestRegressionSweepDescribesNeverCreated$"
+  - aws_service: ec2
+    aws_resource_type: aws_ebs_snapshot
+    working_exempt: true
+    working_exempt_reason: "Describe-only: fakeaws creates no snapshots, so DescribeSnapshots (Owner.1=self) answers an empty set (TestRegressionSweepDescribesNeverCreated)."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "No create path to misconfigure; an unmodelled Filter.N is refused 409 (TestRegressionSweepDescribesNeverCreated)."
+    updates_exempt: true
+    updates_exempt_reason: "No create path, so nothing to update."
+    integration_test_func_name: "^TestRegressionSweepDescribesNeverCreated$"
+  - aws_service: ec2
+    aws_resource_type: aws_launch_template
+    working_exempt: true
+    working_exempt_reason: "Describe-only: fakeaws creates no launch templates, so DescribeLaunchTemplates answers an empty set (TestRegressionSweepDescribesNeverCreated)."
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "No create path to misconfigure; an unmodelled Filter.N is refused 409 (TestRegressionSweepDescribesNeverCreated)."
+    updates_exempt: true
+    updates_exempt_reason: "No create path, so nothing to update."
+    integration_test_func_name: "^TestRegressionSweepDescribesNeverCreated$"
   - aws_service: ec2
     aws_resource_type: aws_key_pair
     working_exempt: true
