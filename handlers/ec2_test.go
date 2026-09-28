@@ -1266,3 +1266,250 @@ func TestEC2_DescribeInstanceAttribute_UserData(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "unknown instance: %s", body)
 	assert.Equal(t, "InvalidInstanceID.NotFound", extractEC2Tag(body, "Code"))
 }
+
+// ----- Tags -----
+
+// tagSetIn merges every <tagSet> in a Describe* body into key → value.
+func tagSetIn(t *testing.T, body []byte) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	dec := xml.NewDecoder(strings.NewReader(string(body)))
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return out
+		}
+		require.NoError(t, err, "decode %s", body)
+		if se, ok := tok.(xml.StartElement); ok && se.Name.Local == "tagSet" {
+			var set struct {
+				Items []struct {
+					Key   string `xml:"key"`
+					Value string `xml:"value"`
+				} `xml:"item"`
+			}
+			require.NoError(t, dec.DecodeElement(&set, &se))
+			for _, it := range set.Items {
+				out[it.Key] = it.Value
+			}
+		}
+	}
+}
+
+// tagParams flattens alternating key, value pairs under prefix.
+func tagParams(p url.Values, prefix string, kv ...string) url.Values {
+	for i := 0; i < len(kv); i += 2 {
+		n := strconv.Itoa(i/2 + 1)
+		p.Set(prefix+n+".Key", kv[i])
+		p.Set(prefix+n+".Value", kv[i+1])
+	}
+	return p
+}
+
+func withTagSpec(p url.Values, n int, resourceType string, kv ...string) url.Values {
+	prefix := fmt.Sprintf("TagSpecification.%d.", n)
+	p.Set(prefix+"ResourceType", resourceType)
+	return tagParams(p, prefix+"Tag.", kv...)
+}
+
+type describeTag struct {
+	ResourceId   string `xml:"resourceId"`
+	ResourceType string `xml:"resourceType"`
+	Key          string `xml:"key"`
+	Value        string `xml:"value"`
+}
+
+func describeTags(t *testing.T, srv *httptest.Server, region string, params url.Values) []describeTag {
+	t.Helper()
+	resp, body := ec2Call(t, srv, region, "DescribeTags", params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeTags: %s", body)
+	var out struct {
+		Tags []describeTag `xml:"tagSet>item"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "DescribeTags: %s", body)
+	return out.Tags
+}
+
+// taggedKind creates one resource of a type with the given
+// TagSpecification tags and describes it by id.
+type taggedKind struct {
+	resourceType string
+	create       func(t *testing.T, srv *httptest.Server, tags ...string) string
+	describe     func(id string) (string, url.Values)
+}
+
+const tagRegion = "us-east-1"
+
+func createOK(t *testing.T, srv *httptest.Server, action, idTag string, params url.Values) string {
+	t.Helper()
+	resp, body := ec2Call(t, srv, tagRegion, action, params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", action, body)
+	id := extractEC2Tag(body, idTag)
+	require.NotEmpty(t, id, "%s: %s", action, body)
+	return id
+}
+
+func tagVPC(t *testing.T, srv *httptest.Server) string {
+	return createOK(t, srv, "CreateVpc", "vpcId", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+}
+
+var taggedKinds = []taggedKind{
+	{"vpc", func(t *testing.T, srv *httptest.Server, tags ...string) string {
+		return createOK(t, srv, "CreateVpc", "vpcId", withTagSpec(url.Values{"CidrBlock": {"10.0.0.0/16"}}, 1, "vpc", tags...))
+	}, func(string) (string, url.Values) { return "DescribeVpcs", nil }},
+	{"subnet", func(t *testing.T, srv *httptest.Server, tags ...string) string {
+		return createOK(t, srv, "CreateSubnet", "subnetId",
+			withTagSpec(url.Values{"VpcId": {tagVPC(t, srv)}, "CidrBlock": {"10.0.1.0/24"}}, 1, "subnet", tags...))
+	}, func(id string) (string, url.Values) { return "DescribeSubnets", url.Values{"SubnetId.1": {id}} }},
+	{"internet-gateway", func(t *testing.T, srv *httptest.Server, tags ...string) string {
+		return createOK(t, srv, "CreateInternetGateway", "internetGatewayId", withTagSpec(url.Values{}, 1, "internet-gateway", tags...))
+	}, func(string) (string, url.Values) { return "DescribeInternetGateways", nil }},
+	{"route-table", func(t *testing.T, srv *httptest.Server, tags ...string) string {
+		return createOK(t, srv, "CreateRouteTable", "routeTableId", withTagSpec(url.Values{"VpcId": {tagVPC(t, srv)}}, 1, "route-table", tags...))
+	}, func(id string) (string, url.Values) { return "DescribeRouteTables", url.Values{"RouteTableId.1": {id}} }},
+	{"security-group", func(t *testing.T, srv *httptest.Server, tags ...string) string {
+		return createOK(t, srv, "CreateSecurityGroup", "groupId", withTagSpec(url.Values{
+			"GroupName": {"app"}, "GroupDescription": {"app"}, "VpcId": {tagVPC(t, srv)},
+		}, 1, "security-group", tags...))
+	}, func(id string) (string, url.Values) { return "DescribeSecurityGroups", url.Values{"GroupId.1": {id}} }},
+	{"instance", func(t *testing.T, srv *httptest.Server, tags ...string) string {
+		n := newInstanceNet(t, srv, tagRegion, "10.0.0.0/16", "10.0.1.0/24")
+		p := withTagSpec(nicParams(n.subnet, n.sgs[:1], false), 1, "instance", tags...)
+		return runInstance(t, srv, tagRegion, withTagSpec(p, 2, "volume", "Owner", "platform"))
+	}, func(id string) (string, url.Values) { return "DescribeInstances", url.Values{"InstanceId.1": {id}} }},
+}
+
+func describedTags(t *testing.T, srv *httptest.Server, k taggedKind, id string) map[string]string {
+	t.Helper()
+	action, params := k.describe(id)
+	resp, body := ec2Call(t, srv, tagRegion, action, params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", action, body)
+	require.Contains(t, string(body), id, "%s", action)
+	return tagSetIn(t, body)
+}
+
+func TestEC2_TagsRoundTripPerResourceType(t *testing.T) {
+	for _, k := range taggedKinds {
+		t.Run(k.resourceType, func(t *testing.T) {
+			srv := newTestServer(t, ":memory:")
+			id := k.create(t, srv, "Name", "v1", "env", "dev", "team", "x")
+			assert.Equal(t, map[string]string{"Name": "v1", "env": "dev", "team": "x"},
+				describedTags(t, srv, k, id), "TagSpecification in tagSet")
+
+			resp, body := ec2Call(t, srv, tagRegion, "CreateTags",
+				tagParams(url.Values{"ResourceId.1": {id}}, "Tag.", "Name", "v2", "extra", ""))
+			require.Equal(t, http.StatusOK, resp.StatusCode, "CreateTags: %s", body)
+			assert.Equal(t, map[string]string{"Name": "v2", "env": "dev", "team": "x", "extra": ""},
+				describedTags(t, srv, k, id), "CreateTags adds and overwrites")
+
+			resp, body = ec2Call(t, srv, tagRegion, "DeleteTags", url.Values{
+				"ResourceId.1": {id}, "Tag.1.Key": {"env"}, "Tag.2.Key": {"team"}, "Tag.2.Value": {"wrong"},
+			})
+			require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteTags: %s", body)
+			assert.Equal(t, map[string]string{"Name": "v2", "team": "x", "extra": ""},
+				describedTags(t, srv, k, id), "key-only removes; a mismatched value keeps the tag")
+
+			resp, body = ec2Call(t, srv, tagRegion, "DeleteTags", tagParams(url.Values{"ResourceId.1": {id}}, "Tag.", "team", "x"))
+			require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteTags: %s", body)
+			assert.Equal(t, map[string]string{"Name": "v2", "extra": ""},
+				describedTags(t, srv, k, id), "key+value removes")
+
+			got := describeTags(t, srv, tagRegion, url.Values{
+				"Filter.1.Name": {"resource-id"}, "Filter.1.Value.1": {id},
+				"Filter.2.Name": {"key"}, "Filter.2.Value.1": {"Name"},
+			})
+			assert.Equal(t, []describeTag{{ResourceId: id, ResourceType: k.resourceType, Key: "Name", Value: "v2"}}, got, "DescribeTags")
+		})
+	}
+}
+
+func TestEC2_TagsNetworkInterfaceSpecAndFilters(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	n := newInstanceNet(t, srv, tagRegion, "10.0.0.0/16", "10.0.1.0/24")
+	id := runInstance(t, srv, tagRegion, withTagSpec(withTagSpec(nicParams(n.subnet, n.sgs[:1], false),
+		1, "instance", "Name", "web"), 2, "network-interface", "Name", "web-eni"))
+	inst, raw := describeInstance(t, srv, tagRegion, id)
+	require.Len(t, inst.ENIs, 1, "networkInterfaceSet: %s", raw)
+	eniID := inst.ENIs[0].ID
+
+	got := describeTags(t, srv, tagRegion, url.Values{"Filter.1.Name": {"resource-type"}, "Filter.1.Value.1": {"network-interface"}})
+	assert.Equal(t, []describeTag{{ResourceId: eniID, ResourceType: "network-interface", Key: "Name", Value: "web-eni"}}, got)
+	assert.Len(t, describeTags(t, srv, tagRegion, nil), 2, "unfiltered")
+	assert.Empty(t, describeTags(t, srv, "eu-west-1", nil), "other region")
+
+	resp, _ := ec2Call(t, srv, tagRegion, "DescribeTags", url.Values{"Filter.1.Name": {"tag:Name"}, "Filter.1.Value.1": {"web"}})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "unsupported filter is refused, not ignored")
+
+	resp, body := ec2Call(t, srv, tagRegion, "TerminateInstances", url.Values{"InstanceId.1": {id}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "TerminateInstances: %s", body)
+	got = describeTags(t, srv, tagRegion, nil)
+	assert.Equal(t, []describeTag{{ResourceId: id, ResourceType: "instance", Key: "Name", Value: "web"}}, got,
+		"the deleted ENI's tags go; the terminated instance keeps its own")
+}
+
+func TestEC2_TagsUnknownResource(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	for id, code := range map[string]string{
+		"vpc-doesnotexist":    "InvalidVpcID.NotFound",
+		"subnet-doesnotexist": "InvalidSubnetID.NotFound",
+		"igw-doesnotexist":    "InvalidInternetGatewayID.NotFound",
+		"rtb-doesnotexist":    "InvalidRouteTableID.NotFound",
+		"sg-doesnotexist":     "InvalidGroup.NotFound",
+		"i-doesnotexist":      "InvalidInstanceID.NotFound",
+		"eni-doesnotexist":    "InvalidNetworkInterfaceID.NotFound",
+		"vol-0123":            "InvalidID",
+	} {
+		for _, action := range []string{"CreateTags", "DeleteTags"} {
+			resp, body := ec2Call(t, srv, tagRegion, action, tagParams(url.Values{"ResourceId.1": {id}}, "Tag.", "k", "v"))
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s %s: %s", action, id, body)
+			assert.Equal(t, code, extractEC2Tag(body, "Code"), "%s %s: %s", action, id, body)
+		}
+	}
+
+	// A known VPC alongside an unknown one tags neither.
+	vpc := tagVPC(t, srv)
+	resp, _ := ec2Call(t, srv, tagRegion, "CreateTags",
+		tagParams(url.Values{"ResourceId.1": {vpc}, "ResourceId.2": {"vpc-doesnotexist"}}, "Tag.", "k", "v"))
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Empty(t, describeTags(t, srv, tagRegion, nil))
+}
+
+func TestEC2_TagSpecificationWrongResourceType(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, body := ec2Call(t, srv, tagRegion, "CreateVpc",
+		withTagSpec(url.Values{"CidrBlock": {"10.0.0.0/16"}}, 1, "subnet", "Name", "x"))
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "CreateVpc: %s", body)
+	assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"), "%s", body)
+	_, body = ec2Call(t, srv, tagRegion, "DescribeVpcs", nil)
+	assert.NotContains(t, string(body), "vpc-", "refused create leaves no VPC")
+}
+
+func TestEC2_TagsGoWithResourceAndReset(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	vpc := taggedKinds[0].create(t, srv, "Name", "a")
+	subnet := createOK(t, srv, "CreateSubnet", "subnetId",
+		withTagSpec(url.Values{"VpcId": {vpc}, "CidrBlock": {"10.0.1.0/24"}}, 1, "subnet", "Name", "b"))
+	require.Len(t, describeTags(t, srv, tagRegion, nil), 2)
+
+	resp, body := ec2Call(t, srv, tagRegion, "DeleteSubnet", url.Values{"SubnetId": {subnet}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteSubnet: %s", body)
+	resp, body = ec2Call(t, srv, tagRegion, "DeleteVpc", url.Values{"VpcId": {vpc}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteVpc: %s", body)
+	assert.Empty(t, describeTags(t, srv, tagRegion, nil), "deleting a resource deletes its tags")
+
+	taggedKinds[0].create(t, srv, "Name", "c")
+	require.Len(t, describeTags(t, srv, tagRegion, nil), 1)
+	resp, _ = doPost(t, srv, "/mock/reset")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Empty(t, describeTags(t, srv, tagRegion, nil), "/mock/reset clears tags")
+}
+
+func TestContract_ec2_tags_round_trip_in_tagset(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	k := taggedKinds[0]
+	id := k.create(t, srv, "Name", "v1", "gone", "soon")
+	resp, _ := ec2Call(t, srv, tagRegion, "DeleteTags", url.Values{"ResourceId.1": {id}, "Tag.1.Key": {"gone"}, "Tag.1.Value": {"soon"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	resp, _ = ec2Call(t, srv, tagRegion, "CreateTags", tagParams(url.Values{"ResourceId.1": {id}}, "Tag.", "Name", "v2"))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, map[string]string{"Name": "v2"}, describedTags(t, srv, k, id))
+}

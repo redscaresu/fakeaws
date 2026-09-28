@@ -148,8 +148,7 @@ entries:
     working_dir_name: vpc_network
     misconfigured_exempt: true
     misconfigured_exempt_reason: "VPC has no inbound FK refs (children FK on VPC; the misconfigured target is on the children, e.g., instance_missing_subnet)."
-    updates_exempt: true
-    updates_exempt_reason: "VPC at v1 is immutable (CIDR is set on create, no UpdateVpc endpoint exists in fakeaws v1)."
+    updates_dir_name: update_vpc_network_tags
     integration_test_func_name: "^TestEC2_CreateDescribeDeleteVPC$"
   - aws_service: ec2
     aws_resource_type: aws_subnet

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -142,13 +143,11 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "DescribeInstanceTypes":
 		app.ec2DescribeInstanceTypes(w, account, region, req)
 
-	// ----- Tags (read-only) -----
-	// terraform-provider-aws calls DescribeTags on aws_instance's read
-	// path to surface launch-template ID tags into state. Real EC2
-	// returns 200 with an empty <tagSet> when nothing matches; the
-	// fakeaws default-arm 404 looked like the resource didn't exist
-	// and broke the read entirely. We don't model tag storage yet —
-	// the empty set is the correct "no tags here" answer.
+	// ----- Tags -----
+	case "CreateTags":
+		app.ec2CreateTags(w, account, region, req)
+	case "DeleteTags":
+		app.ec2DeleteTags(w, account, region, req)
 	case "DescribeTags":
 		app.ec2DescribeTags(w, account, region, req)
 
@@ -205,6 +204,7 @@ type ec2VpcXML struct {
 	IsDefault                   bool                            `xml:"isDefault"`
 	CidrBlockAssociationSet     []ec2VpcCidrBlockAssociationXML `xml:"cidrBlockAssociationSet>item"`
 	Ipv6CidrBlockAssociationSet []ec2VpcIpv6BlockAssociationXML `xml:"ipv6CidrBlockAssociationSet>item,omitempty"`
+	TagSet                      []ec2ResourceTagXML             `xml:"tagSet>item,omitempty"`
 }
 
 // ec2VpcCidrBlockAssociationXML mirrors the per-CIDR association
@@ -242,9 +242,18 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 			fmt.Errorf("CidrBlock required: %w", models.ErrConflict))
 		return
 	}
+	specs, refused := refuseTagSpecifications(w, req.Params, "vpc")
+	if refused {
+		return
+	}
 	id := "vpc-" + ec2RandID()
 	v := newEC2VPC(account, region, id, cidr)
-	if err := app.repo.CreateVPC(account, v); err != nil {
+	err := app.repo.CreateVPC(account, v)
+	if err == nil {
+		err = app.tagNew(account, region, onResource(specs["vpc"], id, "vpc"),
+			func() error { return app.repo.DeleteVPC(account, region, id) })
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -258,9 +267,15 @@ func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region s
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
+		return
+	}
 	out := ec2DescribeVpcsResult{VpcSet: make([]ec2VpcXML, 0, len(vpcs))}
 	for _, v := range vpcs {
-		out.VpcSet = append(out.VpcSet, ec2VpcToXML(v))
+		x := ec2VpcToXML(v)
+		x.TagSet = tags[v.ID]
+		out.VpcSet = append(out.VpcSet, x)
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeVpcs", &out)
 }
@@ -349,6 +364,7 @@ type ec2SubnetXML struct {
 	Ipv6Native                    bool                            `xml:"ipv6Native"`
 	Ipv6CidrBlockAssociationSet   []ec2SubnetIpv6BlockAssociation `xml:"ipv6CidrBlockAssociationSet>item,omitempty"`
 	PrivateDnsNameOptionsOnLaunch *ec2SubnetPrivateDnsOptionsXML  `xml:"privateDnsNameOptionsOnLaunch,omitempty"`
+	TagSet                        []ec2ResourceTagXML             `xml:"tagSet>item,omitempty"`
 }
 
 type ec2SubnetIpv6BlockAssociation struct {
@@ -383,9 +399,18 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 	if az == "" {
 		az = region + "a"
 	}
+	specs, refused := refuseTagSpecifications(w, req.Params, "subnet")
+	if refused {
+		return
+	}
 	id := "subnet-" + ec2RandID()
 	s := newEC2Subnet(account, region, id, vpcID, cidr, az)
-	if err := app.repo.CreateSubnet(account, s); err != nil {
+	err := app.repo.CreateSubnet(account, s)
+	if err == nil {
+		err = app.tagNew(account, region, onResource(specs["subnet"], id, "subnet"),
+			func() error { return app.repo.DeleteSubnet(account, region, id) })
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -422,6 +447,10 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
+		return
+	}
 	out := ec2DescribeSubnetsResult{SubnetSet: make([]ec2SubnetXML, 0, len(subnets))}
 	for _, s := range subnets {
 		if len(subnetIDFilter) > 0 {
@@ -429,7 +458,9 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 				continue
 			}
 		}
-		out.SubnetSet = append(out.SubnetSet, ec2SubnetToXML(s))
+		x := ec2SubnetToXML(s)
+		x.TagSet = tags[s.ID]
+		out.SubnetSet = append(out.SubnetSet, x)
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeSubnets", &out)
 }
@@ -561,6 +592,7 @@ type ec2IgwAttachmentXML struct {
 type ec2IgwXML struct {
 	InternetGatewayId string                `xml:"internetGatewayId"`
 	Attachments       []ec2IgwAttachmentXML `xml:"attachmentSet>item,omitempty"`
+	TagSet            []ec2ResourceTagXML   `xml:"tagSet>item,omitempty"`
 }
 
 type ec2CreateIgwResult struct {
@@ -580,13 +612,22 @@ func ec2IgwToXML(igw *repository.EC2InternetGateway) ec2IgwXML {
 }
 
 func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	specs, refused := refuseTagSpecifications(w, req.Params, "internet-gateway")
+	if refused {
+		return
+	}
 	id := "igw-" + ec2RandID()
 	igw := &repository.EC2InternetGateway{
 		ID: id, Region: region,
 		ARN:       awsproto.BuildEC2InternetGatewayARN(region, id),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := app.repo.CreateInternetGateway(account, igw); err != nil {
+	err := app.repo.CreateInternetGateway(account, igw)
+	if err == nil {
+		err = app.tagNew(account, region, onResource(specs["internet-gateway"], id, "internet-gateway"),
+			func() error { return app.repo.DeleteInternetGateway(account, region, id) })
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -599,9 +640,15 @@ func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, accou
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
+		return
+	}
 	out := ec2DescribeIgwsResult{InternetGatewaySet: make([]ec2IgwXML, 0, len(igws))}
 	for _, igw := range igws {
-		out.InternetGatewaySet = append(out.InternetGatewaySet, ec2IgwToXML(igw))
+		x := ec2IgwToXML(igw)
+		x.TagSet = tags[igw.ID]
+		out.InternetGatewaySet = append(out.InternetGatewaySet, x)
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInternetGateways", &out)
 }
@@ -650,6 +697,7 @@ type ec2RouteTableXML struct {
 	// Provider polls DescribeRouteTables looking for the new association
 	// in this set; without it the wait times out at 5 min.
 	Associations []ec2RouteTableAssociationXML `xml:"associationSet>item,omitempty"`
+	TagSet       []ec2ResourceTagXML           `xml:"tagSet>item,omitempty"`
 }
 
 type ec2RouteTableAssociationXML struct {
@@ -699,13 +747,22 @@ func (app *Application) ec2CreateRouteTable(w http.ResponseWriter, account, regi
 			fmt.Errorf("VpcId required: %w", models.ErrConflict))
 		return
 	}
+	specs, refused := refuseTagSpecifications(w, req.Params, "route-table")
+	if refused {
+		return
+	}
 	id := "rtb-" + ec2RandID()
 	rt := &repository.EC2RouteTable{
 		ID: id, VPCID: vpcID, Region: region,
 		ARN:       awsproto.BuildEC2RouteTableARN(region, id),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := app.repo.CreateRouteTable(account, rt); err != nil {
+	err := app.repo.CreateRouteTable(account, rt)
+	if err == nil {
+		err = app.tagNew(account, region, onResource(specs["route-table"], id, "route-table"),
+			func() error { return app.repo.DeleteRouteTable(account, region, id) })
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -765,6 +822,10 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 		x.AssociationState.State = "associated"
 		assocsByRT[a.RouteTableID] = append(assocsByRT[a.RouteTableID], x)
 	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
+		return
+	}
 	out := ec2DescribeRouteTablesResult{RouteTableSet: []ec2RouteTableXML{}}
 	if len(wanted) == 0 {
 		rts, err := app.repo.ListRouteTables(account, region)
@@ -777,6 +838,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 				RouteTableId: rt.ID, VpcId: rt.VPCID,
 				Routes:       routesByRT[rt.ID],
 				Associations: assocsByRT[rt.ID],
+				TagSet:       tags[rt.ID],
 			})
 		}
 	} else {
@@ -799,6 +861,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 				RouteTableId: rt.ID, VpcId: rt.VPCID,
 				Routes:       routesByRT[rt.ID],
 				Associations: assocsByRT[rt.ID],
+				TagSet:       tags[rt.ID],
 			})
 		}
 	}
@@ -1045,12 +1108,13 @@ func (p ec2PrefixListId) state() map[string]any {
 }
 
 type ec2SecurityGroupXML struct {
-	GroupId       string            `xml:"groupId"`
-	GroupName     string            `xml:"groupName"`
-	GroupDesc     string            `xml:"groupDescription"`
-	VpcId         string            `xml:"vpcId"`
-	IpPermissions []ec2IpPermission `xml:"ipPermissions>item,omitempty"`
-	IpPermsEgress []ec2IpPermission `xml:"ipPermissionsEgress>item,omitempty"`
+	GroupId       string              `xml:"groupId"`
+	GroupName     string              `xml:"groupName"`
+	GroupDesc     string              `xml:"groupDescription"`
+	VpcId         string              `xml:"vpcId"`
+	IpPermissions []ec2IpPermission   `xml:"ipPermissions>item,omitempty"`
+	IpPermsEgress []ec2IpPermission   `xml:"ipPermissionsEgress>item,omitempty"`
+	TagSet        []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
 }
 
 type ec2CreateSecurityGroupResult struct {
@@ -1147,6 +1211,10 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 			fmt.Errorf("GroupName, GroupDescription, and VpcId required: %w", models.ErrConflict))
 		return
 	}
+	specs, refused := refuseTagSpecifications(w, req.Params, "security-group")
+	if refused {
+		return
+	}
 	id := "sg-" + ec2RandID()
 	sg := &repository.EC2SecurityGroup{
 		ID: id, VPCID: vpcID, GroupName: groupName, Description: desc,
@@ -1154,7 +1222,12 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 		ARN:       awsproto.BuildEC2SecurityGroupARN(region, id),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := app.repo.CreateSecurityGroup(account, sg); err != nil {
+	err := app.repo.CreateSecurityGroup(account, sg)
+	if err == nil {
+		err = app.tagNew(account, region, onResource(specs["security-group"], id, "security-group"),
+			func() error { return app.repo.DeleteSecurityGroup(account, region, id) })
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -1173,6 +1246,10 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 	if len(wanted) == 0 {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("DescribeSecurityGroups without GroupId.<n> filter not yet supported: %w", models.ErrConflict))
+		return
+	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
 		return
 	}
 	out := ec2DescribeSecurityGroupsResult{SecurityGroupSet: make([]ec2SecurityGroupXML, 0, len(wanted))}
@@ -1213,6 +1290,7 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 			GroupId: sg.ID, GroupName: sg.GroupName, GroupDesc: sg.Description, VpcId: sg.VPCID,
 			IpPermissions: ingress,
 			IpPermsEgress: egress,
+			TagSet:        tags[sg.ID],
 		})
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeSecurityGroups", &out)
@@ -1519,6 +1597,7 @@ type ec2InstanceXML struct {
 	InstanceState       ec2InstanceStateXML      `xml:"instanceState"`
 	GroupSet            []ec2InstanceSGXML       `xml:"groupSet>item,omitempty"`
 	NetworkInterfaceSet []ec2NetworkInterfaceXML `xml:"networkInterfaceSet>item,omitempty"`
+	TagSet              []ec2ResourceTagXML      `xml:"tagSet>item,omitempty"`
 }
 
 // ec2NetworkInterfaceXML serves both an instance's networkInterfaceSet
@@ -1773,6 +1852,12 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 			fmt.Errorf("SubnetId, ImageId, InstanceType required: %w", models.ErrConflict))
 		return
 	}
+	// The provider adds a volume spec whenever default_tags is set;
+	// fakeaws has no volumes, so those tags are accepted and dropped.
+	specs, refused := refuseTagSpecifications(w, req.Params, "instance", "network-interface", "volume")
+	if refused {
+		return
+	}
 	// Lazy-seed canonical AMI fixtures for this region (Codex pass 9
 	// BLOCKING #1) so RunInstances and DescribeImages stay consistent
 	// regardless of which region the caller picked.
@@ -1810,7 +1895,14 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	if nw.associatePublicIP == "true" || (nw.associatePublicIP == "" && subnet.MapPublicIPOnLaunch) {
 		eni.PublicIP = ec2DerivePublicIP(eni.ID)
 	}
-	if err := app.repo.CreateInstance(account, inst, eni); err != nil {
+	err = app.repo.CreateInstance(account, inst, eni)
+	if err == nil {
+		tags := append(onResource(specs["instance"], id, "instance"),
+			onResource(specs["network-interface"], eni.ID, "network-interface")...)
+		err = app.tagNew(account, region, tags,
+			func() error { return app.repo.DeleteInstance(account, region, id) })
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -1854,14 +1946,20 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
+		return
+	}
 	out := ec2DescribeInstancesResult{
 		ReservationSet: make([]ec2ReservationXML, 0, len(instances)),
 	}
 	for _, inst := range instances {
+		x := ec2InstanceToXML(inst, enis[inst.ID])
+		x.TagSet = tags[inst.ID]
 		out.ReservationSet = append(out.ReservationSet, ec2ReservationXML{
 			ReservationId: "r-" + ec2RandID(),
 			OwnerId:       awsproto.FakeAccountID,
-			InstancesSet:  []ec2InstanceXML{ec2InstanceToXML(inst, enis[inst.ID])},
+			InstancesSet:  []ec2InstanceXML{x},
 		})
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInstances", &out)
@@ -2380,8 +2478,212 @@ func (app *Application) ec2DescribeInstanceAttribute(w http.ResponseWriter, acco
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInstanceAttribute", &out)
 }
 
-// ec2DescribeTagsResult is the response shape — an empty tagSet is a
-// valid 200 in real EC2 when no tags match the filters.
+// ----- Tags -----
+//
+// Tags are stored per resource id. The Create* calls persist their
+// TagSpecification.N; CreateTags and DeleteTags change them later
+// (terraform-provider-aws's updateTags sends DeleteTags for removed
+// keys, with their old values, then CreateTags for added and changed
+// ones); each Describe* returns them as tagSet; DescribeTags lists them.
+//
+// CRITICAL[ec2-tags-round-trip-in-tagset]: a tag given on create or by
+// CreateTags MUST come back in its resource's Describe* tagSet, and one
+// removed by DeleteTags MUST NOT. The provider sets tags and tags_all
+// from tagSet, so a dropped or stale tag plans a diff every run.
+
+type ec2ResourceTagXML struct {
+	Key   string `xml:"key"`
+	Value string `xml:"value"`
+}
+
+// ec2TaggedKind is a resource type CreateTags and DeleteTags accept,
+// recognised by its id prefix.
+type ec2TaggedKind struct {
+	prefix, resourceType, notFound string
+	get                            func(app *Application, account, region, id string) error
+}
+
+var ec2TaggedKinds = []ec2TaggedKind{
+	{"vpc-", "vpc", "InvalidVpcID.NotFound", func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetVPC(account, region, id)
+		return err
+	}},
+	{"subnet-", "subnet", "InvalidSubnetID.NotFound", func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetSubnet(account, region, id)
+		return err
+	}},
+	{"igw-", "internet-gateway", "InvalidInternetGatewayID.NotFound", func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetInternetGateway(account, region, id)
+		return err
+	}},
+	{"rtb-", "route-table", "InvalidRouteTableID.NotFound", func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetRouteTable(account, region, id)
+		return err
+	}},
+	{"sg-", "security-group", "InvalidGroup.NotFound", func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetSecurityGroup(account, region, id)
+		return err
+	}},
+	{"i-", "instance", "InvalidInstanceID.NotFound", func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetInstance(account, region, id)
+		return err
+	}},
+	{"eni-", "network-interface", "InvalidNetworkInterfaceID.NotFound", func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetNetworkInterface(account, region, id)
+		return err
+	}},
+}
+
+// parseTags reads a flattened <prefix>N.Key / <prefix>N.Value list.
+func parseTags(p url.Values, prefix string) []repository.EC2Tag {
+	var out []repository.EC2Tag
+	for _, it := range queryListItems(p, prefix) {
+		out = append(out, repository.EC2Tag{Key: p.Get(it + "Key"), Value: p.Get(it + "Value")})
+	}
+	return out
+}
+
+// tagSpecifications reads TagSpecification.N as resource type → tags,
+// or returns the InvalidParameterValue message for a type the
+// operation cannot tag.
+func tagSpecifications(p url.Values, allowed ...string) (map[string][]repository.EC2Tag, string) {
+	out := map[string][]repository.EC2Tag{}
+	for _, spec := range queryListItems(p, "TagSpecification.") {
+		rt := p.Get(spec + "ResourceType")
+		if !slices.Contains(allowed, rt) {
+			return nil, fmt.Sprintf("'%s' is not a valid taggable resource type for this operation.", rt)
+		}
+		out[rt] = append(out[rt], parseTags(p, spec+"Tag.")...)
+	}
+	return out, ""
+}
+
+// refuseTagSpecifications parses TagSpecification.N and writes
+// InvalidParameterValue when a type is not in allowed.
+func refuseTagSpecifications(w http.ResponseWriter, p url.Values, allowed ...string) (map[string][]repository.EC2Tag, bool) {
+	specs, msg := tagSpecifications(p, allowed...)
+	if msg != "" {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue", msg)
+		return nil, true
+	}
+	return specs, false
+}
+
+// onResource stamps tags with the id and type of the resource they go on.
+func onResource(tags []repository.EC2Tag, id, resourceType string) []repository.EC2Tag {
+	out := make([]repository.EC2Tag, len(tags))
+	for i, t := range tags {
+		t.ResourceID, t.ResourceType = id, resourceType
+		out[i] = t
+	}
+	return out
+}
+
+// tagNew stores the tags of resources a Create* call just made. If
+// that fails it deletes them with undo, so the create is all or nothing.
+func (app *Application) tagNew(account, region string, tags []repository.EC2Tag, undo func() error) error {
+	if err := app.repo.PutTags(account, region, tags); err != nil {
+		return errors.Join(err, undo())
+	}
+	return nil
+}
+
+// tagSets returns each resource's tagSet by id, account-wide. It
+// writes the error itself and reports false when the lookup fails.
+func (app *Application) tagSets(w http.ResponseWriter, account string) (map[string][]ec2ResourceTagXML, bool) {
+	tags, err := app.repo.ListTags(account, "")
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return nil, false
+	}
+	out := map[string][]ec2ResourceTagXML{}
+	for _, t := range tags {
+		out[t.ResourceID] = append(out[t.ResourceID], ec2ResourceTagXML{Key: t.Key, Value: t.Value})
+	}
+	return out, true
+}
+
+// taggableResources resolves each ResourceId.N to its EC2 resource
+// type. It writes the typed NotFound code for a missing resource, and
+// InvalidID for an id of a type fakeaws cannot tag, and then reports
+// false.
+func (app *Application) taggableResources(w http.ResponseWriter, account, region string, p url.Values) (map[string]string, bool) {
+	ids := queryListValues(p, "ResourceId.")
+	if len(ids) == 0 {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
+			fmt.Errorf("ResourceId.N required: %w", models.ErrConflict))
+		return nil, false
+	}
+	out := make(map[string]string, len(ids))
+	for _, id := range ids {
+		i := slices.IndexFunc(ec2TaggedKinds, func(k ec2TaggedKind) bool { return strings.HasPrefix(id, k.prefix) })
+		if i < 0 {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				"InvalidID", fmt.Sprintf("The ID '%s' is not valid", id))
+			return nil, false
+		}
+		kind := ec2TaggedKinds[i]
+		err := kind.get(app, account, region, id)
+		if errors.Is(err, models.ErrNotFound) {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				kind.notFound, fmt.Sprintf("The ID '%s' does not exist", id))
+			return nil, false
+		}
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return nil, false
+		}
+		out[id] = kind.resourceType
+	}
+	return out, true
+}
+
+func (app *Application) ec2CreateTags(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	resources, ok := app.taggableResources(w, account, region, req.Params)
+	if !ok {
+		return
+	}
+	add := parseTags(req.Params, "Tag.")
+	if len(add) == 0 {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
+			fmt.Errorf("Tag.N required: %w", models.ErrConflict))
+		return
+	}
+	var tags []repository.EC2Tag
+	for id, rt := range resources {
+		tags = append(tags, onResource(add, id, rt)...)
+	}
+	if err := app.repo.PutTags(account, region, tags); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	app.ec2NoOpSuccess(w, "CreateTags")
+}
+
+// ec2DeleteTags removes each Tag.N by key, or by key and value when a
+// Value is sent (an empty one included), and every tag when no Tag.N
+// is sent, as EC2 does.
+func (app *Application) ec2DeleteTags(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	resources, ok := app.taggableResources(w, account, region, req.Params)
+	if !ok {
+		return
+	}
+	var matches []repository.EC2TagMatch
+	for _, it := range queryListItems(req.Params, "Tag.") {
+		m := repository.EC2TagMatch{Key: req.Params.Get(it + "Key")}
+		if req.Params.Has(it + "Value") {
+			v := req.Params.Get(it + "Value")
+			m.Value = &v
+		}
+		matches = append(matches, m)
+	}
+	if err := app.repo.DeleteTags(account, slices.Collect(maps.Keys(resources)), matches); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	app.ec2NoOpSuccess(w, "DeleteTags")
+}
+
 type ec2DescribeTagsResult struct {
 	TagSet []ec2TagXML `xml:"tagSet>item"`
 }
@@ -2393,14 +2695,49 @@ type ec2TagXML struct {
 	Value        string `xml:"value"`
 }
 
-// ec2DescribeTags returns an empty tag set. fakeaws doesn't model
-// instance-level tag storage yet — the terraform-provider-aws read
-// path uses DescribeTags to look up launch-template ID tags on the
-// instance, and the correct "no tags here" response is 200 + empty
-// set, not 404 (which the provider treats as a transient/missing
-// resource error and bails out).
+// tagFilterValues maps each DescribeTags filter fakeaws supports to a
+// tag's value for it. The provider filters by resource-id, and by key
+// for single-tag lookups (the instance read's launch-template tags).
+var tagFilterValues = map[string]func(repository.EC2Tag) string{
+	"resource-id":   func(t repository.EC2Tag) string { return t.ResourceID },
+	"resource-type": func(t repository.EC2Tag) string { return t.ResourceType },
+	"key":           func(t repository.EC2Tag) string { return t.Key },
+	"value":         func(t repository.EC2Tag) string { return t.Value },
+}
+
+// ec2DescribeTags lists the region's tags matching every filter; no
+// match is a 200 with an empty tagSet. An unsupported filter is
+// refused rather than ignored.
 func (app *Application) ec2DescribeTags(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	awsproto.WriteEC2QueryRPCResponse(w, "DescribeTags", &ec2DescribeTagsResult{TagSet: []ec2TagXML{}})
+	filters := ec2Filters(req.Params)
+	for name := range filters {
+		if tagFilterValues[name] == nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
+				fmt.Errorf("DescribeTags filter %q not supported by fakeaws: %w", name, models.ErrConflict))
+			return
+		}
+	}
+	tags, err := app.repo.ListTags(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	out := ec2DescribeTagsResult{TagSet: []ec2TagXML{}}
+	for _, t := range tags {
+		if tagMatches(t, filters) {
+			out.TagSet = append(out.TagSet, ec2TagXML{ResourceId: t.ResourceID, ResourceType: t.ResourceType, Key: t.Key, Value: t.Value})
+		}
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeTags", &out)
+}
+
+func tagMatches(t repository.EC2Tag, filters map[string][]string) bool {
+	for name, want := range filters {
+		if !slices.Contains(want, tagFilterValues[name](t)) {
+			return false
+		}
+	}
+	return true
 }
 
 // synthesizeInstanceType returns a plausible InstanceTypeInfo for any
