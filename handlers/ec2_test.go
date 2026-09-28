@@ -16,6 +16,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/redscaresu/fakeaws/handlers/awsproto"
 )
 
 // EC2 handler tests — networking surface that landed in S44-T4.
@@ -1418,6 +1420,23 @@ func TestEC2_TagsRoundTripPerResourceType(t *testing.T) {
 				"Filter.2.Name": {"key"}, "Filter.2.Value.1": {"Name"},
 			})
 			assert.Equal(t, []describeTag{{ResourceId: id, ResourceType: k.resourceType, Key: "Name", Value: "v2"}}, got, "DescribeTags")
+		})
+	}
+}
+
+// TestEC2_DescribeCarriesOwnerID: the provider builds the internet
+// gateway, route table and security group ARNs from the described
+// ownerId and stores it as owner_id, so an empty one leaves both
+// without the account.
+func TestEC2_DescribeCarriesOwnerID(t *testing.T) {
+	for _, k := range taggedKinds {
+		t.Run(k.resourceType, func(t *testing.T) {
+			srv := newTestServer(t, ":memory:")
+			id := k.create(t, srv)
+			action, params := k.describe(id)
+			resp, body := ec2Call(t, srv, tagRegion, action, params)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", action, body)
+			assert.Equal(t, awsproto.FakeAccountID, extractEC2Tag(body, "ownerId"), "%s: %s", action, body)
 		})
 	}
 }

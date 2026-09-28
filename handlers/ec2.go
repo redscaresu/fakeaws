@@ -591,6 +591,7 @@ type ec2IgwAttachmentXML struct {
 
 type ec2IgwXML struct {
 	InternetGatewayId string                `xml:"internetGatewayId"`
+	OwnerId           string                `xml:"ownerId"`
 	Attachments       []ec2IgwAttachmentXML `xml:"attachmentSet>item,omitempty"`
 	TagSet            []ec2ResourceTagXML   `xml:"tagSet>item,omitempty"`
 }
@@ -604,7 +605,7 @@ type ec2DescribeIgwsResult struct {
 }
 
 func ec2IgwToXML(igw *repository.EC2InternetGateway) ec2IgwXML {
-	out := ec2IgwXML{InternetGatewayId: igw.ID}
+	out := ec2IgwXML{InternetGatewayId: igw.ID, OwnerId: awsproto.FakeAccountID}
 	if igw.VPCID != "" {
 		out.Attachments = []ec2IgwAttachmentXML{{VpcId: igw.VPCID, State: "available"}}
 	}
@@ -689,6 +690,7 @@ func (app *Application) ec2DeleteInternetGateway(w http.ResponseWriter, account,
 type ec2RouteTableXML struct {
 	RouteTableId string `xml:"routeTableId"`
 	VpcId        string `xml:"vpcId"`
+	OwnerId      string `xml:"ownerId"`
 	// routeSet must appear in DescribeRouteTables responses so the
 	// provider's CreateRoute wait-loop can confirm the new entry
 	// landed (otherwise: 5-minute timeout per iter).
@@ -767,7 +769,7 @@ func (app *Application) ec2CreateRouteTable(w http.ResponseWriter, account, regi
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateRouteTable",
-		&ec2CreateRouteTableResult{RouteTable: ec2RouteTableXML{RouteTableId: rt.ID, VpcId: rt.VPCID}})
+		&ec2CreateRouteTableResult{RouteTable: ec2RouteTableXML{RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: awsproto.FakeAccountID}})
 }
 
 // ec2NoOpSuccess returns a minimal 200 response for EC2 actions we
@@ -835,7 +837,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 		}
 		for _, rt := range rts {
 			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableXML{
-				RouteTableId: rt.ID, VpcId: rt.VPCID,
+				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: awsproto.FakeAccountID,
 				Routes:       routesByRT[rt.ID],
 				Associations: assocsByRT[rt.ID],
 				TagSet:       tags[rt.ID],
@@ -858,7 +860,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 				return
 			}
 			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableXML{
-				RouteTableId: rt.ID, VpcId: rt.VPCID,
+				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: awsproto.FakeAccountID,
 				Routes:       routesByRT[rt.ID],
 				Associations: assocsByRT[rt.ID],
 				TagSet:       tags[rt.ID],
@@ -1112,6 +1114,7 @@ type ec2SecurityGroupXML struct {
 	GroupName     string              `xml:"groupName"`
 	GroupDesc     string              `xml:"groupDescription"`
 	VpcId         string              `xml:"vpcId"`
+	OwnerId       string              `xml:"ownerId"`
 	IpPermissions []ec2IpPermission   `xml:"ipPermissions>item,omitempty"`
 	IpPermsEgress []ec2IpPermission   `xml:"ipPermissionsEgress>item,omitempty"`
 	TagSet        []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
@@ -1288,6 +1291,7 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 		}
 		out.SecurityGroupSet = append(out.SecurityGroupSet, ec2SecurityGroupXML{
 			GroupId: sg.ID, GroupName: sg.GroupName, GroupDesc: sg.Description, VpcId: sg.VPCID,
+			OwnerId:       awsproto.FakeAccountID,
 			IpPermissions: ingress,
 			IpPermsEgress: egress,
 			TagSet:        tags[sg.ID],

@@ -222,3 +222,23 @@ func mustWrite(t *testing.T, path, contents string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(path, []byte(contents), 0o644), "write %s", path)
 }
+
+// TestAgentsMDListsEveryContract keeps AGENTS.md's "Current contracts"
+// list equal to the CRITICAL/MUST ids in handlers/*.go.
+func TestAgentsMDListsEveryContract(t *testing.T) {
+	dir, err := os.Getwd()
+	require.NoError(t, err, "getwd")
+	raw, err := os.ReadFile(filepath.Join(dir, "..", "AGENTS.md"))
+	require.NoError(t, err, "read AGENTS.md")
+
+	_, list, found := strings.Cut(string(raw), "Current contracts")
+	require.True(t, found, "AGENTS.md has no \"Current contracts\" list")
+	list, _, _ = strings.Cut(list, "\n")
+	listed := map[string]struct{}{}
+	for _, m := range regexp.MustCompile("`([a-z0-9][a-z0-9-]*)`").FindAllStringSubmatch(list, -1) {
+		listed[m[1]] = struct{}{}
+	}
+
+	source, _ := scanContractIDs(t, dir)
+	require.Equal(t, sortedKeys(source), sortedKeys(listed), "AGENTS.md contract list")
+}

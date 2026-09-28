@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (web_step_one example, 2026-09-28)
+- **`examples/working/web_step_one`**: the step-one web stack (VPC, public subnet, internet gateway, route table + route + association, a security group with HTTP from 0.0.0.0/0 and allow-all egress, and one AL2023-fixture instance with `associate_public_ip_address`, `user_data` and tags) under a provider block of only `region`, `s3_use_path_style`, `default_tags` and `allowed_account_ids = ["000000000000"]`: no keys, `skip_*` or endpoints block, so it applies only through the harness's `smokeEnv`.
+- **`examples/web_step_one_state_test.go`** (gated like the smoke harness): applies it, reads `tofu show -json`, and fails unless `aws_instance.public_ip` is set and every `arn` and `owner_id` carries `000000000000`, then destroys.
+- `TestAgentsMDListsEveryContract` keeps AGENTS.md's contract list equal to the `CRITICAL`/`MUST` ids in `handlers/*.go`; the list gains the five contracts added since it was written.
+
+### Fixed (EC2 ownerId, 2026-09-28)
+- **DescribeInternetGateways, DescribeRouteTables and DescribeSecurityGroups return `ownerId`** (`000000000000`), as CreateInternetGateway and CreateRouteTable now do too. The provider builds those resources' ARNs from it and stores it as `owner_id`, which were `arn:aws:ec2:us-east-1::…` and empty before.
+
 ### Added (EC2 tags, 2026-09-28)
 - **Tags round-trip on VPCs, subnets, internet gateways, route tables, security groups and instances.** `TagSpecification.N` is stored on CreateVpc, CreateSubnet, CreateInternetGateway, CreateRouteTable, CreateSecurityGroup and RunInstances (`instance` and `network-interface`; the `volume` spec the provider adds with `default_tags` is accepted and dropped, as fakeaws has no volumes). A spec for any other resource type answers 400 `InvalidParameterValue` and creates nothing. Each Describe* returns the resource's tags as `tagSet`.
 - **CreateTags and DeleteTags land** (they were the 404 default arm). DeleteTags removes a `Tag.N` by key, or by key and value when `Value` is sent, and every tag when no `Tag.N` is sent. An unknown id answers 400 with its type's code (`InvalidVpcID.NotFound`, `InvalidSubnetID.NotFound`, `InvalidInternetGatewayID.NotFound`, `InvalidRouteTableID.NotFound`, `InvalidGroup.NotFound`, `InvalidInstanceID.NotFound`, `InvalidNetworkInterfaceID.NotFound`) and changes nothing; an id of a type fakeaws does not tag answers `InvalidID`.

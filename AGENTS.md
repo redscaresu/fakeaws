@@ -148,7 +148,7 @@ fakeaws is **reactive**: declined Smithy codegen (see `concepts.md` § "Why no S
 
 ## Contract-coverage convention (canonical across all 4 sibling fakes)
 
-`handlers/contract_audit_test.go` enforces the `CRITICAL[<id>]:` / `MUST[<id>]:` docstring → `TestContract_<id>` test pairing across `handlers/*.go`. A wire-shape invariant the consuming `terraform-provider-aws` depends on must NOT live as a comment alone — drift becomes a failed `go test`, not a missed code review. Current contracts (as of S130 fakeaws sibling rollout): `rds-dbi-resource-id-distinct-from-identifier`, `kms-soft-delete-state-pending-deletion`, `secretsmanager-soft-delete-state-pending-deletion`, `route53-records-sorted-lexicographically`. Same convention live across mockway/fakegcp/fakegenesys.
+`handlers/contract_audit_test.go` enforces the `CRITICAL[<id>]:` / `MUST[<id>]:` docstring → `TestContract_<id>` test pairing across `handlers/*.go`. A wire-shape invariant the consuming `terraform-provider-aws` depends on must NOT live as a comment alone — drift becomes a failed `go test`, not a missed code review. Current contracts (`TestAgentsMDListsEveryContract` keeps this list equal to the source): `ec2-instance-public-ip-from-primary-eni`, `ec2-sg-rule-source-descriptions-round-trip`, `ec2-tags-round-trip-in-tagset`, `kms-soft-delete-state-pending-deletion`, `rds-dbi-resource-id-distinct-from-identifier`, `route53-records-sorted-lexicographically`, `secretsmanager-soft-delete-state-pending-deletion`, `ssm-put-parameter-no-overwrite-cas`, `sts-caller-identity-fake-account`. Same convention live across mockway/fakegcp/fakegenesys.
 
 ## Where to find AWS resource shapes
 
