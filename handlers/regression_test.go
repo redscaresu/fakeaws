@@ -965,6 +965,45 @@ func TestRegressionSecretsManagerTerminalStateWireShape(t *testing.T) {
 	assert.Contains(t, string(body), "InvalidRequestException", "RestoreSecret terminal-state body: must carry InvalidRequestException, got: %s", body)
 }
 
+// TestRegressionRDSParameterGroupInUseDeleteIsRetryable pins the
+// updates/update_rds_parameter_group destroy flake: deleting a parameter
+// group an instance still names must answer InvalidDBParameterGroupState,
+// the code terraform-provider-aws retries on while the parallel instance
+// delete finishes. The generic ResourceInUseException failed destroy at once.
+func TestRegressionRDSParameterGroupInUseDeleteIsRetryable(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+	_, sa, sb := rdsCreateVPCAndSubnets(t, srv, region)
+	rdsCall(t, srv, region, "CreateDBSubnetGroup", url.Values{
+		"DBSubnetGroupName":        {"default"},
+		"DBSubnetGroupDescription": {"d"},
+		"SubnetIds.member.1":       {sa},
+		"SubnetIds.member.2":       {sb},
+	})
+	rdsCall(t, srv, region, "CreateDBParameterGroup", url.Values{
+		"DBParameterGroupName":   {"pg15"},
+		"DBParameterGroupFamily": {"postgres15"},
+		"Description":            {"pg15"},
+	})
+	resp, body := rdsCall(t, srv, region, "CreateDBInstance", url.Values{
+		"DBInstanceIdentifier": {"db-1"},
+		"Engine":               {"postgres"},
+		"DBInstanceClass":      {"db.t3.micro"},
+		"DBSubnetGroupName":    {"default"},
+		"DBParameterGroupName": {"pg15"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateDBInstance: %s", body)
+
+	resp, body = rdsCall(t, srv, region, "DeleteDBParameterGroup", url.Values{"DBParameterGroupName": {"pg15"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "delete in-use group: %s", body)
+	assert.Contains(t, string(body), "<Code>InvalidDBParameterGroupState</Code>", "delete in-use group")
+
+	resp, body = rdsCall(t, srv, region, "DeleteDBInstance", url.Values{"DBInstanceIdentifier": {"db-1"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteDBInstance: %s", body)
+	resp, body = rdsCall(t, srv, region, "DeleteDBParameterGroup", url.Values{"DBParameterGroupName": {"pg15"}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "retry after instance delete: %s", body)
+}
+
 // ----- test helpers (regression-suite local) -----
 
 const regressionVersion = "2010-05-08"

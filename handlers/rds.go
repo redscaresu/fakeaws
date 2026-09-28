@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -312,7 +313,18 @@ func (app *Application) rdsDescribeDBParameterGroups(w http.ResponseWriter, acco
 }
 
 func (app *Application) rdsDeleteDBParameterGroup(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteDBParameterGroup(account, region, req.Params.Get("DBParameterGroupName")); err != nil {
+	name := req.Params.Get("DBParameterGroupName")
+	err := app.repo.DeleteDBParameterGroup(account, region, name)
+	if errors.Is(err, models.ErrInUse) {
+		// Real RDS's code, and the one terraform-provider-aws retries the
+		// delete on (3m): tofu deletes a group in parallel with an instance
+		// that names it through a variable, not a reference.
+		awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusBadRequest,
+			"InvalidDBParameterGroupState",
+			fmt.Sprintf("One or more database instances are still members of parameter group %s.", name))
+		return
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
