@@ -1110,6 +1110,30 @@ func TestEC2_KeyPairImportDescribeDelete(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteKeyPair")
 }
 
+// The AWS scope reap deletes a key pair by the KeyPairId the sweep lists.
+func TestEC2_DeleteKeyPairByID(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const region = "us-east-1"
+
+	resp, body := ec2Call(t, srv, region, "ImportKeyPair", url.Values{
+		"KeyName":           {"deploy"},
+		"PublicKeyMaterial": {"ssh-rsa AAAAB3NzaC1yc2E"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ImportKeyPair: %s", body)
+	id := extractEC2Tag(body, "keyPairId")
+	require.NotEmpty(t, id, "ImportKeyPair: %s", body)
+
+	resp, body = ec2Call(t, srv, region, "DeleteKeyPair", url.Values{"KeyPairId": {id}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteKeyPair by id: %s", body)
+
+	resp, body = ec2Call(t, srv, region, "DescribeKeyPairs", nil)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.NotContains(t, string(body), id, "DescribeKeyPairs after the delete: %s", body)
+
+	resp, _ = ec2Call(t, srv, region, "DeleteKeyPair", url.Values{"KeyPairId": {id}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteKeyPair of a missing id")
+}
+
 func TestEC2_DescribeImagesFixtures(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	const region = "us-east-1"

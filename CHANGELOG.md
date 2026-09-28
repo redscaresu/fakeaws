@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (DeleteKeyPair by KeyPairId, 2026-09-29)
+- **DeleteKeyPair takes `KeyPairId`**, as EC2 does: the `key-...` id DescribeKeyPairs lists and the AWS scope reap deletes by. It read only `KeyName`, so a delete by id answered 404 and left the key pair. `TestEC2_DeleteKeyPairByID` pins it.
+
 ### Added (the EC2 Describes the AWS scope sweep calls, 2026-09-28)
 - **An unfiltered DescribeAddresses lists every Elastic IP in the region**; it described nothing without `AllocationId.N`. DescribeAddressesAttribute does the same.
 - **An unfiltered DescribeSecurityGroups lists every group in the region**; it answered 409.
