@@ -1346,9 +1346,9 @@ func ipPermissionProblem(p ec2IpPermission) string {
 		return tcpUDPPortProblem(p)
 	case "icmp", "icmpv6", "1", "58":
 		return icmpProblem(p)
-	case "-1", "all":
-		// The provider maps "all" to -1 before sending. A literal "all"
-		// is admitted, though EC2 has refused it (terraform-provider-aws#1793).
+	case "-1":
+		// A literal "all" falls through and is refused, as EC2 does
+		// (terraform-provider-aws#1793); the provider sends -1 for it.
 		return ""
 	}
 	if n, err := strconv.Atoi(p.IpProtocol); err != nil || n < 0 || n > 255 {
@@ -1375,7 +1375,7 @@ func tcpUDPPortProblem(p ec2IpPermission) string {
 }
 
 // icmpProblem checks FromPort as the ICMP type and ToPort as the code;
-// -1 means all.
+// -1 means all, and all types takes only all codes.
 func icmpProblem(p ec2IpPermission) string {
 	const maxICMP = 255
 	if p.FromPort < -1 || p.FromPort > maxICMP {
@@ -1383,6 +1383,9 @@ func icmpProblem(p ec2IpPermission) string {
 	}
 	if p.ToPort < -1 || p.ToPort > maxICMP {
 		return fmt.Sprintf("ICMP code (%d) out of range", p.ToPort)
+	}
+	if p.FromPort == -1 && p.ToPort != -1 {
+		return fmt.Sprintf("ICMP code (%d) must be -1 when the ICMP type is -1 (all types)", p.ToPort)
 	}
 	return ""
 }

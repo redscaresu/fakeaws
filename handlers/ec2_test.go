@@ -583,13 +583,14 @@ func sgPerm(proto, from, to, cidr string) url.Values {
 //   - CIDR: "CIDR block ::/0 is malformed" (aws-cli#2846,
 //     hashicorp/terraform#14382)
 //   - port range: "TCP/UDP (from) port (-1) out of range" (aws-cli#1066)
-//   - protocol: "Invalid value 'esp' for IP protocol. Unknown protocol."
-//     (hashicorp/terraform#9092)
+//   - protocol: "Invalid value 'all' for IP protocol. Unknown protocol."
+//     (terraform-provider-aws#1793); 'esp' likewise (hashicorp/terraform#9092)
 //   - ICMP: "ICMP code (65535) out of range"
 //     (terraform-aws-modules/terraform-aws-security-group#7)
 //
-// Neither AWS nor moto documents a message for FromPort > ToPort, so
-// that one is fakeaws's own.
+// Neither AWS nor moto documents a message for FromPort > ToPort, or
+// for ICMP type -1 with a specific code (the AuthorizeSecurityGroupIngress
+// reference documents the rule), so those two are fakeaws's own.
 func TestEC2_SecurityGroupRuleValidation(t *testing.T) {
 	const region = "us-east-1"
 	srv, sgID, _ := newSGPair(t, region)
@@ -610,9 +611,11 @@ func TestEC2_SecurityGroupRuleValidation(t *testing.T) {
 		{"tcp 80->70", "AuthorizeSecurityGroupIngress", sgPerm("tcp", "80", "70", "10.0.0.0/8"), "Invalid port range 80-70 for protocol 'tcp'"},
 		{"tcp 70000", "AuthorizeSecurityGroupIngress", sgPerm("tcp", "80", "70000", "10.0.0.0/8"), "TCP/UDP (to) port (70000) out of range"},
 		{"protocol bogus", "AuthorizeSecurityGroupIngress", sgPerm("bogus", "80", "80", "10.0.0.0/8"), "Invalid value 'bogus' for IP protocol"},
+		{"protocol all", "AuthorizeSecurityGroupIngress", sgPerm("all", "", "", "10.0.0.0/8"), "Invalid value 'all' for IP protocol"},
 		{"protocol 256", "AuthorizeSecurityGroupIngress", sgPerm("256", "", "", "10.0.0.0/8"), "Invalid value '256' for IP protocol"},
 		{"protocol 6 80->70", "AuthorizeSecurityGroupIngress", sgPerm("6", "80", "70", "10.0.0.0/8"), "Invalid port range 80-70 for protocol '6'"},
 		{"icmp type 256", "AuthorizeSecurityGroupIngress", sgPerm("icmp", "256", "0", "10.0.0.0/8"), "ICMP type (256) out of range"},
+		{"icmp all types, code 0", "AuthorizeSecurityGroupIngress", sgPerm("icmp", "-1", "0", "10.0.0.0/8"), "ICMP code (0) must be -1 when the ICMP type is -1"},
 		{"egress icmpv6 code 300", "AuthorizeSecurityGroupEgress", url.Values{
 			"IpPermissions.1.IpProtocol":            {"icmpv6"},
 			"IpPermissions.1.FromPort":              {"128"},
