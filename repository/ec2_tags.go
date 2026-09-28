@@ -45,6 +45,11 @@ func init() {
 		`CREATE TRIGGER IF NOT EXISTS ec2_key_pairs_drop_tags AFTER DELETE ON ec2_key_pairs BEGIN
 			DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = json_extract(OLD.data, '$.key_pair_id');
 		END`)
+	// An EIP's row is keyed by its allocation id.
+	registeredMigrations = append(registeredMigrations,
+		`CREATE TRIGGER IF NOT EXISTS ec2_eips_drop_tags AFTER DELETE ON ec2_eips BEGIN
+			DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.allocation_id;
+		END`)
 	prependResetTables([]string{"ec2_tags"})
 }
 

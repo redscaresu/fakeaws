@@ -115,10 +115,9 @@ resource "aws_secretsmanager_secret" "tagged" {
   tags                    = var.tags
 }
 
-# No role: GetInstanceProfile does not return an attached role yet, a
-# gap separate from tags.
 resource "aws_iam_instance_profile" "tagged" {
   name = "fakeaws-tagged"
+  role = aws_iam_role.tagged.name
   tags = var.tags
 }
 

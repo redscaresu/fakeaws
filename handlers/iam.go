@@ -308,11 +308,12 @@ func (app *Application) gatherIAMStateReal() map[string]any {
 // ----- Role handlers -----
 
 // iamRoleXML is the XML projection of an IAMRole that real IAM emits
-// inside <Role>...</Role>. Per concepts.md "Anti-patterns" item 3
-// (payload field-name variations): we use the canonical AWS field
-// names exactly so terraform-provider-aws's parser doesn't complain.
+// inside <Role>...</Role>, or <member>...</member> in a list. Per
+// concepts.md "Anti-patterns" item 3 (payload field-name variations):
+// we use the canonical AWS field names exactly so
+// terraform-provider-aws's parser doesn't complain. It has no XMLName:
+// one would override the list's <member> element name.
 type iamRoleXML struct {
-	XMLName                  xml.Name    `xml:"Role"`
 	RoleName                 string      `xml:"RoleName"`
 	Path                     string      `xml:"Path"`
 	Arn                      string      `xml:"Arn"`
@@ -321,6 +322,11 @@ type iamRoleXML struct {
 	MaxSessionDuration       int         `xml:"MaxSessionDuration,omitempty"`
 	CreateDate               string      `xml:"CreateDate"`
 	Tags                     []iamTagXML `xml:"Tags>member,omitempty"`
+}
+
+// iamRoleResult is the CreateRole and GetRole payload.
+type iamRoleResult struct {
+	Role iamRoleXML `xml:"Role"`
 }
 
 func roleToXML(r *repository.IAMRole) iamRoleXML {
@@ -367,7 +373,7 @@ func (app *Application) iamCreateRole(w http.ResponseWriter, account string, req
 	}
 	r := roleToXML(role)
 	r.Tags = iamTags(tags)
-	awsproto.WriteQueryRPCResponse(w, "CreateRole", &r)
+	awsproto.WriteQueryRPCResponse(w, "CreateRole", &iamRoleResult{Role: r})
 }
 
 func (app *Application) iamGetRole(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
@@ -384,7 +390,7 @@ func (app *Application) iamGetRole(w http.ResponseWriter, account string, req aw
 	}
 	r := roleToXML(role)
 	r.Tags = iamTags(tags)
-	awsproto.WriteQueryRPCResponse(w, "GetRole", &r)
+	awsproto.WriteQueryRPCResponse(w, "GetRole", &iamRoleResult{Role: r})
 }
 
 func (app *Application) iamListRoles(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
@@ -609,14 +615,21 @@ func (app *Application) iamDeletePolicy(w http.ResponseWriter, account string, r
 
 // ----- InstanceProfile handlers -----
 
+// iamInstanceProfileXML has no XMLName, like iamRoleXML: it is also a
+// list <member>.
 type iamInstanceProfileXML struct {
-	XMLName             xml.Name     `xml:"InstanceProfile"`
 	InstanceProfileName string       `xml:"InstanceProfileName"`
 	Path                string       `xml:"Path"`
 	Arn                 string       `xml:"Arn"`
 	CreateDate          string       `xml:"CreateDate"`
 	Roles               []iamRoleXML `xml:"Roles>member,omitempty"`
 	Tags                []iamTagXML  `xml:"Tags>member,omitempty"`
+}
+
+// iamInstanceProfileResult is the CreateInstanceProfile and
+// GetInstanceProfile payload.
+type iamInstanceProfileResult struct {
+	InstanceProfile iamInstanceProfileXML `xml:"InstanceProfile"`
 }
 
 func instanceProfileToXML(p *repository.IAMInstanceProfile, attached *repository.IAMRole) iamInstanceProfileXML {
@@ -658,7 +671,7 @@ func (app *Application) iamCreateInstanceProfile(w http.ResponseWriter, account 
 	}
 	out := instanceProfileToXML(p, nil)
 	out.Tags = iamTags(tags)
-	awsproto.WriteQueryRPCResponse(w, "CreateInstanceProfile", &out)
+	awsproto.WriteQueryRPCResponse(w, "CreateInstanceProfile", &iamInstanceProfileResult{InstanceProfile: out})
 }
 
 func (app *Application) iamGetInstanceProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
@@ -679,7 +692,7 @@ func (app *Application) iamGetInstanceProfile(w http.ResponseWriter, account str
 	}
 	out := instanceProfileToXML(p, attached)
 	out.Tags = iamTags(tags)
-	awsproto.WriteQueryRPCResponse(w, "GetInstanceProfile", &out)
+	awsproto.WriteQueryRPCResponse(w, "GetInstanceProfile", &iamInstanceProfileResult{InstanceProfile: out})
 }
 
 func (app *Application) iamListInstanceProfiles(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {

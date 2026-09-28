@@ -155,6 +155,20 @@ type RDSCluster struct {
 	Region                    string `json:"region"`
 	ARN                       string `json:"arn"`
 	CreatedAt                 string `json:"created_at"`
+	// Echoed back verbatim by DescribeDBClusters, like RDSInstance's
+	// blob-only fields: aws_rds_cluster plans a diff, or a replacement,
+	// on any it set that reads back different.
+	EngineMode                       string   `json:"engine_mode,omitempty"`
+	Port                             int      `json:"port,omitempty"`
+	BackupRetentionPeriod            int      `json:"backup_retention_period,omitempty"`
+	PreferredBackupWindow            string   `json:"preferred_backup_window,omitempty"`
+	PreferredMaintenanceWindow       string   `json:"preferred_maintenance_window,omitempty"`
+	DatabaseName                     string   `json:"database_name,omitempty"`
+	StorageEncrypted                 bool     `json:"storage_encrypted,omitempty"`
+	CopyTagsToSnapshot               bool     `json:"copy_tags_to_snapshot,omitempty"`
+	IAMDatabaseAuthenticationEnabled bool     `json:"iam_database_authentication_enabled,omitempty"`
+	AvailabilityZones                []string `json:"availability_zones,omitempty"`
+	VPCSecurityGroupIDs              []string `json:"vpc_security_group_ids,omitempty"`
 }
 
 type RDSInstance struct {

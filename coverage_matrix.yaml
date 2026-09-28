@@ -298,8 +298,7 @@ entries:
     working_exempt_reason: "EIP allocate/describe/release is exercised in TestEC2_EIPLifecycle; aws-vpc-network.yaml doesn't demand a public EIP at v1."
     misconfigured_exempt: true
     misconfigured_exempt_reason: "Domain=standard rejection asserted in TestEC2_EIPLifecycle; standalone misconfigured tofu example would duplicate."
-    updates_exempt: true
-    updates_exempt_reason: "EIP attributes are set-once at v1 (no UpdateEIP)."
+    updates_dir_name: update_default_tags
     integration_test_func_name: "^TestEC2_EIPLifecycle$"
   - aws_service: ec2
     aws_resource_type: aws_key_pair
@@ -318,8 +317,7 @@ entries:
     working_exempt_reason: "Aurora cluster lifecycle is asserted in TestCoverage_RDSCluster (CreateDBCluster + DescribeDBClusters + DeleteDBCluster). aws-rds.yaml currently uses a single instance — Aurora-specific scenario reconsidered if/when scenarios require it."
     misconfigured_exempt: true
     misconfigured_exempt_reason: "Cluster FK violations (missing subnet group, missing param group, deletion_protection refusal) covered by repository tests."
-    updates_exempt: true
-    updates_exempt_reason: "Cluster modify is no-op at v1 (cluster_parameter_group attachment is set-once)."
+    updates_dir_name: update_default_tags
     integration_test_func_name: "^TestCoverage_RDSCluster$"
   - aws_service: rds
     aws_resource_type: aws_rds_cluster_parameter_group
@@ -327,8 +325,7 @@ entries:
     working_exempt_reason: "Cluster parameter group create/describe/delete is exercised in TestCoverage_RDSParameterGroupDescribe alongside the instance parameter group."
     misconfigured_exempt: true
     misconfigured_exempt_reason: "No misconfigured paths beyond what TestRDSCluster_ParameterGroupAttachment already pins (FK to cluster)."
-    updates_exempt: true
-    updates_exempt_reason: "Parameter group families are set-once at v1; attribute mutation is out of scope."
+    updates_dir_name: update_default_tags
     integration_test_func_name: "^TestCoverage_RDSParameterGroupDescribe$"
 
   # DynamoDB (S45-T5 handlers, S45-T10 e2e + this matrix entry).

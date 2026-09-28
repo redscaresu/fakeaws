@@ -1152,9 +1152,21 @@ func TestEC2_EIPLifecycle(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeAddresses: %s", body)
 	assert.Contains(t, string(body), allocID, "DescribeAddresses missing %s: %s", allocID, body)
 
+	// aws_eip reads its domain-name attribute after every describe;
+	// fakeaws sets no ptrRecord.
+	resp, body = ec2Call(t, srv, region, "DescribeAddressesAttribute", url.Values{"AllocationId.1": {allocID}, "Attribute": {"domain-name"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeAddressesAttribute: %s", body)
+	assert.Equal(t, allocID, extractEC2Tag(body, "allocationId"), "DescribeAddressesAttribute: %s", body)
+	assert.NotContains(t, string(body), "ptrRecord", "DescribeAddressesAttribute: %s", body)
+
 	// ReleaseAddress.
 	resp, _ = ec2Call(t, srv, region, "ReleaseAddress", url.Values{"AllocationId": {allocID}})
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "ReleaseAddress")
+	for _, action := range []string{"DescribeAddresses", "DescribeAddressesAttribute"} {
+		resp, body = ec2Call(t, srv, region, action, params)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s after release", action)
+		assert.Contains(t, string(body), "<Code>InvalidAllocationID.NotFound</Code>", "%s: %s", action, body)
+	}
 	resp, _ = ec2Call(t, srv, region, "ReleaseAddress", url.Values{"AllocationId": {allocID}})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ReleaseAddress on already-released")
 }
@@ -1398,8 +1410,14 @@ var keyPairKind = taggedKind{"key-pair", func(t *testing.T, srv *httptest.Server
 	}, 1, "key-pair", tags...))
 }, func(string) (string, url.Values) { return "DescribeKeyPairs", url.Values{"KeyName.1": {"tagged"}} }}
 
+// eipKind is outside taggedKinds too: DescribeAddresses carries no
+// ownerId. Its tag calls name it by allocation id.
+var eipKind = taggedKind{"elastic-ip", func(t *testing.T, srv *httptest.Server, tags ...string) string {
+	return createOK(t, srv, "AllocateAddress", "allocationId", withTagSpec(url.Values{"Domain": {"vpc"}}, 1, "elastic-ip", tags...))
+}, func(id string) (string, url.Values) { return "DescribeAddresses", url.Values{"AllocationId.1": {id}} }}
+
 func TestEC2_TagsRoundTripPerResourceType(t *testing.T) {
-	for _, k := range append(slices.Clone(taggedKinds), keyPairKind) {
+	for _, k := range append(slices.Clone(taggedKinds), keyPairKind, eipKind) {
 		t.Run(k.resourceType, func(t *testing.T) {
 			srv := newTestServer(t, ":memory:")
 			id := k.create(t, srv, "Name", "v1", "env", "dev", "team", "x")
@@ -1523,6 +1541,11 @@ func TestEC2_TagsGoWithResourceAndReset(t *testing.T) {
 	resp, body = ec2Call(t, srv, tagRegion, "DeleteVpc", url.Values{"VpcId": {vpc}})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteVpc: %s", body)
 	assert.Empty(t, describeTags(t, srv, tagRegion, nil), "deleting a resource deletes its tags")
+
+	eip := eipKind.create(t, srv, "Name", "e")
+	resp, body = ec2Call(t, srv, tagRegion, "ReleaseAddress", url.Values{"AllocationId": {eip}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ReleaseAddress: %s", body)
+	assert.Empty(t, describeTags(t, srv, tagRegion, nil), "releasing an EIP deletes its tags")
 
 	taggedKinds[0].create(t, srv, "Name", "c")
 	require.Len(t, describeTags(t, srv, tagRegion, nil), 1)

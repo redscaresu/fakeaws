@@ -20,24 +20,26 @@ import (
 type TaggedTable string
 
 const (
-	TagsSQSQueue          TaggedTable = "sqs_queues"
-	TagsIAMRole           TaggedTable = "iam_roles"
-	TagsIAMUser           TaggedTable = "iam_users"
-	TagsIAMPolicy         TaggedTable = "iam_policies"
-	TagsIAMProfile        TaggedTable = "iam_instance_profiles"
-	TagsRDSInstance       TaggedTable = "rds_db_instances"
-	TagsRDSParameterGroup TaggedTable = "rds_db_parameter_groups"
-	TagsRDSSubnetGroup    TaggedTable = "rds_db_subnet_groups"
-	TagsRoute53Zone       TaggedTable = "route53_hosted_zones"
-	TagsDynamoDBTable     TaggedTable = "dynamodb_tables"
-	TagsEKSCluster        TaggedTable = "eks_clusters"
-	TagsEKSNodeGroup      TaggedTable = "eks_node_groups"
-	TagsEKSAddon          TaggedTable = "eks_addons"
+	TagsSQSQueue             TaggedTable = "sqs_queues"
+	TagsIAMRole              TaggedTable = "iam_roles"
+	TagsIAMUser              TaggedTable = "iam_users"
+	TagsIAMPolicy            TaggedTable = "iam_policies"
+	TagsIAMProfile           TaggedTable = "iam_instance_profiles"
+	TagsRDSInstance          TaggedTable = "rds_db_instances"
+	TagsRDSParameterGroup    TaggedTable = "rds_db_parameter_groups"
+	TagsRDSSubnetGroup       TaggedTable = "rds_db_subnet_groups"
+	TagsRDSCluster           TaggedTable = "rds_db_clusters"
+	TagsRDSClusterParamGroup TaggedTable = "rds_db_cluster_parameter_groups"
+	TagsRoute53Zone          TaggedTable = "route53_hosted_zones"
+	TagsDynamoDBTable        TaggedTable = "dynamodb_tables"
+	TagsEKSCluster           TaggedTable = "eks_clusters"
+	TagsEKSNodeGroup         TaggedTable = "eks_node_groups"
+	TagsEKSAddon             TaggedTable = "eks_addons"
 )
 
 var taggedTables = []TaggedTable{
 	TagsSQSQueue, TagsIAMRole, TagsIAMUser, TagsIAMPolicy, TagsIAMProfile,
-	TagsRDSInstance, TagsRDSParameterGroup, TagsRDSSubnetGroup,
+	TagsRDSInstance, TagsRDSParameterGroup, TagsRDSSubnetGroup, TagsRDSCluster, TagsRDSClusterParamGroup,
 	TagsRoute53Zone, TagsDynamoDBTable, TagsEKSCluster, TagsEKSNodeGroup, TagsEKSAddon,
 }
 
