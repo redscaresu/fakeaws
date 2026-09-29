@@ -88,7 +88,7 @@ fakeaws/
 
 Adding a directory to any of the three trees auto-registers — no per-example test wiring. Each subdirectory is its own `t.Run` sub-test.
 
-Where it runs: the **`provider-smoke` job in this repo's `.github/workflows/ci.yml`**, on every pull request — OpenTofu 1.12.6, fakeaws built and started on `:8082` (the examples hardcode it), then `INFRAFACTORY_ENABLE_E2E=1 go test ./examples/ -v -count=1 -timeout 45m`. Locally: start fakeaws on `:8082` and run the same command. Without the env var, the test `t.Skip`s with a clear message — mirroring the gating pattern infrafactory uses for tofu-driven e2e tests. The harness POSTs `/mock/reset` before each example.
+Where it runs: the **`provider-smoke` job in this repo's `.github/workflows/ci.yml`**, on every pull request — OpenTofu 1.12.6, fakeaws built and started on `:8082` (the examples hardcode it), then `INFRAFACTORY_ENABLE_E2E=1 go test ./examples/ -v -count=1 -parallel 64 -timeout 15m`, split across five `provider-smoke (i/5)` runners by `SMOKE_SHARD=i/5` (the sorted examples dealt round-robin); the `provider-smoke` job passes only when every shard did. Locally (leave `SMOKE_SHARD` unset to run everything): start fakeaws on `:8082` and run the same command. Without the env var, the test `t.Skip`s with a clear message — mirroring the gating pattern infrafactory uses for tofu-driven e2e tests. The harness POSTs `/mock/reset` once, then runs every example in parallel against the same fakeaws, so **each example must use resource names (queue, role, bucket, table, zone, identifier, ...) no other example uses**.
 
 Known-red examples: `examples/known_red_test.go::knownRed` maps `<tree>/<dir>` → `{stage, fragment, owner}`. A listed example must fail at that stage with that fragment in its output (logged, no `t.Skip`); if it passes the harness fails with "remove it from knownRed", and if it fails any other way the harness fails. Anything not listed must pass. Fixing a known-red example means deleting its entry in the same PR.
 
@@ -170,8 +170,9 @@ fakeaws is **reactive**: declined Smithy codegen (see `concepts.md` § "Why no S
 
 - Aggregate `handlers/...` coverage ≥ 80% at the end of each phase
   (parsed from the `total:` line of `go tool cover -func=cov.out`).
-- 8 CI jobs: `lint`, `build`, `test`, `gitleaks`,
-  `regression-seed-audit`, `coverage-audit`, `coverage`, `provider-smoke`.
-  `provider-smoke` (the provider smoke harness above) is a required
-  status check on `main`.
+- 9 CI jobs: `lint`, `build`, `test`, `gitleaks`,
+  `regression-seed-audit`, `coverage-audit`, `coverage`,
+  `provider-smoke-shard` (five runners) and `provider-smoke`.
+  `provider-smoke` (the provider smoke harness above, passing only when
+  every shard did) is a required status check on `main`.
 - No `--no-verify`. No bare `t.Skip()`. No silent partial implementations.

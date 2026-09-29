@@ -89,3 +89,23 @@ func TestSQS_MessageLifecycle(t *testing.T) {
 	resp, _ = sqsCall(t, srv, "DeleteMessage", `{"QueueUrl":"`+queueURL+`","ReceiptHandle":"`+rh+`"}`)
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteMessage")
 }
+
+// TestSQS_SetQueueAttributesReadsBack: aws_sqs_queue's Update polls
+// GetQueueAttributes until the values it set read back, so a no-op
+// SetQueueAttributes timed out the apply.
+func TestSQS_SetQueueAttributesReadsBack(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, body := sqsCall(t, srv, "CreateQueue", `{"QueueName":"jobs","Attributes":{"VisibilityTimeout":"30","DelaySeconds":"5"}}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateQueue: %s", body)
+	url := "http://127.0.0.1:8082/000000000000/jobs"
+
+	resp, body = sqsCall(t, srv, "SetQueueAttributes", `{"QueueUrl":"`+url+`","Attributes":{"VisibilityTimeout":"600"}}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "SetQueueAttributes: %s", body)
+
+	_, body = sqsCall(t, srv, "GetQueueAttributes", `{"QueueUrl":"`+url+`"}`)
+	assert.Contains(t, string(body), `"VisibilityTimeout":"600"`)
+	assert.Contains(t, string(body), `"DelaySeconds":"5"`, "attributes not in the call are kept")
+
+	resp, _ = sqsCall(t, srv, "SetQueueAttributes", `{"QueueUrl":"http://127.0.0.1:8082/000000000000/missing","Attributes":{"VisibilityTimeout":"1"}}`)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "SetQueueAttributes on a missing queue")
+}

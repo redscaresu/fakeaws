@@ -183,7 +183,7 @@ The harness runs every `tofu` call in `smokeEnv` (`examples/smoke_env_test.go`):
 
 ## Auto-discovery + idempotency gate
 
-`examples/provider_smoke_test.go` walks the three trees with `runtime.Caller` and registers each subdirectory as its own `t.Run` sub-test. Adding a directory adds a test — no per-example test wiring. Each sub-test runs:
+`examples/provider_smoke_test.go` walks the three trees with `runtime.Caller` and registers each subdirectory as its own `t.Run` sub-test. Adding a directory adds a test — no per-example test wiring. The sub-tests run in parallel against one fakeaws, reset once at the start, so a new example must not reuse another example's resource names. Each sub-test runs:
 
 | Tree | Contract |
 |---|---|

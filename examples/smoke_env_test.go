@@ -164,7 +164,9 @@ func TestSmokeEnvEndpointsCoverLandedServices(t *testing.T) {
 func TestSmokeEnvFailsClosed(t *testing.T) {
 	requireE2EGate(t)
 	requireTofu(t)
-	dir := filepath.Join(repoRoot(t), "examples", "working", "env_endpoints")
+	requireShard(t)
+	t.Parallel()
+	dir := copyExample(t, "working", "env_endpoints")
 	require.Nil(t, runSteps(t, dir, step{"init", []string{"init"}}))
 
 	env := slices.DeleteFunc(smokeEnv(t, "apply"), func(kv string) bool {

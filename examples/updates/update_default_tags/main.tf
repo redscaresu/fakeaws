@@ -39,13 +39,13 @@ provider "aws" {
 }
 
 resource "aws_rds_cluster_parameter_group" "tagged" {
-  name   = "fakeaws-tagged"
+  name   = "fakeaws-default-tags"
   family = "aurora-postgresql15"
   tags   = var.tags
 }
 
 resource "aws_rds_cluster" "tagged" {
-  cluster_identifier              = "fakeaws-tagged"
+  cluster_identifier              = "fakeaws-default-tags"
   engine                          = "aurora-postgresql"
   engine_version                  = "15.4"
   master_username                 = "appuser"

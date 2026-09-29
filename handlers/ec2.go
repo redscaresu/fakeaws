@@ -268,8 +268,29 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateVpc", &out)
 }
 
+// ec2DescribeVpcs answers VpcId.N with exactly those VPCs: the
+// provider's lookup by id wants one result, so listing every VPC in
+// the region breaks it as soon as a second VPC exists.
 func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	vpcs, err := app.repo.ListVPCs(account, region)
+	var vpcs []*repository.EC2VPC
+	ids := queryListValues(req.Params, "VpcId.")
+	var err error
+	if len(ids) == 0 {
+		vpcs, err = app.repo.ListVPCs(account, region)
+	}
+	for _, id := range ids {
+		var v *repository.EC2VPC
+		v, err = app.repo.GetVPC(account, region, id)
+		if errors.Is(err, models.ErrNotFound) {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				"InvalidVpcID.NotFound", fmt.Sprintf("The vpc ID '%s' does not exist", id))
+			return
+		}
+		if err != nil {
+			break
+		}
+		vpcs = append(vpcs, v)
+	}
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
@@ -642,8 +663,28 @@ func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account,
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateInternetGateway", &ec2CreateIgwResult{InternetGateway: ec2IgwToXML(igw)})
 }
 
+// ec2DescribeInternetGateways answers InternetGatewayId.N with exactly
+// those gateways, as ec2DescribeVpcs does VpcId.N.
 func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	igws, err := app.repo.ListInternetGateways(account, region)
+	var igws []*repository.EC2InternetGateway
+	ids := queryListValues(req.Params, "InternetGatewayId.")
+	var err error
+	if len(ids) == 0 {
+		igws, err = app.repo.ListInternetGateways(account, region)
+	}
+	for _, id := range ids {
+		var igw *repository.EC2InternetGateway
+		igw, err = app.repo.GetInternetGateway(account, region, id)
+		if errors.Is(err, models.ErrNotFound) {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				"InvalidInternetGatewayID.NotFound", fmt.Sprintf("The internetGateway ID '%s' does not exist", id))
+			return
+		}
+		if err != nil {
+			break
+		}
+		igws = append(igws, igw)
+	}
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
@@ -797,7 +838,36 @@ type ec2DescribeRouteTablesResult struct {
 	RouteTableSet []ec2RouteTableXML `xml:"routeTableSet>item"`
 }
 
+// rtFilterValues are the DescribeRouteTables filters fakeaws models:
+// the ones the provider's lookups by VPC and by association id send.
+// fakeaws models no main route table, so every association is
+// main=false.
+var rtFilterValues = map[string]func(rt ec2RouteTableXML) []string{
+	"vpc-id": func(rt ec2RouteTableXML) []string { return []string{rt.VpcId} },
+	"association.route-table-association-id": func(rt ec2RouteTableXML) []string {
+		var ids []string
+		for _, a := range rt.Associations {
+			ids = append(ids, a.AssociationId)
+		}
+		return ids
+	},
+	"association.main": func(rt ec2RouteTableXML) []string {
+		if len(rt.Associations) == 0 {
+			return nil
+		}
+		return []string{"false"}
+	},
+}
+
 func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	filters := ec2Filters(req.Params)
+	for name := range filters {
+		if rtFilterValues[name] == nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
+				fmt.Errorf("DescribeRouteTables filter %q not supported by fakeaws: %w", name, models.ErrConflict))
+			return
+		}
+	}
 	var wanted []string
 	for k, vs := range req.Params {
 		if strings.HasPrefix(k, "RouteTableId.") && len(vs) > 0 {
@@ -874,6 +944,14 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 			})
 		}
 	}
+	out.RouteTableSet = slices.DeleteFunc(out.RouteTableSet, func(rt ec2RouteTableXML) bool {
+		for name, want := range filters {
+			if !slices.ContainsFunc(rtFilterValues[name](rt), func(v string) bool { return slices.Contains(want, v) }) {
+				return true
+			}
+		}
+		return false
+	})
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeRouteTables", &out)
 }
 

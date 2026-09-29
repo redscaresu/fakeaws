@@ -1761,3 +1761,76 @@ func TestRegressionSweepTerminatedInstanceENIGone(t *testing.T) {
 	require.NotNil(t, insts.Reservations[0].Instances[0].State)
 	assert.Equal(t, ec2types.InstanceStateNameTerminated, insts.Reservations[0].Instances[0].State.Name)
 }
+
+// TestEC2_DescribeVpcsAndIGWsByID: the provider looks a VPC or internet
+// gateway up by VpcId.N / InternetGatewayId.N and wants exactly that
+// one back, so answering every one in the region broke it once a
+// second existed.
+func TestEC2_DescribeVpcsAndIGWsByID(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	vpc := tagVPC(t, srv)
+	tagVPC(t, srv)
+	igw := createOK(t, srv, "CreateInternetGateway", "internetGatewayId", nil)
+	createOK(t, srv, "CreateInternetGateway", "internetGatewayId", nil)
+
+	for _, tc := range []struct{ action, param, id, idTag, missing, code string }{
+		{"DescribeVpcs", "VpcId.1", vpc, "vpcId", "vpc-doesnotexist", "InvalidVpcID.NotFound"},
+		{"DescribeInternetGateways", "InternetGatewayId.1", igw, "internetGatewayId", "igw-doesnotexist", "InvalidInternetGatewayID.NotFound"},
+	} {
+		_, body := ec2Call(t, srv, tagRegion, tc.action, nil)
+		assert.Equal(t, 2, strings.Count(string(body), "<"+tc.idTag+">"), "%s with no ids lists all: %s", tc.action, body)
+
+		resp, body := ec2Call(t, srv, tagRegion, tc.action, url.Values{tc.param: {tc.id}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", tc.action, body)
+		assert.Equal(t, 1, strings.Count(string(body), "<"+tc.idTag+">"), "%s by id: %s", tc.action, body)
+		assert.Equal(t, tc.id, extractEC2Tag(body, tc.idTag))
+
+		resp, body = ec2Call(t, srv, tagRegion, tc.action, url.Values{tc.param: {tc.missing}})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s missing: %s", tc.action, body)
+		assert.Equal(t, tc.code, extractEC2Tag(body, "Code"))
+	}
+}
+
+// TestEC2_DescribeRouteTablesFilters: the provider finds a route table
+// association by Filter association.route-table-association-id and a
+// VPC's main route table by vpc-id + association.main, and wants one
+// result, so ignoring the filters broke both once a second VPC existed.
+func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	var vpcs, rts []string
+	for range 2 {
+		vpc := tagVPC(t, srv)
+		vpcs = append(vpcs, vpc)
+		rts = append(rts, createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {vpc}}))
+	}
+	subnet := createOK(t, srv, "CreateSubnet", "subnetId", url.Values{"VpcId": {vpcs[0]}, "CidrBlock": {"10.0.1.0/24"}})
+	assoc := createOK(t, srv, "AssociateRouteTable", "associationId", url.Values{"RouteTableId": {rts[0]}, "SubnetId": {subnet}})
+
+	filter := func(kv ...string) url.Values {
+		p := url.Values{}
+		for i := 0; i < len(kv); i += 2 {
+			n := strconv.Itoa(i/2 + 1)
+			p.Set("Filter."+n+".Name", kv[i])
+			p.Set("Filter."+n+".Value.1", kv[i+1])
+		}
+		return p
+	}
+	for name, tc := range map[string]struct {
+		params url.Values
+		want   []string
+	}{
+		"no filter":      {nil, rts},
+		"by association": {filter("association.route-table-association-id", assoc), rts[:1]},
+		"by vpc":         {filter("vpc-id", vpcs[1]), rts[1:]},
+		"main of a vpc":  {filter("association.main", "true", "vpc-id", vpcs[0]), nil},
+	} {
+		resp, body := ec2Call(t, srv, tagRegion, "DescribeRouteTables", tc.params)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", name, body)
+		for _, rt := range rts {
+			assert.Equal(t, slices.Contains(tc.want, rt), strings.Contains(string(body), "<routeTableId>"+rt+"</routeTableId>"), "%s: %s in %s", name, rt, body)
+		}
+	}
+
+	resp, _ := ec2Call(t, srv, tagRegion, "DescribeRouteTables", filter("route.gateway-id", "igw-1"))
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "an unmodelled filter is refused, not ignored")
+}
