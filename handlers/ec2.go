@@ -2392,8 +2392,19 @@ func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, regi
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeKeyPairs", &out)
 }
 
+// ec2DeleteKeyPair deletes by KeyName or, as EC2 also accepts, by the
+// KeyPairId DescribeKeyPairs lists.
 func (app *Application) ec2DeleteKeyPair(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteKeyPair(account, region, req.Params.Get("KeyName")); err != nil {
+	name := req.Params.Get("KeyName")
+	if id := req.Params.Get("KeyPairId"); id != "" {
+		kp, err := app.repo.GetKeyPairByID(account, region, id)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return
+		}
+		name = kp.Name
+	}
+	if err := app.repo.DeleteKeyPair(account, region, name); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
