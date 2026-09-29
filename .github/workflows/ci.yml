@@ -92,21 +92,24 @@ jobs:
   # credentials only; examples/known_red_test.go lists the known-red ones.
   # Each tofu call starts the provider about three times, so one 4-vCPU
   # runner is CPU-bound for well over 5 minutes: SMOKE_SHARD deals the
-  # examples across five runners, and the provider-smoke job below (the
+  # examples across six runners, and the provider-smoke job below (the
   # required check) passes only if every shard did.
   provider-smoke-shard:
-    name: provider-smoke (${{ matrix.shard }}/5)
+    name: provider-smoke (${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4, 5, 6]
     env:
-      SMOKE_SHARD: ${{ matrix.shard }}/5
+      SMOKE_SHARD: ${{ matrix.shard }}/6
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tofu-plugin-cache
       # The examples commit no lock file, so without this every init
       # re-downloads the provider under the cache lock, one at a time.
       TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE: "true"
+      # tofu and the provider allocate hard at startup; fewer GC cycles cut
+      # their CPU by about a third, which the shard's slowest example needs.
+      GOGC: "400"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
