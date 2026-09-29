@@ -90,10 +90,23 @@ jobs:
   # examples/{working,misconfigured,updates}/ dir against a local fakeaws
   # (examples/provider_smoke_test.go). The examples hardcode :8082. Fake
   # credentials only; examples/known_red_test.go lists the known-red ones.
-  provider-smoke:
+  # Each tofu call starts the provider about three times, so one 4-vCPU
+  # runner is CPU-bound for well over 5 minutes: SMOKE_SHARD deals the
+  # examples across five runners, and the provider-smoke job below (the
+  # required check) passes only if every shard did.
+  provider-smoke-shard:
+    name: provider-smoke (${{ matrix.shard }}/5)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
     env:
+      SMOKE_SHARD: ${{ matrix.shard }}/5
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tofu-plugin-cache
+      # The examples commit no lock file, so without this every init
+      # re-downloads the provider under the cache lock, one at a time.
+      TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE: "true"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -115,10 +128,18 @@ jobs:
           echo "fakeaws did not answer /healthz" >&2
           cat fakeaws.log
           exit 1
-      # 45m: the suite grows with each story and outran 30m on PR #35.
-      - run: INFRAFACTORY_ENABLE_E2E=1 go test ./examples/ -v -count=1 -timeout 45m
+      # The examples run in parallel; -parallel 64 lets every one start at
+      # once, since most of their time is the provider sleeping in waits.
+      - run: INFRAFACTORY_ENABLE_E2E=1 go test ./examples/ -v -count=1 -parallel 64 -timeout 15m
       - if: failure()
         run: cat fakeaws.log
+
+  provider-smoke:
+    needs: provider-smoke-shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.provider-smoke-shard.result }}" = success
 
   # Aggregate handlers/... line coverage. Emits the metric on every push.
   # The strict >= 80% threshold is a PHASE-EXIT gate enforced by S48-T7's

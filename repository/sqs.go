@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 
 	"github.com/redscaresu/fakeaws/models"
 )
@@ -134,6 +135,26 @@ func (r *Repository) GetSQSQueue(account, region, name string) (*SQSQueue, error
 		return nil, err
 	}
 	return &q, nil
+}
+
+// SetSQSQueueAttributes merges attrs into the queue's attributes and
+// saves both the attributes column and the data blob.
+func (r *Repository) SetSQSQueueAttributes(account, region, name string, attrs map[string]string) error {
+	q, err := r.GetSQSQueue(account, region, name)
+	if err != nil {
+		return err
+	}
+	if q.Attributes == nil {
+		q.Attributes = map[string]string{}
+	}
+	maps.Copy(q.Attributes, attrs)
+	body, _ := json.Marshal(q)
+	attrJSON, _ := json.Marshal(q.Attributes)
+	_, err = r.db.Exec(
+		`UPDATE sqs_queues SET attributes = ?, data = ? WHERE account_id = ? AND region = ? AND name = ?`,
+		string(attrJSON), string(body), account, region, name,
+	)
+	return err
 }
 
 // ListSQSQueues returns queues for the account, optionally scoped to

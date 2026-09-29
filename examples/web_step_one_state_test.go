@@ -3,7 +3,6 @@ package examples_test
 import (
 	"encoding/json"
 	"os/exec"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,8 +30,10 @@ type tfState struct {
 func TestWebStepOneState(t *testing.T) {
 	requireE2EGate(t)
 	requireTofu(t)
+	requireShard(t)
+	t.Parallel()
 	resetFakeAWS(t)
-	dir := filepath.Join(repoRoot(t), "examples", "working", "web_step_one")
+	dir := copyExample(t, "working", "web_step_one")
 	require.Nil(t, runSteps(t, dir, step{"init", []string{"init"}}))
 	t.Cleanup(func() {
 		assert.Nil(t, runSteps(t, dir, step{"destroy", []string{"destroy", "-auto-approve"}}))

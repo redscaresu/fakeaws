@@ -67,11 +67,7 @@ func (app *Application) handleSQS(w http.ResponseWriter, r *http.Request) {
 	case "UntagQueue":
 		app.sqsUntagQueue(w, account, region, req)
 	case "SetQueueAttributes":
-		// aws_sqs_queue Update path patches attributes after the
-		// initial Create. We accept silently for now (the apply →
-		// plan-no-op gate doesn't verify per-attribute round-trip
-		// for SQS yet); a future ticket can persist + echo back.
-		awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{})
+		app.sqsSetQueueAttributes(w, account, region, req)
 	default:
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON10,
 			fmt.Errorf("SQS operation %q not yet implemented in fakeaws v1: %w", req.Operation, models.ErrNotFound))
@@ -216,6 +212,31 @@ func (app *Application) sqsGetQueueAttributes(w http.ResponseWriter, account, re
 	awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{
 		"Attributes": attrs,
 	})
+}
+
+// sqsSetQueueAttributes stores the attributes aws_sqs_queue's Update
+// sends; the provider then polls GetQueueAttributes until they read back.
+func (app *Application) sqsSetQueueAttributes(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		QueueUrl   string            `json:"QueueUrl"`
+		Attributes map[string]string `json:"Attributes"`
+	}
+	if err := json.Unmarshal(req.Body, &in); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON10, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		return
+	}
+	err := app.repo.SetSQSQueueAttributes(account, region, queueNameFromURL(in.QueueUrl), in.Attributes)
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeJSON10, http.StatusBadRequest,
+			"AWS.SimpleQueueService.NonExistentQueue",
+			fmt.Sprintf("The specified queue does not exist: %s", in.QueueUrl))
+		return
+	}
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON10, err)
+		return
+	}
+	awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{})
 }
 
 func (app *Application) sqsListQueues(w http.ResponseWriter, host, account, region string, req awsproto.XAmzTargetRequest) {

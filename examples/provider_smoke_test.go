@@ -21,8 +21,9 @@
 //     Without it, the test t.Skip's with a clear message — mirroring
 //     the gating pattern infrafactory uses for tofu-driven e2e tests.
 //
-// Each example starts from POST /mock/reset. Examples listed in
-// knownRed (known_red_test.go) must fail exactly as recorded there.
+// The run starts from one POST /mock/reset, then every example runs in
+// parallel. Examples listed in knownRed (known_red_test.go) must fail
+// exactly as recorded there.
 //
 // This package is `examples_test` so the auto-discovery walks the
 // repo via runtime.Caller (mirror of internal/audit/audit_test.go's
@@ -36,16 +37,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 const (
 	defaultFakeAWSURL = "http://127.0.0.1:8082"
 	gateEnvVar        = "INFRAFACTORY_ENABLE_E2E"
+	shardEnvVar       = "SMOKE_SHARD"
 )
 
 // TestProviderSmokeWorking walks examples/working/<svc>/ and runs
@@ -55,6 +61,7 @@ const (
 func TestProviderSmokeWorking(t *testing.T) {
 	requireE2EGate(t)
 	requireTofu(t)
+	t.Parallel()
 	walkExamplesAndRun(t, "working", runWorkingExample)
 }
 
@@ -64,6 +71,7 @@ func TestProviderSmokeWorking(t *testing.T) {
 func TestProviderSmokeMisconfigured(t *testing.T) {
 	requireE2EGate(t)
 	requireTofu(t)
+	t.Parallel()
 	walkExamplesAndRun(t, "misconfigured", runMisconfiguredExample)
 }
 
@@ -73,15 +81,19 @@ func TestProviderSmokeMisconfigured(t *testing.T) {
 func TestProviderSmokeUpdates(t *testing.T) {
 	requireE2EGate(t)
 	requireTofu(t)
+	t.Parallel()
 	walkExamplesAndRun(t, "updates", runUpdatesExample)
 }
 
 // ----- discovery -----
 
-// walkExamplesAndRun runs every example under examples/<tree>/ and
-// judges the outcome against knownRed, keyed "<tree>/<dir>".
+// walkExamplesAndRun runs every example under examples/<tree>/ in
+// parallel and judges the outcome against knownRed, keyed
+// "<tree>/<dir>". The examples share one fakeaws, so each must use
+// resource names no other example uses.
 func walkExamplesAndRun(t *testing.T, tree string, run func(t *testing.T, dir string) *stageErr) {
 	t.Helper()
+	resetFakeAWS(t)
 	parent := filepath.Join(repoRoot(t), "examples", tree)
 	entries, err := os.ReadDir(parent)
 	if err != nil {
@@ -98,9 +110,12 @@ func walkExamplesAndRun(t *testing.T, tree string, run func(t *testing.T, dir st
 		}
 		any = true
 		name := tree + "/" + ent.Name()
+		if !inShard(t, name) {
+			continue
+		}
 		dir := filepath.Join(parent, ent.Name())
 		t.Run(ent.Name(), func(t *testing.T) {
-			resetFakeAWS(t)
+			t.Parallel()
 			failure := run(t, dir)
 			require.NoError(t, checkKnownRed(knownRed, name, failure))
 			if failure != nil {
@@ -201,12 +216,98 @@ func runSteps(t *testing.T, dir string, steps ...step) *stageErr {
 
 // ----- helpers -----
 
+// resetOnce empties fakeaws once per run: the examples run in
+// parallel, so a reset per example would wipe another's resources.
+var resetOnce = sync.OnceValue(func() error {
+	resp, err := http.Post(defaultFakeAWSURL+"/mock/reset", "application/json", nil)
+	if err != nil {
+		return fmt.Errorf("POST /mock/reset — is fakeaws running on %s? %w", defaultFakeAWSURL, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("POST /mock/reset: status %d", resp.StatusCode)
+	}
+	return nil
+})
+
 func resetFakeAWS(t *testing.T) {
 	t.Helper()
-	resp, err := http.Post(defaultFakeAWSURL+"/mock/reset", "application/json", nil)
-	require.NoError(t, err, "POST /mock/reset — is fakeaws running on %s?", defaultFakeAWSURL)
-	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode, "POST /mock/reset")
+	require.NoError(t, resetOnce())
+}
+
+// smokeTests are the e2e tests outside the three trees; they are
+// sharded along with the examples.
+var smokeTests = []string{"TestSmokeEnvFailsClosed", "TestWebStepOneState"}
+
+// inShard reports whether name ("<tree>/<dir>" or a smokeTests entry)
+// runs in this job. SMOKE_SHARD=i/n (1-based) deals the sorted names
+// round-robin across n CI jobs; unset, everything runs.
+func inShard(t *testing.T, name string) bool {
+	t.Helper()
+	spec := os.Getenv(shardEnvVar)
+	if spec == "" {
+		return true
+	}
+	var i, n int
+	_, err := fmt.Sscanf(spec, "%d/%d", &i, &n)
+	require.NoError(t, err, "%s=%q, want i/n", shardEnvVar, spec)
+	require.True(t, i >= 1 && i <= n, "%s=%q, want 1 <= i <= n", shardEnvVar, spec)
+	names := smokeNames(t)
+	idx := slices.Index(names, name)
+	require.GreaterOrEqual(t, idx, 0, "%s is not a smoke example or test", name)
+	return idx%n == i-1
+}
+
+// smokeNames lists every shardable name, sorted.
+func smokeNames(t *testing.T) []string {
+	t.Helper()
+	dirs, err := filepath.Glob(filepath.Join(repoRoot(t), "examples", "*", "*", "main.tf"))
+	require.NoError(t, err)
+	names := slices.Clone(smokeTests)
+	for _, d := range dirs {
+		rel, err := filepath.Rel(filepath.Join(repoRoot(t), "examples"), filepath.Dir(d))
+		require.NoError(t, err)
+		names = append(names, filepath.ToSlash(rel))
+	}
+	slices.Sort(names)
+	return names
+}
+
+// requireShard skips a smokeTests entry another shard runs.
+func requireShard(t *testing.T) {
+	t.Helper()
+	if !inShard(t, t.Name()) {
+		t.Skipf("%s runs in another %s shard", t.Name(), shardEnvVar)
+	}
+}
+
+func TestShardsPartitionTheSmokeRun(t *testing.T) {
+	names := smokeNames(t)
+	for _, n := range []int{1, 3, 5} {
+		seen := map[string]int{}
+		for i := 1; i <= n; i++ {
+			t.Setenv(shardEnvVar, fmt.Sprintf("%d/%d", i, n))
+			for _, name := range names {
+				if inShard(t, name) {
+					seen[name]++
+				}
+			}
+		}
+		for _, name := range names {
+			assert.Equal(t, 1, seen[name], "%s with %d shards", name, n)
+		}
+	}
+}
+
+// copyExample copies an example's main.tf into a temp dir, so a test
+// can drive it while the smoke harness runs the original in parallel.
+func copyExample(t *testing.T, tree, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), "examples", tree, name, "main.tf"))
+	require.NoError(t, err)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), body, 0o644))
+	return dir
 }
 
 func requireE2EGate(t *testing.T) {
@@ -244,4 +345,39 @@ func repoRoot(t *testing.T) string {
 	}
 	t.Fatalf("could not locate fakeaws repo root from %s", file)
 	return ""
+}
+
+var (
+	resourceLine = regexp.MustCompile(`^resource "(\w+)"`)
+	nameLine     = regexp.MustCompile(`^  (name|bucket|identifier|cluster_identifier|key_name)\s*=\s*"([^"]+)"`)
+)
+
+// TestExampleResourceNamesAreUnique: the examples run in parallel
+// against one fakeaws, so two examples naming the same queue, role,
+// table, ... would collide. Security group names are per VPC, and every
+// example has its own VPC.
+func TestExampleResourceNamesAreUnique(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join(repoRoot(t), "examples", "*", "*", "main.tf"))
+	require.NoError(t, err)
+	owner := map[string]string{}
+	for _, f := range files {
+		body, err := os.ReadFile(f)
+		require.NoError(t, err)
+		dir := filepath.Base(filepath.Dir(f))
+		var typ string
+		for _, line := range strings.Split(string(body), "\n") {
+			if m := resourceLine.FindStringSubmatch(line); m != nil {
+				typ = m[1]
+			}
+			m := nameLine.FindStringSubmatch(line)
+			if m == nil || typ == "aws_security_group" {
+				continue
+			}
+			key := typ + " " + m[2]
+			if prev, ok := owner[key]; ok && prev != dir {
+				t.Errorf("%s %q is named in both %s and %s", typ, m[2], prev, dir)
+			}
+			owner[key] = dir
+		}
+	}
 }

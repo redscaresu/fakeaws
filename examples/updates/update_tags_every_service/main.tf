@@ -44,12 +44,12 @@ variable "tags" {
 }
 
 resource "aws_sqs_queue" "tagged" {
-  name = "fakeaws-tagged"
+  name = "fakeaws-update-tagged"
   tags = var.tags
 }
 
 resource "aws_iam_role" "tagged" {
-  name = "fakeaws-tagged"
+  name = "fakeaws-update-tagged"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -62,18 +62,18 @@ resource "aws_iam_role" "tagged" {
 }
 
 resource "aws_db_parameter_group" "tagged" {
-  name   = "fakeaws-tagged"
+  name   = "fakeaws-update-tagged"
   family = "postgres15"
   tags   = var.tags
 }
 
 resource "aws_route53_zone" "tagged" {
-  name = "tagged.fakeaws.test"
+  name = "update-tagged.fakeaws.test"
   tags = var.tags
 }
 
 resource "aws_dynamodb_table" "tagged" {
-  name         = "fakeaws-tagged"
+  name         = "fakeaws-update-tagged"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "id"
   attribute {
@@ -100,7 +100,7 @@ resource "aws_subnet" "b" {
 }
 
 resource "aws_eks_cluster" "tagged" {
-  name     = "fakeaws-tagged"
+  name     = "fakeaws-update-tagged"
   role_arn = aws_iam_role.tagged.arn
   version  = "1.29"
   vpc_config {
@@ -110,20 +110,20 @@ resource "aws_eks_cluster" "tagged" {
 }
 
 resource "aws_secretsmanager_secret" "tagged" {
-  name                    = "fakeaws-tagged"
+  name                    = "fakeaws-update-tagged"
   recovery_window_in_days = 0
   tags                    = var.tags
 }
 
 resource "aws_iam_instance_profile" "tagged" {
-  name = "fakeaws-tagged"
+  name = "fakeaws-update-tagged"
   role = aws_iam_role.tagged.name
   tags = var.tags
 }
 
 resource "aws_eks_node_group" "tagged" {
   cluster_name    = aws_eks_cluster.tagged.name
-  node_group_name = "fakeaws-tagged"
+  node_group_name = "fakeaws-update-tagged"
   node_role_arn   = aws_iam_role.tagged.arn
   subnet_ids      = [aws_subnet.a.id, aws_subnet.b.id]
   scaling_config {
@@ -141,7 +141,7 @@ resource "aws_eks_addon" "tagged" {
 }
 
 resource "aws_key_pair" "tagged" {
-  key_name   = "fakeaws-tagged"
+  key_name   = "fakeaws-update-tagged"
   public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterialForFakeawsExamples"
   tags       = var.tags
 }
