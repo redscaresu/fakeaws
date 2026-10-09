@@ -132,7 +132,7 @@ func TestAdminMockImages_ReseedConflicts(t *testing.T) {
 
 	for name, tc := range map[string]struct{ body, wantMessage, region, ami, wantRootDevice string }{
 		"differing re-seed": {
-			body:        `{"ami_id":"` + ami + `","region":"us-east-1","root_device_name":"/dev/xvda"}`,
+			body:        `{"ami_id":"` + ami + `","name":"al2023-ami-other","region":"us-east-1","root_device_name":"/dev/xvda"}`,
 			wantMessage: ami + " already exists in us-east-1 with a different name, root_device_name",
 			region:      "us-east-1", ami: ami, wantRootDevice: "/dev/sdz",
 		},
@@ -181,23 +181,25 @@ func TestAdminMockImages_InvalidBodyWritesNothing(t *testing.T) {
 	bigName := strings.Repeat("x", 64<<10)
 
 	for name, tc := range map[string]struct{ body, wantMessage string }{
-		"malformed id in an untouched region": {`{"ami_id":"ami-NOTHEX","region":"ap-south-2","root_device_name":"/dev/xvda"}`,
+		"malformed id in an untouched region": {`{"ami_id":"ami-NOTHEX","name":"x","region":"ap-south-2","root_device_name":"/dev/xvda"}`,
 			"ami_id must be ami- followed by 8 or 17 lowercase hex digits"},
-		"id of another length": {`{"ami_id":"ami-0123456789","region":"us-east-1","root_device_name":"/dev/xvda"}`,
+		"id of another length": {`{"ami_id":"ami-0123456789","name":"x","region":"us-east-1","root_device_name":"/dev/xvda"}`,
 			"ami_id must be ami- followed by 8 or 17 lowercase hex digits"},
-		"no region": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa1","root_device_name":"/dev/xvda"}`,
+		"no region": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa1","name":"x","root_device_name":"/dev/xvda"}`,
 			"region must look like us-east-1"},
-		"upper-case region": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa6","region":"US-East-1","root_device_name":"/dev/xvda"}`,
+		"upper-case region": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa6","name":"x","region":"US-East-1","root_device_name":"/dev/xvda"}`,
 			"region must look like us-east-1"},
-		"region with trailing space": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa7","region":"us-east-1 ","root_device_name":"/dev/xvda"}`,
+		"region with trailing space": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa7","name":"x","region":"us-east-1 ","root_device_name":"/dev/xvda"}`,
 			"region must look like us-east-1"},
-		"no root device name": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa2","region":"us-east-1"}`,
+		"no name": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa9","region":"us-east-1","root_device_name":"/dev/xvda"}`,
+			"name is required"},
+		"no root device name": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa2","name":"x","region":"us-east-1"}`,
 			"root_device_name is required"},
-		"other account": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa5","region":"us-east-1","root_device_name":"/dev/xvda","account_id":"111122223333"}`,
+		"other account": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa5","name":"x","region":"us-east-1","root_device_name":"/dev/xvda","account_id":"111122223333"}`,
 			"account_id must be 000000000000"},
-		"trailing data": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa4","region":"us-east-1","root_device_name":"/dev/xvda"} junk`,
+		"trailing data": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa4","name":"x","region":"us-east-1","root_device_name":"/dev/xvda"} junk`,
 			"invalid body: one JSON object expected"},
-		"unknown field (typo)": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa3","region":"us-east-1","root_device":"/dev/xvda"}`,
+		"unknown field (typo)": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa3","name":"x","region":"us-east-1","root_device":"/dev/xvda"}`,
 			`invalid body: json: unknown field "root_device"`},
 		"oversized body": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa8","region":"us-east-1","root_device_name":"/dev/xvda","name":"` + bigName + `"}`,
 			"invalid body: http: request body too large"},

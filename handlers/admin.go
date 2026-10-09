@@ -164,6 +164,8 @@ func validateSeedImage(req *seedImageRequest) string {
 	switch {
 	case !regionPattern.MatchString(req.Region):
 		return "region must look like us-east-1"
+	case req.Name == "":
+		return "name is required"
 	case req.RootDeviceName == "":
 		return "root_device_name is required"
 	case req.AccountID != "" && req.AccountID != awsproto.FakeAccountID:
