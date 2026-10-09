@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -55,7 +56,17 @@ func (app *Application) registerAdminRoutes(r chi.Router) {
 	})
 }
 
-var amiIDPattern = regexp.MustCompile(`^ami-[0-9a-f]+$`)
+var (
+	// An EC2 image id: ami- then 8 (legacy) or 17 lowercase hex digits.
+	amiIDPattern  = regexp.MustCompile(`^ami-([0-9a-f]{8}|[0-9a-f]{17})$`)
+	regionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`)
+)
+
+var errInvalidAMIID = errors.New("ami_id must be ami- followed by 8 or 17 lowercase hex digits")
+
+// maxSeedImageBodyBytes caps the /mock/images body; one image is a few
+// hundred bytes.
+const maxSeedImageBodyBytes = 64 << 10
 
 // seedImageRequest is the /mock/images body: the EC2AMI JSON shape
 // (ami_id, name, owner_id, virtualization_type, root_device_name,
@@ -68,10 +79,12 @@ type seedImageRequest struct {
 // handleMockSeedImage registers one AMI, so a caller can launch an
 // image id it resolved elsewhere (real SSM). It writes through
 // SeedAMI like the fixtures, so DescribeImages and RunInstances see
-// it the same way; seeding twice is a no-op and /mock/reset drops it.
+// it the same way; /mock/reset drops it. Re-seeding an id already in
+// the region (a fixture included) is 200 when every field matches and
+// 409 naming the fields when not, writing nothing either way.
 func (app *Application) handleMockSeedImage(w http.ResponseWriter, r *http.Request) {
 	var req seedImageRequest
-	dec := json.NewDecoder(r.Body)
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSeedImageBodyBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid body: "+err.Error())
@@ -85,22 +98,68 @@ func (app *Application) handleMockSeedImage(w http.ResponseWriter, r *http.Reque
 		writeAdminError(w, http.StatusBadRequest, msg)
 		return
 	}
-	if err := app.repo.SeedAMI(req.AccountID, &req.EC2AMI); err != nil {
+	// Fixtures land in a region lazily; seed them first so a fixture id
+	// conflicts here instead of the fixture being dropped later.
+	app.ensureAMIFixturesForRegion(req.AccountID, req.Region)
+	stored, err := app.seedAMI(req.AccountID, &req.EC2AMI)
+	if errors.Is(err, errInvalidAMIID) {
+		writeAdminError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err != nil {
 		writeAdminError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok", "image": req})
+	if diff := amiFieldDiff(stored, &req.EC2AMI); len(diff) > 0 {
+		writeAdminError(w, http.StatusConflict, req.ID+" already exists in "+req.Region+" with a different "+strings.Join(diff, ", "))
+		return
+	}
+	writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok", "image": seedImageRequest{*stored, req.AccountID}})
+}
+
+// seedAMI inserts ami unless its id already exists in the region and
+// returns the stored row. A new id must match amiIDPattern
+// (errInvalidAMIID otherwise); an existing one is looked up as is, since
+// fixture ids such as AL2023AMIID do not match it.
+func (app *Application) seedAMI(account string, ami *repository.EC2AMI) (*repository.EC2AMI, error) {
+	stored, err := app.repo.GetAMI(account, ami.Region, ami.ID)
+	if !errors.Is(err, models.ErrNotFound) {
+		return stored, err
+	}
+	if !amiIDPattern.MatchString(ami.ID) {
+		return nil, errInvalidAMIID
+	}
+	if err := app.repo.SeedAMI(account, ami); err != nil {
+		return nil, err
+	}
+	// SeedAMI ignores a row a concurrent seed won; read back what stuck.
+	return app.repo.GetAMI(account, ami.Region, ami.ID)
+}
+
+// amiFieldDiff names the JSON fields where want differs from stored.
+func amiFieldDiff(stored, want *repository.EC2AMI) []string {
+	var diff []string
+	for _, f := range []struct{ name, stored, want string }{
+		{"name", stored.Name, want.Name},
+		{"owner_id", stored.OwnerID, want.OwnerID},
+		{"virtualization_type", stored.VirtualizationType, want.VirtualizationType},
+		{"root_device_name", stored.RootDeviceName, want.RootDeviceName},
+	} {
+		if f.stored != f.want {
+			diff = append(diff, f.name)
+		}
+	}
+	return diff
 }
 
 // validateSeedImage fills the AL2023 fixture's owner and
 // virtualization type when absent and the fake account, and returns
-// a message for the first missing or malformed field.
+// a message for the first missing or malformed field. The id is
+// checked in seedAMI, which knows whether it already exists.
 func validateSeedImage(req *seedImageRequest) string {
 	switch {
-	case !amiIDPattern.MatchString(req.ID):
-		return "ami_id must be ami- followed by lowercase hex"
-	case req.Region == "":
-		return "region is required"
+	case !regionPattern.MatchString(req.Region):
+		return "region must look like us-east-1"
 	case req.RootDeviceName == "":
 		return "root_device_name is required"
 	case req.AccountID != "" && req.AccountID != awsproto.FakeAccountID:
