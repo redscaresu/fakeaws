@@ -88,6 +88,13 @@ curl -s http://localhost:8082/mock/state | jq .
 curl -s http://localhost:8082/mock/state/rds | jq .   # single-service slice
 ```
 
+RunInstances refuses any AMI fakeaws has not seeded. Register one (say, an id resolved from real SSM) before the apply; `/mock/reset` drops it:
+
+```bash
+curl -s -X POST http://localhost:8082/mock/images -d '{"ami_id":"ami-0123456789abcdef0","name":"al2023-ami","region":"us-east-1","root_device_name":"/dev/xvda"}'
+# optional: "owner_id" (default amazon), "virtualization_type" (default hvm), "account_id" (only 000000000000)
+```
+
 ---
 
 ## Provider configuration
