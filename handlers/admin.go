@@ -3,11 +3,15 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"regexp"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/redscaresu/fakeaws/handlers/awsproto"
 	"github.com/redscaresu/fakeaws/models"
+	"github.com/redscaresu/fakeaws/repository"
 )
 
 // /mock/state schema (versioned via the top-level "schema_version" key
@@ -47,7 +51,74 @@ func (app *Application) registerAdminRoutes(r chi.Router) {
 		mr.Post("/restore", app.handleMockRestore)
 		mr.Get("/state", app.handleMockState)
 		mr.Get("/state/{service}", app.handleMockStateService)
+		mr.Post("/images", app.handleMockSeedImage)
 	})
+}
+
+var amiIDPattern = regexp.MustCompile(`^ami-[0-9a-f]+$`)
+
+// seedImageRequest is the /mock/images body: the EC2AMI JSON shape
+// (ami_id, name, owner_id, virtualization_type, root_device_name,
+// region) plus the account it is seeded into.
+type seedImageRequest struct {
+	repository.EC2AMI
+	AccountID string `json:"account_id"`
+}
+
+// handleMockSeedImage registers one AMI, so a caller can launch an
+// image id it resolved elsewhere (real SSM). It writes through
+// SeedAMI like the fixtures, so DescribeImages and RunInstances see
+// it the same way; seeding twice is a no-op and /mock/reset drops it.
+func (app *Application) handleMockSeedImage(w http.ResponseWriter, r *http.Request) {
+	var req seedImageRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if dec.Decode(&struct{}{}) != io.EOF {
+		writeAdminError(w, http.StatusBadRequest, "invalid body: one JSON object expected")
+		return
+	}
+	if msg := validateSeedImage(&req); msg != "" {
+		writeAdminError(w, http.StatusBadRequest, msg)
+		return
+	}
+	if err := app.repo.SeedAMI(req.AccountID, &req.EC2AMI); err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok", "image": req})
+}
+
+// validateSeedImage fills the AL2023 fixture's owner and
+// virtualization type when absent and the fake account, and returns
+// a message for the first missing or malformed field.
+func validateSeedImage(req *seedImageRequest) string {
+	switch {
+	case !amiIDPattern.MatchString(req.ID):
+		return "ami_id must be ami- followed by lowercase hex"
+	case req.Region == "":
+		return "region is required"
+	case req.RootDeviceName == "":
+		return "root_device_name is required"
+	case req.AccountID != "" && req.AccountID != awsproto.FakeAccountID:
+		// The EC2 surface only ever reads the fake account.
+		return "account_id must be " + awsproto.FakeAccountID
+	}
+	if req.OwnerID == "" {
+		req.OwnerID = "amazon"
+	}
+	if req.VirtualizationType == "" {
+		req.VirtualizationType = "hvm"
+	}
+	req.AccountID = awsproto.FakeAccountID
+	return ""
+}
+
+func writeAdminError(w http.ResponseWriter, status int, msg string) {
+	writeJSONStatus(w, status, map[string]any{"status": "error", "message": msg})
 }
 
 func (app *Application) handleMockReset(w http.ResponseWriter, _ *http.Request) {

@@ -529,11 +529,11 @@ func (r *Repository) DeleteKeyPair(account, region, name string) error {
 
 // ----- AMI fixtures -----
 //
-// AMIs are read-only at v1. SeedAMI is called once at startup by the
-// admin layer to populate the fixture set; handlers/ec2.go's
+// AMIs are read-only to the AWS surface. SeedAMI populates the fixture
+// set at startup and backs the admin POST /mock/images; handlers/ec2.go's
 // DescribeImages just lists them. There is intentionally no DeleteAMI
-// or CreateAMI exposed via Application — terraform-provider-aws never
-// writes AMIs (it only reads them), so the fixture model is sufficient.
+// or CreateAMI on the EC2 API — terraform-provider-aws never writes
+// AMIs (it only reads them).
 
 func (r *Repository) SeedAMI(account string, ami *EC2AMI) error {
 	body, _ := json.Marshal(ami)

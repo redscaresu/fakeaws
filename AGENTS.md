@@ -25,7 +25,7 @@ fakeaws/
 ├── cmd/fakeaws/main.go        # entrypoint, --port, --db, --echo
 ├── handlers/
 │   ├── handlers.go            # Application struct, RegisterRoutes, auth
-│   ├── admin.go               # /mock/reset, /snapshot, /restore, /state (S43-T4)
+│   ├── admin.go               # /mock/reset, /snapshot, /restore, /state (S43-T4), /images
 │   ├── awsproto/              # per-protocol marshalling helpers (S43-T2)
 │   ├── iam.go, s3.go, ec2_*.go, ...  # one file per service
 │   ├── handlers_test.go       # SHARED integration test file (TestXxx<Service>...)
