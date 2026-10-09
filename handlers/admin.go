@@ -98,9 +98,6 @@ func (app *Application) handleMockSeedImage(w http.ResponseWriter, r *http.Reque
 		writeAdminError(w, http.StatusBadRequest, msg)
 		return
 	}
-	// Fixtures land in a region lazily; seed them first so a fixture id
-	// conflicts here instead of the fixture being dropped later.
-	app.ensureAMIFixturesForRegion(req.AccountID, req.Region)
 	stored, err := app.seedAMI(req.AccountID, &req.EC2AMI)
 	if errors.Is(err, errInvalidAMIID) {
 		writeAdminError(w, http.StatusBadRequest, err.Error())
@@ -117,14 +114,21 @@ func (app *Application) handleMockSeedImage(w http.ResponseWriter, r *http.Reque
 	writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok", "image": seedImageRequest{*stored, req.AccountID}})
 }
 
-// seedAMI inserts ami unless its id already exists in the region and
-// returns the stored row. A new id must match amiIDPattern
-// (errInvalidAMIID otherwise); an existing one is looked up as is, since
-// fixture ids such as AL2023AMIID do not match it.
+// seedAMI inserts ami unless its id is already stored in the region or
+// is a fixture, and returns the stored (or fixture) row. Fixtures land
+// in a region lazily, so they are matched from ec2AMIFixtures without
+// writing them. A new id must match amiIDPattern (errInvalidAMIID
+// otherwise); fixture ids such as AL2023AMIID do not.
 func (app *Application) seedAMI(account string, ami *repository.EC2AMI) (*repository.EC2AMI, error) {
 	stored, err := app.repo.GetAMI(account, ami.Region, ami.ID)
 	if !errors.Is(err, models.ErrNotFound) {
 		return stored, err
+	}
+	for _, f := range ec2AMIFixtures {
+		if f.ID == ami.ID {
+			f.Region = ami.Region
+			return &f, nil
+		}
 	}
 	if !amiIDPattern.MatchString(ami.ID) {
 		return nil, errInvalidAMIID

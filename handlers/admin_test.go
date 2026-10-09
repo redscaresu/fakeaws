@@ -123,7 +123,7 @@ func TestAdminMockImages_SeededImageLaunches(t *testing.T) {
 // any differing field is 409 naming it. Fixture ids count as stored,
 // in a region touched before or not.
 func TestAdminMockImages_ReseedConflicts(t *testing.T) {
-	srv := newTestServer(t, ":memory:")
+	app, srv := newTestApp(t, ":memory:")
 	const ami = "ami-0123456789abcdef0"
 
 	seed := `{"ami_id":"` + ami + `","name":"al2023-ami-real","region":"us-east-1","root_device_name":"/dev/sdz"}`
@@ -148,9 +148,11 @@ func TestAdminMockImages_ReseedConflicts(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			before := amiRowCount(t, app)
 			resp, body := doPostJSON(t, srv, "/mock/images", tc.body)
 			assert.Equal(t, http.StatusConflict, resp.StatusCode, "body: %s", body)
 			assert.Equal(t, tc.wantMessage, adminErrorMessage(t, body))
+			assert.Equal(t, before, amiRowCount(t, app), "conflict wrote an image row")
 
 			resp, body = ec2Call(t, srv, tc.region, "DescribeImages", url.Values{"ImageId.1": {tc.ami}})
 			require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeImages: %s", body)
@@ -178,42 +180,47 @@ func TestAdminMockImages_InvalidBodyWritesNothing(t *testing.T) {
 	app, srv := newTestApp(t, ":memory:")
 	bigName := strings.Repeat("x", 64<<10)
 
-	for name, tc := range map[string]struct{ ami, body, wantMessage string }{
-		"malformed id": {"ami-NOTHEX", `{"ami_id":"ami-NOTHEX","region":"us-east-1","root_device_name":"/dev/xvda"}`,
+	for name, tc := range map[string]struct{ body, wantMessage string }{
+		"malformed id in an untouched region": {`{"ami_id":"ami-NOTHEX","region":"ap-south-2","root_device_name":"/dev/xvda"}`,
 			"ami_id must be ami- followed by 8 or 17 lowercase hex digits"},
-		"id of another length": {"ami-0123456789", `{"ami_id":"ami-0123456789","region":"us-east-1","root_device_name":"/dev/xvda"}`,
+		"id of another length": {`{"ami_id":"ami-0123456789","region":"us-east-1","root_device_name":"/dev/xvda"}`,
 			"ami_id must be ami- followed by 8 or 17 lowercase hex digits"},
-		"no region": {"ami-0aaaaaaaaaaaaaaa1", `{"ami_id":"ami-0aaaaaaaaaaaaaaa1","root_device_name":"/dev/xvda"}`,
+		"no region": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa1","root_device_name":"/dev/xvda"}`,
 			"region must look like us-east-1"},
-		"upper-case region": {"ami-0aaaaaaaaaaaaaaa6", `{"ami_id":"ami-0aaaaaaaaaaaaaaa6","region":"US-East-1","root_device_name":"/dev/xvda"}`,
+		"upper-case region": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa6","region":"US-East-1","root_device_name":"/dev/xvda"}`,
 			"region must look like us-east-1"},
-		"region with trailing space": {"ami-0aaaaaaaaaaaaaaa7", `{"ami_id":"ami-0aaaaaaaaaaaaaaa7","region":"us-east-1 ","root_device_name":"/dev/xvda"}`,
+		"region with trailing space": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa7","region":"us-east-1 ","root_device_name":"/dev/xvda"}`,
 			"region must look like us-east-1"},
-		"no root device name": {"ami-0aaaaaaaaaaaaaaa2", `{"ami_id":"ami-0aaaaaaaaaaaaaaa2","region":"us-east-1"}`,
+		"no root device name": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa2","region":"us-east-1"}`,
 			"root_device_name is required"},
-		"other account": {"ami-0aaaaaaaaaaaaaaa5", `{"ami_id":"ami-0aaaaaaaaaaaaaaa5","region":"us-east-1","root_device_name":"/dev/xvda","account_id":"111122223333"}`,
+		"other account": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa5","region":"us-east-1","root_device_name":"/dev/xvda","account_id":"111122223333"}`,
 			"account_id must be 000000000000"},
-		"trailing data": {"ami-0aaaaaaaaaaaaaaa4", `{"ami_id":"ami-0aaaaaaaaaaaaaaa4","region":"us-east-1","root_device_name":"/dev/xvda"} junk`,
+		"trailing data": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa4","region":"us-east-1","root_device_name":"/dev/xvda"} junk`,
 			"invalid body: one JSON object expected"},
-		"unknown field (typo)": {"ami-0aaaaaaaaaaaaaaa3", `{"ami_id":"ami-0aaaaaaaaaaaaaaa3","region":"us-east-1","root_device":"/dev/xvda"}`,
+		"unknown field (typo)": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa3","region":"us-east-1","root_device":"/dev/xvda"}`,
 			`invalid body: json: unknown field "root_device"`},
-		"oversized body": {"ami-0aaaaaaaaaaaaaaa8", `{"ami_id":"ami-0aaaaaaaaaaaaaaa8","region":"us-east-1","root_device_name":"/dev/xvda","name":"` + bigName + `"}`,
+		"oversized body": {`{"ami_id":"ami-0aaaaaaaaaaaaaaa8","region":"us-east-1","root_device_name":"/dev/xvda","name":"` + bigName + `"}`,
 			"invalid body: http: request body too large"},
 	} {
 		t.Run(name, func(t *testing.T) {
+			before := amiRowCount(t, app)
 			resp, body := doPostJSON(t, srv, "/mock/images", tc.body)
 			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "body: %s", body)
 			assert.Equal(t, tc.wantMessage, adminErrorMessage(t, body))
-
-			var n int
-			require.NoError(t, app.Repository().DB().QueryRow(
-				`SELECT COUNT(*) FROM ec2_amis WHERE id = ?`, tc.ami).Scan(&n))
-			assert.Zero(t, n, "rejected image written in some region or account")
+			assert.Equal(t, before, amiRowCount(t, app), "rejected request wrote an image row in some region or account")
 		})
 	}
 }
 
 // ----- helpers -----
+
+// amiRowCount counts image rows across every account and region.
+func amiRowCount(t *testing.T, app *handlers.Application) int {
+	t.Helper()
+	var n int
+	require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM ec2_amis`).Scan(&n))
+	return n
+}
 
 func adminErrorMessage(t *testing.T, body []byte) string {
 	t.Helper()
