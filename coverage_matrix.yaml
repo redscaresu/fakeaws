@@ -294,12 +294,11 @@ entries:
   # see IAM-side comment above.
   - aws_service: ec2
     aws_resource_type: aws_eip
-    working_exempt: true
-    working_exempt_reason: "EIP allocate/describe/release is exercised in TestEC2_EIPLifecycle; aws-vpc-network.yaml doesn't demand a public EIP at v1."
+    working_dir_name: eip_instance
     misconfigured_exempt: true
     misconfigured_exempt_reason: "Domain=standard rejection asserted in TestEC2_EIPLifecycle; standalone misconfigured tofu example would duplicate."
     updates_dir_name: update_default_tags
-    integration_test_func_name: "^(TestEC2_EIPLifecycle|TestRegressionSweepDescribeAddressesListsEveryAddress)$"
+    integration_test_func_name: "^(TestEC2_EIPLifecycle|TestRegressionSweepDescribeAddressesListsEveryAddress|TestRegressionEIPAssociateWithInstance)$"
 
   # EC2 — the Describes infrafactory's AWS scope sweep lists. The
   # unfiltered DescribeAddresses and DescribeSecurityGroups are named on

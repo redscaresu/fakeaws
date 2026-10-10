@@ -224,6 +224,7 @@ type EC2EIP struct {
 	NetworkInterfaceID string `json:"network_interface_id,omitempty"`
 	InstanceID         string `json:"instance_id,omitempty"`
 	AssociationID      string `json:"association_id,omitempty"`
+	PrivateIP          string `json:"private_ip,omitempty"`
 	Region             string `json:"region"`
 	CreatedAt          string `json:"created_at"`
 }
@@ -871,22 +872,57 @@ func (r *Repository) GetEIP(account, region, allocationID string) (*EC2EIP, erro
 	return &eip, nil
 }
 
-func (r *Repository) DeleteEIP(account, region, allocationID string) error {
-	var res sql.Result
-	var err error
-	if region == "" {
-		res, err = r.db.Exec(`DELETE FROM ec2_eips WHERE account_id = ? AND allocation_id = ?`, account, allocationID)
-	} else {
-		res, err = r.db.Exec(`DELETE FROM ec2_eips WHERE account_id = ? AND region = ? AND allocation_id = ?`, account, region, allocationID)
-	}
+// SetEIPAssociation saves eip's association and, when eni is not nil,
+// the public IP of the ENI it moves on or off, in one transaction: EC2
+// shows an associated address as its ENI's public IP.
+func (r *Repository) SetEIPAssociation(account string, eip *EC2EIP, eni *EC2NetworkInterface) error {
+	tx, err := r.db.Begin()
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	defer tx.Rollback()
+	body, _ := json.Marshal(eip)
+	res, err := tx.Exec(
+		`UPDATE ec2_eips SET network_interface_id = NULLIF(?, ''), instance_id = NULLIF(?, ''), association_id = NULLIF(?, ''), data = ?
+		   WHERE account_id = ? AND allocation_id = ?`,
+		eip.NetworkInterfaceID, eip.InstanceID, eip.AssociationID, string(body), account, eip.AllocationID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
 		return models.ErrNotFound
 	}
-	return nil
+	if eni != nil {
+		eniBody, _ := json.Marshal(eni)
+		res, err := tx.Exec(`UPDATE ec2_network_interfaces SET data = ? WHERE account_id = ? AND id = ?`, string(eniBody), account, eni.ID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return models.ErrNotFound
+		}
+	}
+	return tx.Commit()
+}
+
+// DeleteEIP releases an address. An associated address is ErrInUse,
+// as EC2 refuses to release it.
+func (r *Repository) DeleteEIP(account, region, allocationID string) error {
+	res, err := r.db.Exec(
+		`DELETE FROM ec2_eips WHERE account_id = ? AND (? = '' OR region = ?) AND allocation_id = ? AND association_id IS NULL`,
+		account, region, region, allocationID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	if _, err := r.GetEIP(account, region, allocationID); err != nil {
+		return err
+	}
+	return models.ErrInUse
 }
 
 // ListRouteTables returns every route table for the account, optionally

@@ -27,6 +27,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/redscaresu/fakeaws/handlers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -785,6 +788,114 @@ func TestRegressionRunInstancesAvailableInAnyRegion(t *testing.T) {
 		"MinCount":     {"1"}, "MaxCount": {"1"},
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "RunInstances ap-northeast-1 body=%s", body)
+}
+
+// TestRegressionEIPAssociateWithInstance pins the aws_eip that sets
+// `instance`: fakeaws had no AssociateAddress / DisassociateAddress,
+// so the provider's associate failed 404 mid-apply. The provider
+// associates by InstanceId, reads the association back through
+// DescribeAddresses' association-id filter, and on destroy
+// disassociates before releasing. While associated the address is the
+// instance's public IP, as on EC2; the launch's own comes back after.
+func TestRegressionEIPAssociateWithInstance(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	c, ctx := sweepClient(srv), t.Context()
+	vpc, err := c.CreateVpc(ctx, &ec2.CreateVpcInput{CidrBlock: aws.String("10.0.0.0/16")})
+	require.NoError(t, err)
+	subnet, err := c.CreateSubnet(ctx, &ec2.CreateSubnetInput{VpcId: vpc.Vpc.VpcId, CidrBlock: aws.String("10.0.1.0/24")})
+	require.NoError(t, err)
+	run, err := c.RunInstances(ctx, &ec2.RunInstancesInput{
+		ImageId: aws.String("ami-0abcd1234"), InstanceType: ec2types.InstanceTypeT3Micro,
+		MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
+		NetworkInterfaces: []ec2types.InstanceNetworkInterfaceSpecification{{
+			DeviceIndex: aws.Int32(0), SubnetId: subnet.Subnet.SubnetId, AssociatePublicIpAddress: aws.Bool(true),
+		}},
+	})
+	require.NoError(t, err)
+	inst := run.Instances[0]
+	launchIP := aws.ToString(inst.PublicIpAddress)
+	require.NotEmpty(t, launchIP, "launch public IP")
+	publicIP := func() string {
+		out, err := c.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{aws.ToString(inst.InstanceId)}})
+		require.NoError(t, err)
+		return aws.ToString(out.Reservations[0].Instances[0].PublicIpAddress)
+	}
+	alloc, err := c.AllocateAddress(ctx, &ec2.AllocateAddressInput{Domain: ec2types.DomainTypeVpc})
+	require.NoError(t, err)
+	second, err := c.AllocateAddress(ctx, &ec2.AllocateAddressInput{Domain: ec2types.DomainTypeVpc})
+	require.NoError(t, err)
+
+	assoc, err := c.AssociateAddress(ctx, &ec2.AssociateAddressInput{AllocationId: alloc.AllocationId, InstanceId: inst.InstanceId})
+	require.NoError(t, err)
+	assocID := aws.ToString(assoc.AssociationId)
+	require.True(t, strings.HasPrefix(assocID, "eipassoc-"), "associationId: %q", assocID)
+
+	out, err := c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{
+		Filters: []ec2types.Filter{{Name: aws.String("association-id"), Values: []string{assocID}}},
+	})
+	require.NoError(t, err)
+	require.Len(t, out.Addresses, 1)
+	addr := out.Addresses[0]
+	assert.Equal(t, aws.ToString(alloc.AllocationId), aws.ToString(addr.AllocationId))
+	assert.Equal(t, assocID, aws.ToString(addr.AssociationId))
+	assert.Equal(t, aws.ToString(inst.InstanceId), aws.ToString(addr.InstanceId))
+	assert.Equal(t, aws.ToString(inst.NetworkInterfaces[0].NetworkInterfaceId), aws.ToString(addr.NetworkInterfaceId))
+	assert.Equal(t, aws.ToString(inst.PrivateIpAddress), aws.ToString(addr.PrivateIpAddress))
+	assert.Equal(t, aws.ToString(alloc.PublicIp), publicIP(), "instance public IP while associated")
+
+	_, err = c.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: alloc.AllocationId})
+	assert.ErrorContains(t, err, "InvalidIPAddress.InUse", "release while associated")
+	_, err = c.AssociateAddress(ctx, &ec2.AssociateAddressInput{AllocationId: aws.String("eipalloc-nope"), InstanceId: inst.InstanceId})
+	assert.ErrorContains(t, err, "InvalidAllocationID.NotFound", "unknown allocation")
+	_, err = c.AssociateAddress(ctx, &ec2.AssociateAddressInput{AllocationId: alloc.AllocationId, InstanceId: aws.String("i-nope")})
+	assert.ErrorContains(t, err, "InvalidInstanceID.NotFound", "unknown instance")
+	_, err = c.AssociateAddress(ctx, &ec2.AssociateAddressInput{AllocationId: second.AllocationId, InstanceId: inst.InstanceId})
+	assert.ErrorContains(t, err, "Resource.AlreadyAssociated", "second address on the instance")
+
+	_, err = c.DisassociateAddress(ctx, &ec2.DisassociateAddressInput{AssociationId: aws.String(assocID)})
+	require.NoError(t, err)
+	out, err = c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{AllocationIds: []string{aws.ToString(alloc.AllocationId)}})
+	require.NoError(t, err)
+	require.Len(t, out.Addresses, 1)
+	assert.Nil(t, out.Addresses[0].AssociationId, "association cleared")
+	assert.Nil(t, out.Addresses[0].InstanceId, "instance cleared")
+	assert.Equal(t, launchIP, publicIP(), "launch public IP back after disassociate")
+	_, err = c.DisassociateAddress(ctx, &ec2.DisassociateAddressInput{AssociationId: aws.String(assocID)})
+	assert.ErrorContains(t, err, "InvalidAssociationID.NotFound", "disassociate twice")
+
+	_, err = c.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: alloc.AllocationId})
+	assert.NoError(t, err, "release after disassociate")
+}
+
+// TestRegressionEIPDisassociatedOnTerminate: EC2 disassociates an
+// instance's address when it terminates, so the address does not
+// keep pointing at a deleted ENI and can be released.
+func TestRegressionEIPDisassociatedOnTerminate(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	c, ctx := sweepClient(srv), t.Context()
+	vpc, err := c.CreateVpc(ctx, &ec2.CreateVpcInput{CidrBlock: aws.String("10.0.0.0/16")})
+	require.NoError(t, err)
+	subnet, err := c.CreateSubnet(ctx, &ec2.CreateSubnetInput{VpcId: vpc.Vpc.VpcId, CidrBlock: aws.String("10.0.1.0/24")})
+	require.NoError(t, err)
+	run, err := c.RunInstances(ctx, &ec2.RunInstancesInput{
+		ImageId: aws.String("ami-0abcd1234"), InstanceType: ec2types.InstanceTypeT3Micro,
+		SubnetId: subnet.Subnet.SubnetId, MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
+	})
+	require.NoError(t, err)
+	alloc, err := c.AllocateAddress(ctx, &ec2.AllocateAddressInput{Domain: ec2types.DomainTypeVpc})
+	require.NoError(t, err)
+	_, err = c.AssociateAddress(ctx, &ec2.AssociateAddressInput{AllocationId: alloc.AllocationId, InstanceId: run.Instances[0].InstanceId})
+	require.NoError(t, err)
+
+	_, err = c.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: []string{aws.ToString(run.Instances[0].InstanceId)}})
+	require.NoError(t, err)
+	out, err := c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{AllocationIds: []string{aws.ToString(alloc.AllocationId)}})
+	require.NoError(t, err)
+	require.Len(t, out.Addresses, 1)
+	assert.Nil(t, out.Addresses[0].AssociationId)
+	assert.Nil(t, out.Addresses[0].NetworkInterfaceId)
+	_, err = c.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: alloc.AllocationId})
+	assert.NoError(t, err)
 }
 
 // TestRegressionStateGatherEC2Collections pins Codex pass 10 BLOCKING
