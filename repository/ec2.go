@@ -224,6 +224,7 @@ type EC2EIP struct {
 	NetworkInterfaceID string `json:"network_interface_id,omitempty"`
 	InstanceID         string `json:"instance_id,omitempty"`
 	AssociationID      string `json:"association_id,omitempty"`
+	PrivateIP          string `json:"private_ip,omitempty"`
 	Region             string `json:"region"`
 	CreatedAt          string `json:"created_at"`
 }
@@ -871,22 +872,101 @@ func (r *Repository) GetEIP(account, region, allocationID string) (*EC2EIP, erro
 	return &eip, nil
 }
 
-func (r *Repository) DeleteEIP(account, region, allocationID string) error {
-	var res sql.Result
-	var err error
-	if region == "" {
-		res, err = r.db.Exec(`DELETE FROM ec2_eips WHERE account_id = ? AND allocation_id = ?`, account, allocationID)
-	} else {
-		res, err = r.db.Exec(`DELETE FROM ec2_eips WHERE account_id = ? AND region = ? AND allocation_id = ?`, account, region, allocationID)
-	}
+// AssociateEIP saves eip's new association and eni's public IP in one
+// transaction: EC2 shows an associated address as its ENI's public IP.
+// The UPDATE itself refuses an address that is already associated, or
+// an ENI that already has an address, with ErrConflict, so of two
+// racing associates only one commits.
+func (r *Repository) AssociateEIP(account string, eip *EC2EIP, eni *EC2NetworkInterface) error {
+	tx, err := r.db.Begin()
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	defer tx.Rollback()
+	body, _ := json.Marshal(eip)
+	res, err := tx.Exec(
+		`UPDATE ec2_eips SET network_interface_id = ?, instance_id = ?, association_id = ?, data = ?
+		   WHERE account_id = ? AND allocation_id = ? AND association_id IS NULL
+		     AND NOT EXISTS (SELECT 1 FROM ec2_eips WHERE account_id = ? AND network_interface_id = ?)`,
+		eip.NetworkInterfaceID, eip.InstanceID, eip.AssociationID, string(body), account, eip.AllocationID,
+		account, eip.NetworkInterfaceID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var exists int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM ec2_eips WHERE account_id = ? AND allocation_id = ?`, account, eip.AllocationID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return models.ErrNotFound
+		}
+		return models.ErrConflict
+	}
+	if err := updateENITx(tx, account, eni); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DisassociateEIP saves eip, its association cleared, and eni's public
+// IP in one transaction. eni may be nil.
+func (r *Repository) DisassociateEIP(account string, eip *EC2EIP, eni *EC2NetworkInterface) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	body, _ := json.Marshal(eip)
+	res, err := tx.Exec(
+		`UPDATE ec2_eips SET network_interface_id = NULL, instance_id = NULL, association_id = NULL, data = ?
+		   WHERE account_id = ? AND allocation_id = ?`,
+		string(body), account, eip.AllocationID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return models.ErrNotFound
+	}
+	if eni != nil {
+		if err := updateENITx(tx, account, eni); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func updateENITx(tx *sql.Tx, account string, eni *EC2NetworkInterface) error {
+	body, _ := json.Marshal(eni)
+	res, err := tx.Exec(`UPDATE ec2_network_interfaces SET data = ? WHERE account_id = ? AND id = ?`, string(body), account, eni.ID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
 		return models.ErrNotFound
 	}
 	return nil
+}
+
+// DeleteEIP releases an address. An associated address is ErrInUse,
+// as EC2 refuses to release it.
+func (r *Repository) DeleteEIP(account, region, allocationID string) error {
+	res, err := r.db.Exec(
+		`DELETE FROM ec2_eips WHERE account_id = ? AND (? = '' OR region = ?) AND allocation_id = ? AND association_id IS NULL`,
+		account, region, region, allocationID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	if _, err := r.GetEIP(account, region, allocationID); err != nil {
+		return err
+	}
+	return models.ErrInUse
 }
 
 // ListRouteTables returns every route table for the account, optionally

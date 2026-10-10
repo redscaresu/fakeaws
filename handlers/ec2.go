@@ -114,6 +114,10 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 		app.ec2ReleaseAddress(w, account, region, req)
 	case "DescribeAddressesAttribute":
 		app.ec2DescribeAddressesAttribute(w, account, region, req)
+	case "AssociateAddress":
+		app.ec2AssociateAddress(w, account, region, req)
+	case "DisassociateAddress":
+		app.ec2DisassociateAddress(w, account, region, req)
 
 	// ----- Instance -----
 	case "RunInstances":
@@ -1023,10 +1027,14 @@ func (app *Application) ec2DeleteRoute(w http.ResponseWriter, account, region st
 // ----- EIP handlers -----
 
 type ec2AddressXML struct {
-	AllocationId string              `xml:"allocationId"`
-	PublicIp     string              `xml:"publicIp"`
-	Domain       string              `xml:"domain"`
-	TagSet       []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
+	AllocationId       string              `xml:"allocationId"`
+	PublicIp           string              `xml:"publicIp"`
+	Domain             string              `xml:"domain"`
+	AssociationId      string              `xml:"associationId,omitempty"`
+	InstanceId         string              `xml:"instanceId,omitempty"`
+	NetworkInterfaceId string              `xml:"networkInterfaceId,omitempty"`
+	PrivateIpAddress   string              `xml:"privateIpAddress,omitempty"`
+	TagSet             []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
 }
 
 type ec2AllocateAddressResult struct {
@@ -1104,13 +1112,8 @@ func (app *Application) ec2FindAddresses(w http.ResponseWriter, account, region 
 	var out []*repository.EC2EIP
 	for _, id := range ids {
 		eip, err := app.repo.GetEIP(account, region, id)
-		if errors.Is(err, models.ErrNotFound) {
-			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
-				"InvalidAllocationID.NotFound", fmt.Sprintf("The allocation ID '%s' does not exist", id))
-			return nil, false
-		}
 		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			writeEIPError(w, id, err)
 			return nil, false
 		}
 		out = append(out, eip)
@@ -1118,12 +1121,37 @@ func (app *Application) ec2FindAddresses(w http.ResponseWriter, account, region 
 	return out, true
 }
 
+// writeEIPError answers a failed address lookup or release with the
+// code EC2 uses: InvalidAllocationID.NotFound for a missing address,
+// InvalidIPAddress.InUse for releasing an associated one.
+func writeEIPError(w http.ResponseWriter, id string, err error) {
+	switch {
+	case errors.Is(err, models.ErrNotFound):
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+			"InvalidAllocationID.NotFound", fmt.Sprintf("The allocation ID '%s' does not exist", id))
+	case errors.Is(err, models.ErrInUse):
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+			"InvalidIPAddress.InUse", fmt.Sprintf("Address '%s' is in use.", id))
+	default:
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+	}
+}
+
 // ec2DescribeAddresses answers the AllocationId.N lookup the provider
-// makes and, with none, the scope sweep's list of every address.
-// Filter.N and PublicIp.N are refused rather than ignored.
+// makes, its association-id filter after AssociateAddress and, with
+// neither, the scope sweep's list of every address. Other filters and
+// PublicIp.N are refused rather than ignored.
 func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if refuseUnmodelled(w, req, "Filter.", "PublicIp.") {
+	if refuseUnmodelled(w, req, "PublicIp.") {
 		return
+	}
+	filters := ec2Filters(req.Params)
+	for name := range filters {
+		if name != "association-id" {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
+				fmt.Errorf("DescribeAddresses filter %q not supported by fakeaws: %w", name, models.ErrConflict))
+			return
+		}
 	}
 	eips, ok := app.ec2FindAddresses(w, account, region, req)
 	if !ok {
@@ -1135,8 +1163,13 @@ func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, reg
 	}
 	out := ec2DescribeAddressesResult{AddressSet: []ec2AddressXML{}}
 	for _, eip := range eips {
+		if want, ok := filters["association-id"]; ok && !slices.Contains(want, eip.AssociationID) {
+			continue
+		}
 		out.AddressSet = append(out.AddressSet, ec2AddressXML{
 			AllocationId: eip.AllocationID, PublicIp: eip.PublicIP, Domain: eip.Domain,
+			AssociationId: eip.AssociationID, InstanceId: eip.InstanceID,
+			NetworkInterfaceId: eip.NetworkInterfaceID, PrivateIpAddress: eip.PrivateIP,
 			TagSet: tags[eip.AllocationID],
 		})
 	}
@@ -1168,11 +1201,147 @@ func (app *Application) ec2DescribeAddressesAttribute(w http.ResponseWriter, acc
 }
 
 func (app *Application) ec2ReleaseAddress(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteEIP(account, region, req.Params.Get("AllocationId")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+	id := req.Params.Get("AllocationId")
+	if err := app.repo.DeleteEIP(account, region, id); err != nil {
+		writeEIPError(w, id, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "ReleaseAddress", nil)
+}
+
+type ec2AssociateAddressResult struct {
+	AssociationId string `xml:"associationId"`
+}
+
+// ec2AssociateAddress attaches an address to an instance's primary
+// ENI, or to an ENI named directly: the association goes on the
+// address and its public IP becomes the ENI's, as on EC2. An address
+// already associated, or an ENI that already has one, is
+// Resource.AlreadyAssociated.
+// ponytail: AllowReassociation is refused, not modelled; the provider
+// disassociates before it re-points an address.
+func (app *Application) ec2AssociateAddress(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	allocID := req.Params.Get("AllocationId")
+	eip, err := app.repo.GetEIP(account, region, allocID)
+	if err != nil {
+		writeEIPError(w, allocID, err)
+		return
+	}
+	eni, ok := app.associationTarget(w, account, region, req)
+	if !ok {
+		return
+	}
+	if ip := req.Params.Get("PrivateIpAddress"); ip != "" && ip != eni.PrivateIP {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue",
+			fmt.Sprintf("The private IP address %s is not assigned to network interface %s", ip, eni.ID))
+		return
+	}
+	if req.Params.Get("AllowReassociation") == "true" {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
+			fmt.Errorf("AssociateAddress AllowReassociation not supported by fakeaws: %w", models.ErrConflict))
+		return
+	}
+	eip.AssociationID = "eipassoc-" + ec2RandID()
+	eip.InstanceID, eip.NetworkInterfaceID, eip.PrivateIP = eni.InstanceID, eni.ID, eni.PrivateIP
+	eni.PublicIP = eip.PublicIP
+	err = app.repo.AssociateEIP(account, eip, eni)
+	if errors.Is(err, models.ErrConflict) {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "Resource.AlreadyAssociated",
+			fmt.Sprintf("resource %s or network interface %s is already associated with an Elastic IP", allocID, eni.ID))
+		return
+	}
+	if err != nil {
+		writeEIPError(w, allocID, err)
+		return
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "AssociateAddress", &ec2AssociateAddressResult{AssociationId: eip.AssociationID})
+}
+
+// associationTarget resolves AssociateAddress's InstanceId (to its
+// primary ENI) or NetworkInterfaceId. It writes the error itself, a
+// missing id as 400 as EC2 does, and reports false.
+func (app *Application) associationTarget(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) (*repository.EC2NetworkInterface, bool) {
+	instanceID, eniID := req.Params.Get("InstanceId"), req.Params.Get("NetworkInterfaceId")
+	if eniID != "" {
+		eni, err := app.repo.GetNetworkInterface(account, region, eniID)
+		if errors.Is(err, models.ErrNotFound) {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				"InvalidNetworkInterfaceID.NotFound", fmt.Sprintf("The networkInterface ID '%s' does not exist", eniID))
+			return nil, false
+		}
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return nil, false
+		}
+		if instanceID != "" && instanceID != eni.InstanceID {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterCombination",
+				fmt.Sprintf("Network interface %s is not attached to instance %s", eniID, instanceID))
+			return nil, false
+		}
+		return eni, true
+	}
+	if instanceID == "" {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "MissingParameter",
+			"Either an instance ID or a network interface ID must be specified")
+		return nil, false
+	}
+	_, err := app.repo.GetInstance(account, region, instanceID)
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+			"InvalidInstanceID.NotFound", fmt.Sprintf("The instance ID '%s' does not exist", instanceID))
+		return nil, false
+	}
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return nil, false
+	}
+	enis, err := app.instanceENIs(account)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return nil, false
+	}
+	eni := enis[instanceID]
+	if eni == nil { // terminated: its ENI is gone
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidInstanceID",
+			fmt.Sprintf("The instance '%s' is not in a valid state for this operation", instanceID))
+		return nil, false
+	}
+	return eni, true
+}
+
+// ec2DisassociateAddress clears the association AssociationId names,
+// and the ENI gets back the public IP its launch gave it, if any. An
+// unknown association is InvalidAssociationID.NotFound, which the
+// provider reads as already detached.
+func (app *Application) ec2DisassociateAddress(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	assocID := req.Params.Get("AssociationId")
+	eips, err := app.repo.ListEIPs(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	i := slices.IndexFunc(eips, func(e *repository.EC2EIP) bool { return assocID != "" && e.AssociationID == assocID })
+	if i < 0 {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidAssociationID.NotFound",
+			fmt.Sprintf("The association ID '%s' does not exist", assocID))
+		return
+	}
+	eip := eips[i]
+	eni, err := app.repo.GetNetworkInterface(account, region, eip.NetworkInterfaceID)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	eni.PublicIP = ""
+	if eni.AutoPublicIP {
+		eni.PublicIP = ec2DerivePublicIP(eni.ID)
+	}
+	eip.AssociationID, eip.InstanceID, eip.NetworkInterfaceID, eip.PrivateIP = "", "", "", ""
+	if err := app.repo.DisassociateEIP(account, eip, eni); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "DisassociateAddress", nil)
 }
 
 // ----- SecurityGroup handlers -----
@@ -2062,7 +2231,7 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		SecurityGroupIDs: nw.sgIDs, PrivateIP: nw.privateIP, SourceDestCheck: true,
 	}
 	if nw.associatePublicIP == "true" || (nw.associatePublicIP == "" && subnet.MapPublicIPOnLaunch) {
-		eni.PublicIP = ec2DerivePublicIP(eni.ID)
+		eni.PublicIP, eni.AutoPublicIP = ec2DerivePublicIP(eni.ID), true
 	}
 	err = app.repo.CreateInstance(account, inst, eni)
 	if err == nil {

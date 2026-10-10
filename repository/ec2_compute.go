@@ -116,7 +116,7 @@ type EC2Instance struct {
 
 // EC2NetworkInterface is an instance's primary ENI (device index 0),
 // deleted when the instance terminates. PublicIP is empty unless the
-// launch asked for one.
+// launch asked for one (AutoPublicIP) or an Elastic IP is associated.
 type EC2NetworkInterface struct {
 	ID               string   `json:"network_interface_id"`
 	AttachmentID     string   `json:"attachment_id"`
@@ -125,6 +125,7 @@ type EC2NetworkInterface struct {
 	VPCID            string   `json:"vpc_id"`
 	PrivateIP        string   `json:"private_ip"`
 	PublicIP         string   `json:"public_ip,omitempty"`
+	AutoPublicIP     bool     `json:"auto_public_ip,omitempty"`
 	SecurityGroupIDs []string `json:"security_group_ids"`
 	SourceDestCheck  bool     `json:"source_dest_check"`
 	Region           string   `json:"region"`
@@ -314,7 +315,7 @@ func (r *Repository) ListInstances(account, region string) ([]*EC2Instance, erro
 // pending → running → shutting-down → terminated. ModifyInstanceAttribute
 // is a no-op (concepts.md "Standing patterns" item 9 — terminal-state
 // refusal is enforced here). Terminating deletes the instance's ENIs
-// in the same transaction.
+// and clears its EIP associations in the same transaction.
 func (r *Repository) SetInstanceState(account, region, id, state string) error {
 	current, err := r.GetInstance(account, region, id)
 	if err != nil {
@@ -338,6 +339,13 @@ func (r *Repository) SetInstanceState(account, region, id, state string) error {
 	}
 	if state == "terminated" {
 		if _, err := tx.Exec(`DELETE FROM ec2_network_interfaces WHERE account_id = ? AND instance_id = ?`, account, id); err != nil {
+			return err
+		}
+		// EC2 disassociates an instance's Elastic IPs when it terminates.
+		if _, err := tx.Exec(
+			`UPDATE ec2_eips SET network_interface_id = NULL, instance_id = NULL, association_id = NULL,
+			   data = json_remove(data, '$.network_interface_id', '$.instance_id', '$.association_id', '$.private_ip')
+			 WHERE account_id = ? AND instance_id = ?`, account, id); err != nil {
 			return err
 		}
 	}

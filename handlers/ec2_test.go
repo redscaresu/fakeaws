@@ -1196,8 +1196,9 @@ func TestEC2_EIPLifecycle(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s after release", action)
 		assert.Contains(t, string(body), "<Code>InvalidAllocationID.NotFound</Code>", "%s: %s", action, body)
 	}
-	resp, _ = ec2Call(t, srv, region, "ReleaseAddress", url.Values{"AllocationId": {allocID}})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ReleaseAddress on already-released")
+	resp, body = ec2Call(t, srv, region, "ReleaseAddress", url.Values{"AllocationId": {allocID}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "ReleaseAddress on already-released")
+	assert.Contains(t, string(body), "<Code>InvalidAllocationID.NotFound</Code>", "ReleaseAddress on already-released: %s", body)
 }
 
 func setMapPublicIPOnLaunch(t *testing.T, srv *httptest.Server, region, subnet string, v bool) {

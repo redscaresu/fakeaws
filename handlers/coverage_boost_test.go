@@ -374,9 +374,9 @@ func TestCoverage_EC2ErrorPaths(t *testing.T) {
 	resp, _ = ec2Call(t, srv, region, "AllocateAddress", url.Values{"Domain": {"standard"}})
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AllocateAddress bad domain")
 
-	// ReleaseAddress missing → 404.
+	// ReleaseAddress missing → 400 InvalidAllocationID.NotFound, as EC2.
 	resp, _ = ec2Call(t, srv, region, "ReleaseAddress", url.Values{"AllocationId": {"missing"}})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ReleaseAddress missing")
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "ReleaseAddress missing")
 
 	// RunInstances missing required fields → 409.
 	resp, _ = ec2Call(t, srv, region, "RunInstances", nil)
