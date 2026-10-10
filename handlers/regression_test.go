@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/redscaresu/fakeaws/handlers"
@@ -844,13 +845,15 @@ func TestRegressionEIPAssociateWithInstance(t *testing.T) {
 	assert.Equal(t, aws.ToString(alloc.PublicIp), publicIP(), "instance public IP while associated")
 
 	_, err = c.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: alloc.AllocationId})
-	assert.ErrorContains(t, err, "InvalidIPAddress.InUse", "release while associated")
+	assertEC2Error(t, err, "InvalidIPAddress.InUse", "release while associated")
 	_, err = c.AssociateAddress(ctx, &ec2.AssociateAddressInput{AllocationId: aws.String("eipalloc-nope"), InstanceId: inst.InstanceId})
-	assert.ErrorContains(t, err, "InvalidAllocationID.NotFound", "unknown allocation")
-	_, err = c.AssociateAddress(ctx, &ec2.AssociateAddressInput{AllocationId: alloc.AllocationId, InstanceId: aws.String("i-nope")})
-	assert.ErrorContains(t, err, "InvalidInstanceID.NotFound", "unknown instance")
+	assertEC2Error(t, err, "InvalidAllocationID.NotFound", "unknown allocation")
+	_, err = c.AssociateAddress(ctx, &ec2.AssociateAddressInput{AllocationId: second.AllocationId, InstanceId: aws.String("i-nope")})
+	assertEC2Error(t, err, "InvalidInstanceID.NotFound", "unknown instance")
+	_, err = c.AssociateAddress(ctx, &ec2.AssociateAddressInput{AllocationId: second.AllocationId, NetworkInterfaceId: aws.String("eni-nope")})
+	assertEC2Error(t, err, "InvalidNetworkInterfaceID.NotFound", "unknown network interface")
 	_, err = c.AssociateAddress(ctx, &ec2.AssociateAddressInput{AllocationId: second.AllocationId, InstanceId: inst.InstanceId})
-	assert.ErrorContains(t, err, "Resource.AlreadyAssociated", "second address on the instance")
+	assertEC2Error(t, err, "Resource.AlreadyAssociated", "second address on the instance")
 
 	_, err = c.DisassociateAddress(ctx, &ec2.DisassociateAddressInput{AssociationId: aws.String(assocID)})
 	require.NoError(t, err)
@@ -861,10 +864,21 @@ func TestRegressionEIPAssociateWithInstance(t *testing.T) {
 	assert.Nil(t, out.Addresses[0].InstanceId, "instance cleared")
 	assert.Equal(t, launchIP, publicIP(), "launch public IP back after disassociate")
 	_, err = c.DisassociateAddress(ctx, &ec2.DisassociateAddressInput{AssociationId: aws.String(assocID)})
-	assert.ErrorContains(t, err, "InvalidAssociationID.NotFound", "disassociate twice")
+	assertEC2Error(t, err, "InvalidAssociationID.NotFound", "disassociate twice")
 
 	_, err = c.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: alloc.AllocationId})
 	assert.NoError(t, err, "release after disassociate")
+}
+
+// assertEC2Error asserts err is EC2's 400 with code, the status EC2
+// answers every client error with.
+func assertEC2Error(t *testing.T, err error, code, msg string) {
+	t.Helper()
+	var re *awshttp.ResponseError
+	if assert.ErrorAs(t, err, &re, msg) {
+		assert.Equal(t, http.StatusBadRequest, re.HTTPStatusCode(), msg)
+	}
+	assert.ErrorContains(t, err, code, msg)
 }
 
 // TestRegressionEIPDisassociatedOnTerminate: EC2 disassociates an

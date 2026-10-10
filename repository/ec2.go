@@ -872,10 +872,12 @@ func (r *Repository) GetEIP(account, region, allocationID string) (*EC2EIP, erro
 	return &eip, nil
 }
 
-// SetEIPAssociation saves eip's association and, when eni is not nil,
-// the public IP of the ENI it moves on or off, in one transaction: EC2
-// shows an associated address as its ENI's public IP.
-func (r *Repository) SetEIPAssociation(account string, eip *EC2EIP, eni *EC2NetworkInterface) error {
+// AssociateEIP saves eip's new association and eni's public IP in one
+// transaction: EC2 shows an associated address as its ENI's public IP.
+// The UPDATE itself refuses an address that is already associated, or
+// an ENI that already has an address, with ErrConflict, so of two
+// racing associates only one commits.
+func (r *Repository) AssociateEIP(account string, eip *EC2EIP, eni *EC2NetworkInterface) error {
 	tx, err := r.db.Begin()
 	if err != nil {
 		return err
@@ -883,9 +885,44 @@ func (r *Repository) SetEIPAssociation(account string, eip *EC2EIP, eni *EC2Netw
 	defer tx.Rollback()
 	body, _ := json.Marshal(eip)
 	res, err := tx.Exec(
-		`UPDATE ec2_eips SET network_interface_id = NULLIF(?, ''), instance_id = NULLIF(?, ''), association_id = NULLIF(?, ''), data = ?
-		   WHERE account_id = ? AND allocation_id = ?`,
+		`UPDATE ec2_eips SET network_interface_id = ?, instance_id = ?, association_id = ?, data = ?
+		   WHERE account_id = ? AND allocation_id = ? AND association_id IS NULL
+		     AND NOT EXISTS (SELECT 1 FROM ec2_eips WHERE account_id = ? AND network_interface_id = ?)`,
 		eip.NetworkInterfaceID, eip.InstanceID, eip.AssociationID, string(body), account, eip.AllocationID,
+		account, eip.NetworkInterfaceID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var exists int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM ec2_eips WHERE account_id = ? AND allocation_id = ?`, account, eip.AllocationID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return models.ErrNotFound
+		}
+		return models.ErrConflict
+	}
+	if err := updateENITx(tx, account, eni); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DisassociateEIP saves eip, its association cleared, and eni's public
+// IP in one transaction. eni may be nil.
+func (r *Repository) DisassociateEIP(account string, eip *EC2EIP, eni *EC2NetworkInterface) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	body, _ := json.Marshal(eip)
+	res, err := tx.Exec(
+		`UPDATE ec2_eips SET network_interface_id = NULL, instance_id = NULL, association_id = NULL, data = ?
+		   WHERE account_id = ? AND allocation_id = ?`,
+		string(body), account, eip.AllocationID,
 	)
 	if err != nil {
 		return err
@@ -894,16 +931,23 @@ func (r *Repository) SetEIPAssociation(account string, eip *EC2EIP, eni *EC2Netw
 		return models.ErrNotFound
 	}
 	if eni != nil {
-		eniBody, _ := json.Marshal(eni)
-		res, err := tx.Exec(`UPDATE ec2_network_interfaces SET data = ? WHERE account_id = ? AND id = ?`, string(eniBody), account, eni.ID)
-		if err != nil {
+		if err := updateENITx(tx, account, eni); err != nil {
 			return err
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return models.ErrNotFound
 		}
 	}
 	return tx.Commit()
+}
+
+func updateENITx(tx *sql.Tx, account string, eni *EC2NetworkInterface) error {
+	body, _ := json.Marshal(eni)
+	res, err := tx.Exec(`UPDATE ec2_network_interfaces SET data = ? WHERE account_id = ? AND id = ?`, string(body), account, eni.ID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return models.ErrNotFound
+	}
+	return nil
 }
 
 // DeleteEIP releases an address. An associated address is ErrInUse,

@@ -207,3 +207,45 @@ func TestAMISeedAndList(t *testing.T) {
 		t.Errorf("ListAMIs: %#v", list)
 	}
 }
+
+// TestAssociateEIPGuardIsInTheWrite: the already-associated refusal
+// lives in AssociateEIP's UPDATE, not in a read before it, so a second
+// associate (as two racing AssociateAddress calls would send) fails
+// ErrConflict and leaves the first association in place.
+func TestAssociateEIPGuardIsInTheWrite(t *testing.T) {
+	r := setupRepo(t)
+	_, subnetID := setupVPCSubnet(t, r)
+	inst := &EC2Instance{
+		ID: "i-1", SubnetID: subnetID, AMIID: "ami-1", InstanceType: "t3.micro",
+		Region: testRegion, ARN: "arn", State: "running", CreatedAt: "t",
+	}
+	eni := &EC2NetworkInterface{ID: "eni-1"}
+	require.NoError(t, r.CreateInstance(testAccount, inst, eni))
+	other := &EC2Instance{
+		ID: "i-2", SubnetID: subnetID, AMIID: "ami-1", InstanceType: "t3.micro",
+		Region: testRegion, ARN: "arn", State: "running", CreatedAt: "t",
+	}
+	otherENI := &EC2NetworkInterface{ID: "eni-2"}
+	require.NoError(t, r.CreateInstance(testAccount, other, otherENI))
+	for _, id := range []string{"eipalloc-1", "eipalloc-2"} {
+		require.NoError(t, r.CreateEIP(testAccount, &EC2EIP{AllocationID: id, Domain: "vpc", PublicIP: "203.0.113.7", Region: testRegion, CreatedAt: "t"}))
+	}
+	associate := func(allocID, assocID string, to *EC2NetworkInterface) error {
+		return r.AssociateEIP(testAccount, &EC2EIP{
+			AllocationID: allocID, Domain: "vpc", PublicIP: "203.0.113.7", Region: testRegion, CreatedAt: "t",
+			AssociationID: assocID, InstanceID: to.InstanceID, NetworkInterfaceID: to.ID,
+		}, to)
+	}
+
+	require.NoError(t, associate("eipalloc-1", "eipassoc-a", eni))
+	assert.ErrorIs(t, associate("eipalloc-1", "eipassoc-b", otherENI), models.ErrConflict, "associated address to another ENI")
+	assert.ErrorIs(t, associate("eipalloc-2", "eipassoc-c", eni), models.ErrConflict, "second address on the ENI")
+	assert.ErrorIs(t, associate("eipalloc-missing", "eipassoc-d", otherENI), models.ErrNotFound, "missing address")
+
+	got, err := r.GetEIP(testAccount, testRegion, "eipalloc-1")
+	require.NoError(t, err)
+	assert.Equal(t, "eipassoc-a", got.AssociationID, "first association kept")
+	got, err = r.GetEIP(testAccount, testRegion, "eipalloc-2")
+	require.NoError(t, err)
+	assert.Empty(t, got.AssociationID, "second address left unassociated")
+}

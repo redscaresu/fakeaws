@@ -1241,20 +1241,16 @@ func (app *Application) ec2AssociateAddress(w http.ResponseWriter, account, regi
 			fmt.Errorf("AssociateAddress AllowReassociation not supported by fakeaws: %w", models.ErrConflict))
 		return
 	}
-	eips, err := app.repo.ListEIPs(account, region)
-	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-		return
-	}
-	if eip.AssociationID != "" || slices.ContainsFunc(eips, func(e *repository.EC2EIP) bool { return e.NetworkInterfaceID == eni.ID }) {
+	eip.AssociationID = "eipassoc-" + ec2RandID()
+	eip.InstanceID, eip.NetworkInterfaceID, eip.PrivateIP = eni.InstanceID, eni.ID, eni.PrivateIP
+	eni.PublicIP = eip.PublicIP
+	err = app.repo.AssociateEIP(account, eip, eni)
+	if errors.Is(err, models.ErrConflict) {
 		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "Resource.AlreadyAssociated",
 			fmt.Sprintf("resource %s or network interface %s is already associated with an Elastic IP", allocID, eni.ID))
 		return
 	}
-	eip.AssociationID = "eipassoc-" + ec2RandID()
-	eip.InstanceID, eip.NetworkInterfaceID, eip.PrivateIP = eni.InstanceID, eni.ID, eni.PrivateIP
-	eni.PublicIP = eip.PublicIP
-	if err := app.repo.SetEIPAssociation(account, eip, eni); err != nil {
+	if err != nil {
 		writeEIPError(w, allocID, err)
 		return
 	}
@@ -1262,14 +1258,15 @@ func (app *Application) ec2AssociateAddress(w http.ResponseWriter, account, regi
 }
 
 // associationTarget resolves AssociateAddress's InstanceId (to its
-// primary ENI) or NetworkInterfaceId. It writes the error itself and
-// reports false.
+// primary ENI) or NetworkInterfaceId. It writes the error itself, a
+// missing id as 400 as EC2 does, and reports false.
 func (app *Application) associationTarget(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) (*repository.EC2NetworkInterface, bool) {
 	instanceID, eniID := req.Params.Get("InstanceId"), req.Params.Get("NetworkInterfaceId")
 	if eniID != "" {
 		eni, err := app.repo.GetNetworkInterface(account, region, eniID)
 		if errors.Is(err, models.ErrNotFound) {
-			writeENINotFound(w, eniID)
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				"InvalidNetworkInterfaceID.NotFound", fmt.Sprintf("The networkInterface ID '%s' does not exist", eniID))
 			return nil, false
 		}
 		if err != nil {
@@ -1288,8 +1285,14 @@ func (app *Application) associationTarget(w http.ResponseWriter, account, region
 			"Either an instance ID or a network interface ID must be specified")
 		return nil, false
 	}
-	if _, err := app.repo.GetInstance(account, region, instanceID); err != nil {
-		writeInstanceError(w, instanceID, err)
+	_, err := app.repo.GetInstance(account, region, instanceID)
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+			"InvalidInstanceID.NotFound", fmt.Sprintf("The instance ID '%s' does not exist", instanceID))
+		return nil, false
+	}
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return nil, false
 	}
 	enis, err := app.instanceENIs(account)
@@ -1334,7 +1337,7 @@ func (app *Application) ec2DisassociateAddress(w http.ResponseWriter, account, r
 		eni.PublicIP = ec2DerivePublicIP(eni.ID)
 	}
 	eip.AssociationID, eip.InstanceID, eip.NetworkInterfaceID, eip.PrivateIP = "", "", "", ""
-	if err := app.repo.SetEIPAssociation(account, eip, eni); err != nil {
+	if err := app.repo.DisassociateEIP(account, eip, eni); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
