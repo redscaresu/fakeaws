@@ -427,6 +427,16 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 			fmt.Errorf("VpcId and CidrBlock required: %w", models.ErrConflict))
 		return
 	}
+	vpc, err := app.repo.GetVPC(account, region, vpcID)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	if !subnetCIDRInRange(vpc.CidrBlock, cidr) {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidSubnet.Range",
+			fmt.Sprintf("The CIDR '%s' is invalid.", cidr))
+		return
+	}
 	az := req.Params.Get("AvailabilityZone")
 	if az == "" {
 		az = region + "a"
@@ -437,7 +447,7 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 	}
 	id := "subnet-" + ec2RandID()
 	s := newEC2Subnet(account, region, id, vpcID, cidr, az)
-	err := app.repo.CreateSubnet(account, s)
+	err = app.repo.CreateSubnet(account, s)
 	if err == nil {
 		err = app.tagNew(account, region, onResource(specs["subnet"], id, "subnet"),
 			func() error { return app.repo.DeleteSubnet(account, region, id) })
@@ -448,6 +458,21 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 	}
 	out := ec2CreateSubnetResult{Subnet: ec2SubnetToXML(s)}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateSubnet", &out)
+}
+
+// subnetCIDRInRange reports whether EC2 accepts cidr as a subnet of a
+// VPC whose block is vpcCIDR: inside it, and between /16 and /28.
+// Overlap with sibling subnets is not checked.
+func subnetCIDRInRange(vpcCIDR, cidr string) bool {
+	vpc, err := netip.ParsePrefix(vpcCIDR)
+	if err != nil {
+		return false
+	}
+	sub, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return false
+	}
+	return sub.Bits() >= 16 && sub.Bits() <= 28 && sub.Bits() >= vpc.Bits() && vpc.Contains(sub.Addr())
 }
 
 func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {

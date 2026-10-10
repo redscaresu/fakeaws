@@ -1239,3 +1239,22 @@ func createPolicy(t *testing.T, srv *httptest.Server, name string) {
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "regression seed: createPolicy(%s) body=%s", name, body)
 }
+
+// TestRegressionSubnetCIDROutsideVPCRefused: fakeaws stored any
+// CidrBlock, so a subnet outside its VPC applied here and failed only
+// on real AWS with InvalidSubnet.Range. EC2 refuses a subnet CIDR not
+// within the VPC's block, or not between /16 and /28.
+func TestRegressionSubnetCIDROutsideVPCRefused(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	c, ctx := sweepClient(srv), t.Context()
+	vpc, err := c.CreateVpc(ctx, &ec2.CreateVpcInput{CidrBlock: aws.String("10.80.0.0/16")})
+	require.NoError(t, err)
+	createSubnet := func(cidr string) error {
+		_, err := c.CreateSubnet(ctx, &ec2.CreateSubnetInput{VpcId: vpc.Vpc.VpcId, CidrBlock: aws.String(cidr)})
+		return err
+	}
+
+	assertEC2Error(t, createSubnet("10.81.1.0/24"), "InvalidSubnet.Range", "outside the VPC")
+	assertEC2Error(t, createSubnet("10.80.0.0/29"), "InvalidSubnet.Range", "smaller than /28")
+	assert.NoError(t, createSubnet("10.80.1.0/24"), "inside the VPC")
+}
