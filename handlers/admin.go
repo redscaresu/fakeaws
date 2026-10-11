@@ -66,13 +66,15 @@ func (app *Application) registerAdminRoutes(r chi.Router) {
 // admin token is set.
 //
 // CRITICAL[mock-admin-origin-loopback-only]: a request whose Origin is
-// present and not loopback is 403 before the token is read, so a page in
-// the operator's browser cannot drive /mock even when it holds the token.
-// An absent Origin is a non-browser client and passes on to the token.
+// present and not loopback is 403 before the token is read, so a page
+// served from a non-loopback origin cannot drive /mock even when it holds
+// the token. A loopback origin or an absent one (a non-browser client)
+// passes on to the token, which is what stops a loopback-served page.
 //
 // CRITICAL[mock-admin-token-required]: anything but
 // `Authorization: Bearer <token>` is 401, and neither refusal names the
-// token.
+// token. The compare is constant-time only for a token of the right
+// length; subtle.ConstantTimeCompare refuses a wrong length at once.
 func guardAdmin(token string) func(http.Handler) http.Handler {
 	want := []byte(token)
 	return func(next http.Handler) http.Handler {
