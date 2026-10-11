@@ -361,7 +361,11 @@ func writeAdminError(w http.ResponseWriter, status int, msg string) {
 	writeJSONStatus(w, status, map[string]any{"status": "error", "message": msg})
 }
 
+// handleMockReset deletes the identity with every row, so it holds
+// identityMu exclusively, as setIdentity does.
 func (app *Application) handleMockReset(w http.ResponseWriter, _ *http.Request) {
+	app.identityMu.Lock()
+	defer app.identityMu.Unlock()
 	if err := app.repo.Reset(); err != nil {
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
 			"status":  "error",
@@ -396,7 +400,11 @@ func (app *Application) handleMockSnapshot(w http.ResponseWriter, _ *http.Reques
 	writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
+// handleMockRestore swaps in the snapshot's identity and db handle, so
+// it holds identityMu exclusively, as setIdentity does.
 func (app *Application) handleMockRestore(w http.ResponseWriter, _ *http.Request) {
+	app.identityMu.Lock()
+	defer app.identityMu.Unlock()
 	if err := app.repo.Restore(); err != nil {
 		// ErrNotFound = no snapshot baseline (404).
 		// ErrConflict = :memory: db (409).

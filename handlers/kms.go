@@ -167,6 +167,17 @@ func (app *Application) kmsGetKeyPolicy(w http.ResponseWriter, account, region s
 	// Default key policy — terraform-provider-aws decodes this on
 	// every Read and just stores it. Real AWS returns the resource
 	// policy JSON; we hand back the canonical default-allow shape.
+	// The root principal is the key's account; an unknown KeyId still
+	// gets the policy, under the stored account.
+	var in struct {
+		KeyId string `json:"KeyId"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+	kmsStore.mu.Lock()
+	if k, ok := kmsStore.keys[in.KeyId]; ok {
+		account = k.Account
+	}
+	kmsStore.mu.Unlock()
 	policy := `{"Version":"2012-10-17","Statement":[{"Sid":"Enable IAM User Permissions","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::` + account + `:root"},"Action":"kms:*","Resource":"*"}]}`
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
 		"Policy":     policy,

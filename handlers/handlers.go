@@ -33,7 +33,8 @@ type Application struct {
 	requests   *requestLog // nil unless Options.RecordRequests
 	// identityMu is held shared by every AWS request and /mock/images,
 	// from the account read to the last write, and exclusively by
-	// setIdentity, so an identity change never lands between a
+	// everything that changes the identity (setIdentity, /mock/reset,
+	// /mock/restore), so an identity change never lands between a
 	// handler's account read and the row it writes under that account.
 	identityMu sync.RWMutex
 }

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/redscaresu/fakeaws/handlers"
@@ -848,19 +849,79 @@ func TestSetIdentity_RacesCreate(t *testing.T) {
 	app, srv := newTestApp(t, ":memory:")
 	for i := range 200 {
 		mustOK(t)(doPost(t, srv, "/mock/reset"))
-		done := make(chan int)
-		go func() {
-			resp, _ := doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+otherAccount+`"}`)
-			done <- resp.StatusCode
-		}()
+		done := postAsync(srv, "/mock/identity", `{"account_id":"`+otherAccount+`"}`)
 		mustOK(t)(sqsCall(t, srv, "CreateQueue", `{"QueueName":"race"}`))
-		status := <-done
-		if status == http.StatusConflict {
+		res := <-done
+		require.NoError(t, res.err, "iteration %d", i)
+		if res.status == http.StatusConflict {
 			continue
 		}
-		require.Equal(t, http.StatusOK, status, "iteration %d", i)
+		require.Equal(t, http.StatusOK, res.status, "iteration %d", i)
 		queues, err := app.Repository().ListSQSQueues(awsproto.FakeAccountID, "")
 		require.NoError(t, err)
 		require.Empty(t, queues, "iteration %d: a queue was created under the old account after the change", i)
 	}
+}
+
+// TestMockReset_RacesCreate races a queue create against /mock/reset
+// under a stored account, many times: no row is left under an account
+// other than the one AccountID returns after the reset.
+func TestMockReset_RacesCreate(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	for i := range 200 {
+		mustOK(t)(doPost(t, srv, "/mock/reset"))
+		mustOK(t)(doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+otherAccount+`"}`))
+		done := postAsync(srv, "/mock/reset", "")
+		mustOK(t)(sqsCall(t, srv, "CreateQueue", `{"QueueName":"race"}`))
+		res := <-done
+		require.NoError(t, res.err, "iteration %d", i)
+		require.Equal(t, http.StatusOK, res.status, "iteration %d", i)
+		require.Equal(t, awsproto.FakeAccountID, accountID(t, app), "iteration %d", i)
+		queues, err := app.Repository().ListSQSQueues(otherAccount, "")
+		require.NoError(t, err)
+		require.Empty(t, queues, "iteration %d: a queue was created under the reset account", i)
+	}
+}
+
+// TestKMS_KeyKeepsItsAccount: a key made before an identity change
+// keeps its account in DescribeKey and in its policy's root principal.
+func TestKMS_KeyKeepsItsAccount(t *testing.T) {
+	_, srv := newTestApp(t, ":memory:")
+	const region = "us-east-1"
+	var key struct{ KeyMetadata struct{ KeyId string } }
+	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, region, "CreateKey", `{}`)), &key))
+	mustOK(t)(doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+otherAccount+`"}`))
+
+	keyID := `{"KeyId":"` + key.KeyMetadata.KeyId + `"}`
+	var described struct{ KeyMetadata struct{ AWSAccountId string } }
+	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, region, "DescribeKey", keyID)), &described))
+	assert.Equal(t, awsproto.FakeAccountID, described.KeyMetadata.AWSAccountId)
+	var policy struct{ Policy string }
+	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, region, "GetKeyPolicy", keyID)), &policy))
+	assert.Contains(t, policy.Policy, `"Principal":{"AWS":"arn:aws:iam::`+awsproto.FakeAccountID+`:root"}`)
+}
+
+type postResult struct {
+	status int
+	err    error
+}
+
+// postAsync POSTs body to path on a goroutine and sends the status, or
+// the error, on the returned channel, so a failure is asserted on the
+// test goroutine.
+func postAsync(srv *httptest.Server, path, body string) <-chan postResult {
+	done := make(chan postResult, 1)
+	client := *srv.Client()
+	client.Timeout = 30 * time.Second
+	go func() {
+		resp, err := client.Post(srv.URL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			done <- postResult{err: err}
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		done <- postResult{status: resp.StatusCode}
+	}()
+	return done
 }
