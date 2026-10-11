@@ -55,7 +55,7 @@ type stsGetCallerIdentityResult struct {
 // provider refuses to apply against any other account.
 func stsGetCallerIdentity(w http.ResponseWriter) {
 	awsproto.WriteQueryRPCResponse(w, "GetCallerIdentity", &stsGetCallerIdentityResult{
-		Arn:     awsproto.BuildIAMUserARN(stsCallerUserName),
+		Arn:     awsproto.BuildIAMUserARN(awsproto.FakeAccountID, stsCallerUserName),
 		UserId:  stsCallerUserID,
 		Account: awsproto.FakeAccountID,
 	})
