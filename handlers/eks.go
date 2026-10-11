@@ -115,7 +115,10 @@ func parseRFC3339ToEpoch(s string) float64 {
 
 func (app *Application) eksCreateCluster(w http.ResponseWriter, r *http.Request) {
 	region := chi.URLParam(r, "region")
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	var in eksCreateClusterInput
 	if _, err := awsproto.DecodeJSONBody(r, &in); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, fmt.Errorf("%w: %v", models.ErrConflict, err))
@@ -153,7 +156,10 @@ func (app *Application) eksCreateCluster(w http.ResponseWriter, r *http.Request)
 }
 
 func (app *Application) eksDescribeCluster(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	c, err := app.repo.GetEKSCluster(account, chi.URLParam(r, "region"), chi.URLParam(r, "name"))
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
@@ -174,7 +180,10 @@ func (app *Application) eksDescribeCluster(w http.ResponseWriter, r *http.Reques
 
 func (app *Application) eksListClusters(w http.ResponseWriter, r *http.Request) {
 	region := chi.URLParam(r, "region")
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	clusters, err := app.repo.ListEKSClusters(account, region)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
@@ -190,7 +199,10 @@ func (app *Application) eksListClusters(w http.ResponseWriter, r *http.Request) 
 }
 
 func (app *Application) eksDeleteCluster(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	region := chi.URLParam(r, "region")
 	name := chi.URLParam(r, "name")
 	c, err := app.repo.GetEKSCluster(account, region, name)
@@ -244,7 +256,10 @@ func eksWriteTagError(w http.ResponseWriter, arn string, err error) {
 }
 
 func (app *Application) eksListTagsForResource(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	arn, table, ok := eksTagARN(w, r)
 	if !ok {
 		return
@@ -258,7 +273,10 @@ func (app *Application) eksListTagsForResource(w http.ResponseWriter, r *http.Re
 }
 
 func (app *Application) eksTagResource(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	arn, table, ok := eksTagARN(w, r)
 	if !ok {
 		return
@@ -279,7 +297,10 @@ func (app *Application) eksTagResource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *Application) eksUntagResource(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	arn, table, ok := eksTagARN(w, r)
 	if !ok {
 		return
@@ -318,7 +339,10 @@ type eksNodeGroupDescription struct {
 func (app *Application) eksCreateNodeGroup(w http.ResponseWriter, r *http.Request) {
 	region := chi.URLParam(r, "region")
 	clusterName := chi.URLParam(r, "name")
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	var in eksCreateNodeGroupInput
 	if _, err := awsproto.DecodeJSONBody(r, &in); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, fmt.Errorf("%w: %v", models.ErrConflict, err))
@@ -379,7 +403,10 @@ func eksNodeGroupToDesc(ng *repository.EKSNodeGroup) eksNodeGroupDescription {
 }
 
 func (app *Application) eksDescribeNodeGroup(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	ng, err := app.repo.GetEKSNodeGroup(account, chi.URLParam(r, "region"), chi.URLParam(r, "name"), chi.URLParam(r, "ng"))
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
@@ -399,7 +426,10 @@ func (app *Application) eksDescribeNodeGroup(w http.ResponseWriter, r *http.Requ
 }
 
 func (app *Application) eksDeleteNodeGroup(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	region := chi.URLParam(r, "region")
 	clusterName := chi.URLParam(r, "name")
 	ngName := chi.URLParam(r, "ng")
@@ -438,7 +468,10 @@ type eksAddonDescription struct {
 func (app *Application) eksCreateAddon(w http.ResponseWriter, r *http.Request) {
 	region := chi.URLParam(r, "region")
 	clusterName := chi.URLParam(r, "name")
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	var in eksCreateAddonInput
 	if _, err := awsproto.DecodeJSONBody(r, &in); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, fmt.Errorf("%w: %v", models.ErrConflict, err))
@@ -452,7 +485,7 @@ func (app *Application) eksCreateAddon(w http.ResponseWriter, r *http.Request) {
 	a := &repository.EKSAddon{
 		ClusterName: clusterName, Name: in.AddonName, Version: in.AddonVersion,
 		Status: "ACTIVE", Region: region,
-		ARN:       fmt.Sprintf("arn:aws:eks:%s:%s:addon/%s/%s/uuid", region, awsproto.FakeAccountID, clusterName, in.AddonName),
+		ARN:       fmt.Sprintf("arn:aws:eks:%s:%s:addon/%s/%s/uuid", region, account, clusterName, in.AddonName),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateEKSAddon(account, a); err != nil {
@@ -480,7 +513,10 @@ func eksAddonToDesc(a *repository.EKSAddon) eksAddonDescription {
 }
 
 func (app *Application) eksDescribeAddon(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	a, err := app.repo.GetEKSAddon(account, chi.URLParam(r, "region"), chi.URLParam(r, "name"), chi.URLParam(r, "addon"))
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSONREST, err)
@@ -500,7 +536,10 @@ func (app *Application) eksDescribeAddon(w http.ResponseWriter, r *http.Request)
 }
 
 func (app *Application) eksDeleteAddon(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSONREST)
+	if !ok {
+		return
+	}
 	region := chi.URLParam(r, "region")
 	clusterName := chi.URLParam(r, "name")
 	addonName := chi.URLParam(r, "addon")
@@ -524,8 +563,7 @@ func (app *Application) eksDeleteAddon(w http.ResponseWriter, r *http.Request) {
 //
 // Codex pass 3 BLOCKING #2 fix: clusters now also surface their
 // nodegroups + addons (was previously only emitting clusters).
-func (app *Application) gatherEKSStateReal() map[string]any {
-	const account = awsproto.FakeAccountID
+func (app *Application) gatherEKSStateReal(account string) map[string]any {
 	out := map[string]any{
 		"clusters":    []any{},
 		"node_groups": []any{},

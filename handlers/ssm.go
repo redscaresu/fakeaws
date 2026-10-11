@@ -39,19 +39,23 @@ func (app *Application) handleSSM(w http.ResponseWriter, r *http.Request) {
 		ssmError(w, "ValidationException", err.Error())
 		return
 	}
+	account, ok := app.readAccount(w, awsproto.ShapeJSON11)
+	if !ok {
+		return
+	}
 	switch req.Operation {
 	case "PutParameter":
-		app.ssmPutParameter(w, region, req.Body)
+		app.ssmPutParameter(w, account, region, req.Body)
 	case "GetParameter":
-		app.ssmGetParameter(w, region, req.Body)
+		app.ssmGetParameter(w, account, region, req.Body)
 	case "DescribeParameters":
-		app.ssmDescribeParameters(w, region, req.Body)
+		app.ssmDescribeParameters(w, account, region, req.Body)
 	case "DeleteParameter":
-		app.ssmDeleteParameter(w, region, req.Body)
+		app.ssmDeleteParameter(w, account, region, req.Body)
 	case "ListTagsForResource":
-		app.ssmListTagsForResource(w, region, req.Body)
+		app.ssmListTagsForResource(w, account, region, req.Body)
 	case "AddTagsToResource", "RemoveTagsFromResource":
-		app.ssmChangeTags(w, region, req.Operation, req.Body)
+		app.ssmChangeTags(w, account, region, req.Operation, req.Body)
 	default:
 		writeUnimplemented(w, "POST /ssm X-Amz-Target="+req.Target)
 	}
@@ -105,7 +109,7 @@ func ssmPutValidation(name, typ string, overwriteWithTags bool) string {
 // puts on one new name exactly one succeeds (a single INSERT in
 // repository.PutSSMParameter). Overwrite=true bumps Version. Once
 // DeleteParameter succeeds, GetParameter answers ParameterNotFound.
-func (app *Application) ssmPutParameter(w http.ResponseWriter, region string, body []byte) {
+func (app *Application) ssmPutParameter(w http.ResponseWriter, account, region string, body []byte) {
 	var in struct {
 		Name           string
 		Type           string
@@ -129,7 +133,7 @@ func (app *Application) ssmPutParameter(w http.ResponseWriter, region string, bo
 	for _, t := range in.Tags {
 		tags[t.Key] = t.Value
 	}
-	version, err := app.repo.PutSSMParameter(awsproto.FakeAccountID, &repository.SSMParameterPut{
+	version, err := app.repo.PutSSMParameter(account, &repository.SSMParameterPut{
 		Name: in.Name, Type: in.Type, Value: in.Value, AllowedPattern: in.AllowedPattern,
 		Description: in.Description, DataType: in.DataType, KeyID: in.KeyId, Tier: in.Tier,
 		Tags: tags, Region: region, Now: time.Now().UTC().Format(time.RFC3339),
@@ -145,7 +149,7 @@ func (app *Application) ssmPutParameter(w http.ResponseWriter, region string, bo
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Version": version})
 }
 
-func (app *Application) ssmGetParameter(w http.ResponseWriter, region string, body []byte) {
+func (app *Application) ssmGetParameter(w http.ResponseWriter, account, region string, body []byte) {
 	var in struct{ Name string }
 	if !ssmDecode(w, body, &in) {
 		return
@@ -158,14 +162,14 @@ func (app *Application) ssmGetParameter(w http.ResponseWriter, region string, bo
 		}})
 		return
 	}
-	p, err := app.repo.GetSSMParameter(awsproto.FakeAccountID, region, in.Name)
+	p, err := app.repo.GetSSMParameter(account, region, in.Name)
 	if err != nil {
 		ssmNotFound(w, in.Name, err)
 		return
 	}
 	// SecureString values come back as stored, WithDecryption or not.
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameter": map[string]any{
-		"ARN":  awsproto.BuildSSMParameterARN(region, awsproto.FakeAccountID, p.Name),
+		"ARN":  awsproto.BuildSSMParameterARN(region, account, p.Name),
 		"Name": p.Name, "Type": p.Type, "DataType": p.DataType,
 		"Value": p.Value, "Version": p.Version,
 		"LastModifiedDate": secretEpoch(p.LastModified),
@@ -175,7 +179,7 @@ func (app *Application) ssmGetParameter(w http.ResponseWriter, region string, bo
 // ssmDescribeParameters answers the provider's lookup, ParameterFilters
 // Key=Name Option=Equals, and an unfiltered listing, in one page. Any
 // other filter is 501 rather than an unfiltered answer.
-func (app *Application) ssmDescribeParameters(w http.ResponseWriter, region string, body []byte) {
+func (app *Application) ssmDescribeParameters(w http.ResponseWriter, account, region string, body []byte) {
 	type filter struct {
 		Key, Option string
 		Values      []string
@@ -197,7 +201,7 @@ func (app *Application) ssmDescribeParameters(w http.ResponseWriter, region stri
 		writeUnimplemented(w, "POST /ssm DescribeParameters Filters")
 		return
 	}
-	params, err := app.repo.ListSSMParameters(awsproto.FakeAccountID, region)
+	params, err := app.repo.ListSSMParameters(account, region)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
 		return
@@ -207,14 +211,14 @@ func (app *Application) ssmDescribeParameters(w http.ResponseWriter, region stri
 		if slices.ContainsFunc(in.ParameterFilters, func(f filter) bool { return !slices.Contains(f.Values, p.Name) }) {
 			continue
 		}
-		out = append(out, ssmParameterMetadata(region, p))
+		out = append(out, ssmParameterMetadata(account, region, p))
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameters": out})
 }
 
-func ssmParameterMetadata(region string, p repository.SSMParameter) map[string]any {
+func ssmParameterMetadata(account, region string, p repository.SSMParameter) map[string]any {
 	m := map[string]any{
-		"ARN":  awsproto.BuildSSMParameterARN(region, awsproto.FakeAccountID, p.Name),
+		"ARN":  awsproto.BuildSSMParameterARN(region, account, p.Name),
 		"Name": p.Name, "Type": p.Type, "Version": p.Version,
 		"Description": p.Description, "AllowedPattern": p.AllowedPattern,
 		"DataType": p.DataType, "Tier": p.Tier, "Policies": []any{},
@@ -229,12 +233,12 @@ func ssmParameterMetadata(region string, p repository.SSMParameter) map[string]a
 	return m
 }
 
-func (app *Application) ssmDeleteParameter(w http.ResponseWriter, region string, body []byte) {
+func (app *Application) ssmDeleteParameter(w http.ResponseWriter, account, region string, body []byte) {
 	var in struct{ Name string }
 	if !ssmDecode(w, body, &in) {
 		return
 	}
-	if err := app.repo.DeleteSSMParameter(awsproto.FakeAccountID, region, in.Name); err != nil {
+	if err := app.repo.DeleteSSMParameter(account, region, in.Name); err != nil {
 		ssmNotFound(w, in.Name, err)
 		return
 	}
@@ -274,12 +278,12 @@ func ssmTagError(w http.ResponseWriter, err error) {
 
 // ssmListTagsForResource backs the provider's tag read on every
 // aws_ssm_parameter refresh.
-func (app *Application) ssmListTagsForResource(w http.ResponseWriter, region string, body []byte) {
+func (app *Application) ssmListTagsForResource(w http.ResponseWriter, account, region string, body []byte) {
 	in, ok := ssmDecodeTagRequest(w, "ListTagsForResource", body)
 	if !ok {
 		return
 	}
-	p, err := app.repo.GetSSMParameter(awsproto.FakeAccountID, region, in.ResourceId)
+	p, err := app.repo.GetSSMParameter(account, region, in.ResourceId)
 	if err != nil {
 		ssmTagError(w, err)
 		return
@@ -289,7 +293,7 @@ func (app *Application) ssmListTagsForResource(w http.ResponseWriter, region str
 
 // ssmChangeTags backs AddTagsToResource (Tags) and RemoveTagsFromResource
 // (TagKeys), which the provider calls when tags change after create.
-func (app *Application) ssmChangeTags(w http.ResponseWriter, region, op string, body []byte) {
+func (app *Application) ssmChangeTags(w http.ResponseWriter, account, region, op string, body []byte) {
 	in, ok := ssmDecodeTagRequest(w, op, body)
 	if !ok {
 		return
@@ -301,7 +305,7 @@ func (app *Application) ssmChangeTags(w http.ResponseWriter, region, op string, 
 	for _, k := range in.TagKeys {
 		patch[k] = nil
 	}
-	if err := app.repo.PatchSSMParameterTags(awsproto.FakeAccountID, region, in.ResourceId, patch); err != nil {
+	if err := app.repo.PatchSSMParameterTags(account, region, in.ResourceId, patch); err != nil {
 		ssmTagError(w, err)
 		return
 	}
@@ -311,8 +315,8 @@ func (app *Application) ssmChangeTags(w http.ResponseWriter, region, op string, 
 // gatherSSMStateReal emits the ssm block of /mock/state: every user
 // parameter by name, type, version and region, never its value. Public
 // parameters are not stored, so they never appear.
-func (app *Application) gatherSSMStateReal() map[string]any {
-	params, _ := app.repo.ListSSMParameters(awsproto.FakeAccountID, "")
+func (app *Application) gatherSSMStateReal(account string) map[string]any {
+	params, _ := app.repo.ListSSMParameters(account, "")
 	out := []map[string]any{}
 	for _, p := range params {
 		out = append(out, map[string]any{

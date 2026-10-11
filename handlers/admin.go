@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -59,7 +60,7 @@ func (app *Application) registerAdminRoutes(r chi.Router) {
 		mr.Post("/restore", app.handleMockRestore)
 		mr.Get("/state", app.handleMockState)
 		mr.Get("/state/{service}", app.handleMockStateService)
-		mr.Post("/images", app.handleMockSeedImage)
+		mr.With(app.holdIdentity).Post("/images", app.handleMockSeedImage)
 		mr.Post("/identity", app.handleMockIdentity)
 		if app.requests != nil {
 			mr.Get("/requests", app.handleMockRequests)
@@ -287,7 +288,7 @@ func decodeAdminBody(w http.ResponseWriter, r *http.Request, v any) bool {
 // CRITICAL[identity-stored-in-database]: the identity lives in the
 // identity table, so a snapshot carries it, a restore brings it back, a
 // restart on the same file keeps it, and /mock/reset deletes it, which
-// returns AccountID to 000000000000.
+// returns AccountID to awsproto.FakeAccountID.
 func (app *Application) AccountID() (string, error) {
 	id, err := app.repo.GetIdentity()
 	if errors.Is(err, sql.ErrNoRows) {
@@ -296,9 +297,24 @@ func (app *Application) AccountID() (string, error) {
 	return id.AccountID, err
 }
 
+// readAccount is AccountID for an AWS handler's entry: on a read error
+// it writes a 500 in the service's shape and returns false, so no
+// handler ever answers the default in place of an unreadable identity.
+func (app *Application) readAccount(w http.ResponseWriter, shape awsproto.WireShape) (string, bool) {
+	account, err := app.AccountID()
+	if err != nil {
+		awsproto.WriteAWSError(w, shape, fmt.Errorf("read account id: %w", err))
+		return "", false
+	}
+	return account, true
+}
+
 // setIdentity stores id unless the database holds rows under another
-// account (models.ErrConflict naming both).
+// account (models.ErrConflict naming both). It holds identityMu
+// exclusively, so no request is between its account read and its write.
 func (app *Application) setIdentity(id repository.Identity) error {
+	app.identityMu.Lock()
+	defer app.identityMu.Unlock()
 	fixtures := make([]string, len(ec2AMIFixtures))
 	for i, f := range ec2AMIFixtures {
 		fixtures[i] = f.ID
@@ -422,14 +438,15 @@ func (app *Application) writeState(w http.ResponseWriter, service string) {
 // service's block (or an empty object if the service hasn't shipped
 // handlers yet).
 //
-// Service-specific gather methods land per ticket: gatherIAMState in
-// S43-T5/T6, gatherS3State in S43-T7/T8, etc. Each method returns the
-// slice of resources for its service.
+// Each service's gather<Service>StateReal, in its own file, returns
+// its block.
 //
-// The account is read once, before any gather, so an unreadable identity
-// is an error rather than a state no account can be vouched for.
+// The account is read once, before any gather, and passed to every
+// gather, so an unreadable identity is an error rather than a state no
+// account can be vouched for, and no gather reads it a second time.
 func (app *Application) collectState(service string) (map[string]any, error) {
-	if _, err := app.AccountID(); err != nil {
+	account, err := app.AccountID()
+	if err != nil {
 		return nil, err
 	}
 	state := map[string]any{
@@ -443,16 +460,16 @@ func (app *Application) collectState(service string) (map[string]any, error) {
 	// Per-service gather hooks. Each one returns either a populated
 	// map for its service or an empty map. Adding a service is one
 	// line here.
-	state["iam"] = app.gatherIAMState()
-	state["s3"] = app.gatherS3State()
-	state["ec2"] = app.gatherEC2State()
-	state["rds"] = app.gatherRDSStateReal()
-	state["dynamodb"] = app.gatherDynamoDBStateReal()
-	state["eks"] = app.gatherEKSStateReal()
-	state["sqs"] = app.gatherSQSStateReal()
-	state["route53"] = app.gatherRoute53StateReal()
-	state["secretsmanager"] = app.gatherSecretsManagerStateReal()
-	state["ssm"] = app.gatherSSMStateReal()
+	state["iam"] = app.gatherIAMStateReal(account)
+	state["s3"] = app.gatherS3StateReal(account)
+	state["ec2"] = app.gatherEC2StateReal(account)
+	state["rds"] = app.gatherRDSStateReal(account)
+	state["dynamodb"] = app.gatherDynamoDBStateReal(account)
+	state["eks"] = app.gatherEKSStateReal(account)
+	state["sqs"] = app.gatherSQSStateReal(account)
+	state["route53"] = app.gatherRoute53StateReal(account)
+	state["secretsmanager"] = app.gatherSecretsManagerStateReal(account)
+	state["ssm"] = app.gatherSSMStateReal(account)
 
 	if service == "" {
 		return state, nil
@@ -467,25 +484,6 @@ func (app *Application) collectState(service string) (map[string]any, error) {
 		"schema_version": stateSchemaVersion,
 		service:          map[string]any{},
 	}, nil
-}
-
-// gatherIAMState returns the IAM block of /mock/state. Filled in by
-// S43-T6 (handlers/iam.go::gatherIAMStateReal). Topology_derive_aws
-// (S43-T9) keys off the documented shape.
-func (app *Application) gatherIAMState() map[string]any {
-	return app.gatherIAMStateReal()
-}
-
-// gatherS3State returns the S3 block, populated by S43-T8's real
-// implementation in handlers/s3.go.
-func (app *Application) gatherS3State() map[string]any {
-	return app.gatherS3StateReal()
-}
-
-// gatherEC2State returns the EC2 block, populated by S44-T7's real
-// implementation in handlers/ec2.go.
-func (app *Application) gatherEC2State() map[string]any {
-	return app.gatherEC2StateReal()
 }
 
 // writeJSONStatus is a small helper for the admin handlers; the

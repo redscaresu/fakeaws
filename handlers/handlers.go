@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -30,6 +31,11 @@ type Application struct {
 	dbPath     string
 	adminToken string
 	requests   *requestLog // nil unless Options.RecordRequests
+	// identityMu is held shared by every AWS request and /mock/images,
+	// from the account read to the last write, and exclusively by
+	// setIdentity, so an identity change never lands between a
+	// handler's account read and the row it writes under that account.
+	identityMu sync.RWMutex
 }
 
 // Options configures an Application and the address it serves on.
@@ -164,18 +170,21 @@ func (app *Application) RegisterRoutes(r chi.Router) {
 	})
 
 	app.registerAdminRoutes(r)
-	app.registerIAMRoutes(r)
-	app.registerS3Routes(r)
-	app.registerEC2Routes(r)
-	app.registerRDSRoutes(r)
-	app.registerDynamoDBRoutes(r)
-	app.registerEKSRoutes(r)
-	app.registerSQSRoutes(r)
-	app.registerRoute53Routes(r)
-	app.registerSecretsManagerRoutes(r)
-	app.registerKMSRoutes(r)
-	app.registerSTSRoutes(r)
-	app.registerSSMRoutes(r)
+	r.Group(func(r chi.Router) {
+		r.Use(app.holdIdentity)
+		app.registerIAMRoutes(r)
+		app.registerS3Routes(r)
+		app.registerEC2Routes(r)
+		app.registerRDSRoutes(r)
+		app.registerDynamoDBRoutes(r)
+		app.registerEKSRoutes(r)
+		app.registerSQSRoutes(r)
+		app.registerRoute53Routes(r)
+		app.registerSecretsManagerRoutes(r)
+		app.registerKMSRoutes(r)
+		app.registerSTSRoutes(r)
+		app.registerSSMRoutes(r)
+	})
 	// Everything else 501s with an UNIMPLEMENTED log line so the next
 	// caller sees what's missing — no Moto-style silent fallback.
 	r.NotFound(unimplementedHandler)
@@ -215,6 +224,15 @@ func stripRegionRootSlash(next http.Handler) http.Handler {
 			r.URL.Path = r.URL.Path[:len(r.URL.Path)-1]
 			r.URL.RawPath = ""
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// holdIdentity holds identityMu shared for the whole request.
+func (app *Application) holdIdentity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		app.identityMu.RLock()
+		defer app.identityMu.RUnlock()
 		next.ServeHTTP(w, r)
 	})
 }

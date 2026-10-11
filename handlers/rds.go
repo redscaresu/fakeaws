@@ -55,7 +55,10 @@ func (app *Application) handleRDS(w http.ResponseWriter, r *http.Request) {
 			fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeQueryRPC)
+	if !ok {
+		return
+	}
 
 	switch req.Action {
 	// ----- DB Subnet Group -----
@@ -1060,8 +1063,7 @@ func parseRDSFilter(req awsproto.QueryRPCRequest, want string) (string, []string
 // Codex pass 4 BLOCKING #2 fix: every modeled collection is populated
 // directly from a list path on the repo (was previously inferred
 // from instance metadata, missing standalone groups).
-func (app *Application) gatherRDSStateReal() map[string]any {
-	const account = awsproto.FakeAccountID
+func (app *Application) gatherRDSStateReal(account string) map[string]any {
 	out := map[string]any{
 		"db_instances":                []any{},
 		"db_clusters":                 []any{},

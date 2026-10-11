@@ -3236,9 +3236,7 @@ func synthesizeInstanceType(name string) ec2InstanceTypeXML {
 // Codex pass 3 BLOCKING #2 fix: every modeled collection emits
 // its actual contents (was previously declaring keys but only
 // filling vpcs/subnets/instances).
-func (app *Application) gatherEC2StateReal() map[string]any {
-	// collectState has already failed on an unreadable identity.
-	account, _ := app.AccountID()
+func (app *Application) gatherEC2StateReal(account string) map[string]any {
 	out := map[string]any{
 		"vpcs":                     []any{},
 		"subnets":                  []any{},

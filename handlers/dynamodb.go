@@ -31,7 +31,10 @@ func (app *Application) handleDynamoDB(w http.ResponseWriter, r *http.Request) {
 			fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSON11)
+	if !ok {
+		return
+	}
 
 	switch req.Operation {
 	case "CreateTable":
@@ -547,8 +550,7 @@ func (app *Application) ddbScanOrQuery(w http.ResponseWriter, account, region st
 // Codex pass 7 BLOCKING #2: items collection added — the table block
 // alone left mutations on persisted items invisible to /mock/state,
 // breaking the "every modeled collection populated" contract.
-func (app *Application) gatherDynamoDBStateReal() map[string]any {
-	const account = awsproto.FakeAccountID
+func (app *Application) gatherDynamoDBStateReal(account string) map[string]any {
 	out := map[string]any{
 		"tables": []any{},
 		"items":  []any{},

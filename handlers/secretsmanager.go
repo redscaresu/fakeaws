@@ -30,7 +30,10 @@ func (app *Application) handleSecretsManager(w http.ResponseWriter, r *http.Requ
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSON11)
+	if !ok {
+		return
+	}
 
 	switch req.Operation {
 	case "CreateSecret":
@@ -457,8 +460,7 @@ func (app *Application) smListSecretVersionIds(w http.ResponseWriter, account, r
 // PendingDeletion still works, the existing
 // TestSecretsManager_PendingDeletionRoundTrip + tests pinning the
 // 404 contract for Destroyed secrets still pass.
-func (app *Application) gatherSecretsManagerStateReal() map[string]any {
-	const account = awsproto.FakeAccountID
+func (app *Application) gatherSecretsManagerStateReal(account string) map[string]any {
 	out := map[string]any{
 		"secrets":  []any{},
 		"versions": []any{},
