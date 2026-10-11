@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -59,6 +60,7 @@ func (app *Application) registerAdminRoutes(r chi.Router) {
 		mr.Get("/state", app.handleMockState)
 		mr.Get("/state/{service}", app.handleMockStateService)
 		mr.Post("/images", app.handleMockSeedImage)
+		mr.Post("/identity", app.handleMockIdentity)
 	})
 }
 
@@ -113,15 +115,37 @@ func isLoopbackOrigin(origin string) bool {
 
 var (
 	// An EC2 image id: ami- then 8 (legacy) or 17 lowercase hex digits.
-	amiIDPattern  = regexp.MustCompile(`^ami-([0-9a-f]{8}|[0-9a-f]{17})$`)
-	regionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`)
+	amiIDPattern     = regexp.MustCompile(`^ami-([0-9a-f]{8}|[0-9a-f]{17})$`)
+	regionPattern    = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d$`)
+	accountIDPattern = regexp.MustCompile(`^[0-9]{12}$`)
 )
+
+var (
+	errAccountID = errors.New("must be 12 digits")
+	errRegion    = errors.New("must look like us-east-1")
+)
+
+// CheckAccountID returns an error unless id is an AWS account id: 12 digits.
+func CheckAccountID(id string) error {
+	if !accountIDPattern.MatchString(id) {
+		return errAccountID
+	}
+	return nil
+}
+
+// CheckRegion returns an error unless region looks like us-east-1.
+func CheckRegion(region string) error {
+	if !regionPattern.MatchString(region) {
+		return errRegion
+	}
+	return nil
+}
 
 var errInvalidAMIID = errors.New("ami_id must be ami- followed by 8 or 17 lowercase hex digits")
 
-// maxSeedImageBodyBytes caps the /mock/images body; one image is a few
+// maxAdminBodyBytes caps a /mock body; one image or identity is a few
 // hundred bytes.
-const maxSeedImageBodyBytes = 64 << 10
+const maxAdminBodyBytes = 64 << 10
 
 // seedImageRequest is the /mock/images body: the EC2AMI JSON shape
 // (ami_id, name, owner_id, virtualization_type, root_device_name,
@@ -138,18 +162,16 @@ type seedImageRequest struct {
 // the region (a fixture included) is 200 when every field matches and
 // 409 naming the fields when not, writing nothing either way.
 func (app *Application) handleMockSeedImage(w http.ResponseWriter, r *http.Request) {
+	account, err := app.AccountID()
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	var req seedImageRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSeedImageBodyBytes))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		writeAdminError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+	if !decodeAdminBody(w, r, &req) {
 		return
 	}
-	if dec.Decode(&struct{}{}) != io.EOF {
-		writeAdminError(w, http.StatusBadRequest, "invalid body: one JSON object expected")
-		return
-	}
-	if msg := validateSeedImage(&req); msg != "" {
+	if msg := validateSeedImage(&req, account); msg != "" {
 		writeAdminError(w, http.StatusBadRequest, msg)
 		return
 	}
@@ -212,20 +234,19 @@ func amiFieldDiff(stored, want *repository.EC2AMI) []string {
 }
 
 // validateSeedImage fills the AL2023 fixture's owner and
-// virtualization type when absent and the fake account, and returns
+// virtualization type when absent and the stored account, and returns
 // a message for the first missing or malformed field. The id is
 // checked in seedAMI, which knows whether it already exists.
-func validateSeedImage(req *seedImageRequest) string {
+func validateSeedImage(req *seedImageRequest, account string) string {
 	switch {
-	case !regionPattern.MatchString(req.Region):
-		return "region must look like us-east-1"
+	case CheckRegion(req.Region) != nil:
+		return "region " + errRegion.Error()
 	case req.Name == "":
 		return "name is required"
 	case req.RootDeviceName == "":
 		return "root_device_name is required"
-	case req.AccountID != "" && req.AccountID != awsproto.FakeAccountID:
-		// The EC2 surface only ever reads the fake account.
-		return "account_id must be " + awsproto.FakeAccountID
+	case req.AccountID != "" && req.AccountID != account:
+		return "account_id must be " + account
 	}
 	if req.OwnerID == "" {
 		req.OwnerID = "amazon"
@@ -233,8 +254,87 @@ func validateSeedImage(req *seedImageRequest) string {
 	if req.VirtualizationType == "" {
 		req.VirtualizationType = "hvm"
 	}
-	req.AccountID = awsproto.FakeAccountID
+	req.AccountID = account
 	return ""
+}
+
+// decodeAdminBody decodes one JSON object, with no unknown fields and at
+// most maxAdminBodyBytes, from r's body into v. It writes the 400 and
+// returns false when it cannot.
+func decodeAdminBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return false
+	}
+	if dec.Decode(&struct{}{}) != io.EOF {
+		writeAdminError(w, http.StatusBadRequest, "invalid body: one JSON object expected")
+		return false
+	}
+	return true
+}
+
+// AccountID is the stored account id, or awsproto.FakeAccountID when
+// none is stored. It reads the database on every call and never caches.
+// Read it at a handler's entry, before any transaction: the database has
+// one connection.
+//
+// CRITICAL[identity-stored-in-database]: the identity lives in the
+// identity table, so a snapshot carries it, a restore brings it back, a
+// restart on the same file keeps it, and /mock/reset deletes it, which
+// returns AccountID to 000000000000.
+func (app *Application) AccountID() (string, error) {
+	id, err := app.repo.GetIdentity()
+	if errors.Is(err, sql.ErrNoRows) {
+		return awsproto.FakeAccountID, nil
+	}
+	return id.AccountID, err
+}
+
+// setIdentity stores id unless the database holds rows under another
+// account (models.ErrConflict naming both).
+func (app *Application) setIdentity(id repository.Identity) error {
+	fixtures := make([]string, len(ec2AMIFixtures))
+	for i, f := range ec2AMIFixtures {
+		fixtures[i] = f.ID
+	}
+	return app.repo.SetIdentity(id, awsproto.FakeAccountID, fixtures)
+}
+
+// handleMockIdentity sets the stored identity from
+// {"account_id", "region"}: a 12-digit account id and an optional region
+// shaped like us-east-1, else 400 naming the field.
+//
+// CRITICAL[identity-change-refused-on-non-empty-db]: a different account
+// on a database holding any row outside repository.emptyExclusions is
+// 409 naming both ids, and the stored account stays, so resources made
+// under one account never read back under another. -account refuses the
+// same way at boot.
+func (app *Application) handleMockIdentity(w http.ResponseWriter, r *http.Request) {
+	var id repository.Identity
+	if !decodeAdminBody(w, r, &id) {
+		return
+	}
+	if err := CheckAccountID(id.AccountID); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "account_id "+err.Error())
+		return
+	}
+	if id.Region != "" {
+		if err := CheckRegion(id.Region); err != nil {
+			writeAdminError(w, http.StatusBadRequest, "region "+err.Error())
+			return
+		}
+	}
+	err := app.setIdentity(id)
+	switch {
+	case errors.Is(err, models.ErrConflict):
+		writeAdminError(w, http.StatusConflict, err.Error())
+	case err != nil:
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+	default:
+		writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok"})
+	}
 }
 
 func writeAdminError(w http.ResponseWriter, status int, msg string) {
@@ -296,13 +396,19 @@ func (app *Application) handleMockRestore(w http.ResponseWriter, _ *http.Request
 }
 
 func (app *Application) handleMockState(w http.ResponseWriter, _ *http.Request) {
-	state := app.collectState("")
-	writeJSONStatus(w, http.StatusOK, state)
+	app.writeState(w, "")
 }
 
 func (app *Application) handleMockStateService(w http.ResponseWriter, r *http.Request) {
-	service := chi.URLParam(r, "service")
-	state := app.collectState(service)
+	app.writeState(w, chi.URLParam(r, "service"))
+}
+
+func (app *Application) writeState(w http.ResponseWriter, service string) {
+	state, err := app.collectState(service)
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSONStatus(w, http.StatusOK, state)
 }
 
@@ -314,7 +420,13 @@ func (app *Application) handleMockStateService(w http.ResponseWriter, r *http.Re
 // Service-specific gather methods land per ticket: gatherIAMState in
 // S43-T5/T6, gatherS3State in S43-T7/T8, etc. Each method returns the
 // slice of resources for its service.
-func (app *Application) collectState(service string) map[string]any {
+//
+// The account is read once, before any gather, so an unreadable identity
+// is an error rather than a state no account can be vouched for.
+func (app *Application) collectState(service string) (map[string]any, error) {
+	if _, err := app.AccountID(); err != nil {
+		return nil, err
+	}
 	state := map[string]any{
 		"schema_version": stateSchemaVersion,
 		// Universal bookkeeping. countOrphans must continue to ignore
@@ -338,18 +450,18 @@ func (app *Application) collectState(service string) map[string]any {
 	state["ssm"] = app.gatherSSMStateReal()
 
 	if service == "" {
-		return state
+		return state, nil
 	}
 	if val, ok := state[service]; ok {
 		return map[string]any{
 			"schema_version": stateSchemaVersion,
 			service:          val,
-		}
+		}, nil
 	}
 	return map[string]any{
 		"schema_version": stateSchemaVersion,
 		service:          map[string]any{},
-	}
+	}, nil
 }
 
 // gatherIAMState returns the IAM block of /mock/state. Filled in by

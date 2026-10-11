@@ -15,6 +15,7 @@ import (
 	"os"
 
 	"github.com/redscaresu/fakeaws/handlers"
+	"github.com/redscaresu/fakeaws/handlers/awsproto"
 )
 
 // adminTokenEnv supplies the admin token when -admin-token is not
@@ -44,6 +45,8 @@ func main() {
 
 // optionsFromFlags parses args into Options. -admin-token beats the
 // FAKEAWS_ADMIN_TOKEN environment variable, read through getenv.
+// -account must be 12 digits, -region look like us-east-1, and -region
+// comes only with -account.
 func optionsFromFlags(args []string, getenv func(string) string) (handlers.Options, error) {
 	var opts handlers.Options
 	fs := flag.NewFlagSet("fakeaws", flag.ContinueOnError)
@@ -52,7 +55,21 @@ func optionsFromFlags(args []string, getenv func(string) string) (handlers.Optio
 	fs.StringVar(&opts.DBPath, "db", ":memory:", "SQLite path; ':memory:' for ephemeral, file path for persistent")
 	fs.BoolVar(&opts.Echo, "echo", false, "log every request method+path (useful for discovering unimplemented endpoints)")
 	fs.StringVar(&opts.AdminToken, "admin-token", "", "require Authorization: Bearer <token> on /mock/*; else "+adminTokenEnv)
+	fs.Func("account", "12-digit account id to store and answer as (default "+awsproto.FakeAccountID+"); refused when the db holds rows under another", func(v string) error {
+		opts.AccountID = v
+		return handlers.CheckAccountID(v)
+	})
+	fs.Func("region", "region to store with -account, e.g. us-east-1", func(v string) error {
+		opts.Region = v
+		return handlers.CheckRegion(v)
+	})
 	if err := fs.Parse(args); err != nil {
+		return handlers.Options{}, err
+	}
+	if opts.Region != "" && opts.AccountID == "" {
+		err := errors.New("-region needs -account")
+		fmt.Fprintln(fs.Output(), err)
+		fs.Usage()
 		return handlers.Options{}, err
 	}
 	if opts.AdminToken == "" {

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/redscaresu/fakeaws/handlers"
 )
 
 const testToken = "s3cr3t-admin-token"
@@ -65,4 +68,36 @@ func TestStartupMessage_NeverPrintsTheToken(t *testing.T) {
 	opts, err = optionsFromFlags(nil, env(nil))
 	require.NoError(t, err)
 	assert.Contains(t, startupMessage(opts), "admin-token set=false")
+}
+
+func TestOptionsFromFlags_Identity(t *testing.T) {
+	opts, err := optionsFromFlags([]string{"-account", "123456789012", "-region", "eu-west-1"}, env(nil))
+	require.NoError(t, err)
+	assert.Equal(t, "123456789012", opts.AccountID)
+	assert.Equal(t, "eu-west-1", opts.Region)
+
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"two-digit account": {[]string{"-account", "12"}, `invalid value "12" for flag -account: must be 12 digits`},
+		"malformed region":  {[]string{"-account", "123456789012", "-region", "eu-west"}, `invalid value "eu-west" for flag -region: must look like us-east-1`},
+		"region alone":      {[]string{"-region", "eu-west-1"}, "-region needs -account"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := optionsFromFlags(tc.args, env(nil))
+			assert.EqualError(t, err, tc.want)
+		})
+	}
+}
+
+func TestBootWithoutAccountWritesNoIdentity(t *testing.T) {
+	opts, err := optionsFromFlags(nil, env(nil))
+	require.NoError(t, err)
+	app, err := handlers.NewApplication(opts)
+	require.NoError(t, err)
+	defer app.Close()
+
+	_, err = app.Repository().GetIdentity()
+	assert.ErrorIs(t, err, sql.ErrNoRows)
 }
