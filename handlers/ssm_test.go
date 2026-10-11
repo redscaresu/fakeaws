@@ -51,6 +51,24 @@ func ssmGetValue(t *testing.T, srv *httptest.Server, name string) (int, string, 
 	return resp.StatusCode, got.Parameter.Value, body
 }
 
+// smithy-go 1.28.2 sends /ssm/region/<region>/ for a path-style
+// BaseEndpoint; it must route like the slash-less endpoint.
+func TestSSM_RegionRootTrailingSlashRoutes(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/ssm/region/us-east-1/", strings.NewReader(fmt.Sprintf(`{"Name":%q}`, al2023Parameter)))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	req.Header.Set("X-Amz-Target", "AmazonSSM.GetParameter")
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "body=%s", body)
+	assert.Contains(t, string(body), "ami-")
+}
+
 func TestContract_ssm_put_parameter_no_overwrite_cas(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 
