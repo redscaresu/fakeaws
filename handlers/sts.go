@@ -37,7 +37,7 @@ func (app *Application) handleSTS(w http.ResponseWriter, r *http.Request) {
 	}
 	switch req.Action {
 	case "GetCallerIdentity":
-		stsGetCallerIdentity(w)
+		app.stsGetCallerIdentity(w)
 	default:
 		writeUnimplemented(w, "POST /sts Action="+req.Action)
 	}
@@ -50,13 +50,19 @@ type stsGetCallerIdentityResult struct {
 }
 
 // CRITICAL[sts-caller-identity-fake-account]: GetCallerIdentity answers
-// Account awsproto.FakeAccountID (000000000000) and an Arn in that
-// account. Configs pin allowed_account_ids = ["000000000000"], so the
-// provider refuses to apply against any other account.
-func stsGetCallerIdentity(w http.ResponseWriter) {
+// the stored account, AccountID's default when none is stored, as both
+// Account and the account in Arn. The provider's allowed_account_ids
+// check reads the Arn; aws_caller_identity reads Account. An unreadable
+// identity is 500 InternalFailure, never the default.
+func (app *Application) stsGetCallerIdentity(w http.ResponseWriter) {
+	account, err := app.AccountID()
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, fmt.Errorf("read account id: %w", err))
+		return
+	}
 	awsproto.WriteQueryRPCResponse(w, "GetCallerIdentity", &stsGetCallerIdentityResult{
-		Arn:     awsproto.BuildIAMUserARN(awsproto.FakeAccountID, stsCallerUserName),
+		Arn:     awsproto.BuildIAMUserARN(account, stsCallerUserName),
 		UserId:  stsCallerUserID,
-		Account: awsproto.FakeAccountID,
+		Account: account,
 	})
 }
