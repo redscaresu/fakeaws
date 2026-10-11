@@ -32,7 +32,7 @@ import (
 // patterns work, mirroring fakegcp/testutil.
 func NewTestServer(t *testing.T) (*httptest.Server, func()) {
 	t.Helper()
-	app, err := handlers.NewApplication(":memory:", false)
+	app, err := handlers.NewApplication(handlers.Options{DBPath: ":memory:"})
 	if err != nil {
 		t.Fatalf("testutil: NewTestServer: %v", err)
 	}

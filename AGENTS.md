@@ -22,10 +22,10 @@ fakegcp (GCP).
 
 ```
 fakeaws/
-├── cmd/fakeaws/main.go        # entrypoint, --port, --db, --echo
+├── cmd/fakeaws/main.go        # entrypoint, --port, --bind, --db, --echo, --admin-token (or FAKEAWS_ADMIN_TOKEN)
 ├── handlers/
 │   ├── handlers.go            # Application struct, RegisterRoutes, auth
-│   ├── admin.go               # /mock/reset, /snapshot, /restore, /state (S43-T4), /images
+│   ├── admin.go               # /mock/reset, /snapshot, /restore, /state (S43-T4), /images; admin-token guard
 │   ├── awsproto/              # per-protocol marshalling helpers (S43-T2)
 │   ├── iam.go, s3.go, ec2_*.go, ...  # one file per service
 │   ├── handlers_test.go       # SHARED integration test file (TestXxx<Service>...)
@@ -148,7 +148,7 @@ fakeaws is **reactive**: declined Smithy codegen (see `concepts.md` § "Why no S
 
 ## Contract-coverage convention (canonical across all 4 sibling fakes)
 
-`handlers/contract_audit_test.go` enforces the `CRITICAL[<id>]:` / `MUST[<id>]:` docstring → `TestContract_<id>` test pairing across `handlers/*.go`. A wire-shape invariant the consuming `terraform-provider-aws` depends on must NOT live as a comment alone — drift becomes a failed `go test`, not a missed code review. Current contracts (`TestAgentsMDListsEveryContract` keeps this list equal to the source): `ec2-instance-public-ip-from-primary-eni`, `ec2-sg-rule-source-descriptions-round-trip`, `ec2-tags-round-trip-in-tagset`, `kms-soft-delete-state-pending-deletion`, `rds-dbi-resource-id-distinct-from-identifier`, `route53-records-sorted-lexicographically`, `secretsmanager-soft-delete-state-pending-deletion`, `ssm-put-parameter-no-overwrite-cas`, `sts-caller-identity-fake-account`. Same convention live across mockway/fakegcp/fakegenesys.
+`handlers/contract_audit_test.go` enforces the `CRITICAL[<id>]:` / `MUST[<id>]:` docstring → `TestContract_<id>` test pairing across `handlers/*.go`. A wire-shape invariant the consuming `terraform-provider-aws` depends on must NOT live as a comment alone — drift becomes a failed `go test`, not a missed code review. Current contracts (`TestAgentsMDListsEveryContract` keeps this list equal to the source): `ec2-instance-public-ip-from-primary-eni`, `ec2-sg-rule-source-descriptions-round-trip`, `ec2-tags-round-trip-in-tagset`, `file-backed-db-owner-only`, `kms-soft-delete-state-pending-deletion`, `listen-addr-default-all-interfaces`, `mock-admin-origin-loopback-only`, `mock-admin-token-required`, `rds-dbi-resource-id-distinct-from-identifier`, `route53-records-sorted-lexicographically`, `secretsmanager-soft-delete-state-pending-deletion`, `ssm-put-parameter-no-overwrite-cas`, `sts-caller-identity-fake-account`. Same convention live across mockway/fakegcp/fakegenesys.
 
 ## Where to find AWS resource shapes
 

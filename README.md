@@ -89,6 +89,17 @@ make build && ./fakeaws --port 8082 --db :memory:
 ./fakeaws --port 8082 --echo
 ```
 
+| Flag / env | Default | Meaning |
+|---|---|---|
+| `-port` | `8082` | HTTP listen port |
+| `-bind` | empty (all interfaces) | Listen host, e.g. `127.0.0.1` to refuse other hosts. Inside a container, `-bind 127.0.0.1` makes the published port unreachable: leave it empty there. |
+| `-db` | `:memory:` | SQLite path; a file path persists state |
+| `-echo` | `false` | Log every request method+path |
+| `-admin-token` | empty | When set, every `/mock` path needs `Authorization: Bearer <token>` (401 otherwise) and refuses a non-loopback `Origin` (403). `/healthz` and the AWS surface are not gated. The flag shows in `ps`; prefer the env var. |
+| `FAKEAWS_ADMIN_TOKEN` | unset | The admin token when `-admin-token` is not given; the flag wins. |
+
+The startup log line says whether an admin token is set and never prints it.
+
 ### Docker
 
 Pre-built multi-arch images are published to GitHub Container Registry on every push to `main`:

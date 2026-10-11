@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -43,10 +46,13 @@ const stateSchemaVersion = 1
 
 // registerAdminRoutes wires the /mock/* admin endpoints. Per concepts.md
 // § "Lessons we are explicitly carrying over" item 7: admin lifecycle
-// in one file, no auth required (mockway and fakegcp follow the same
-// convention — admin endpoints are unauthenticated by design).
+// in one file. Without an admin token they are unauthenticated, as in
+// mockway and fakegcp; with one, guardAdmin fronts every /mock path.
 func (app *Application) registerAdminRoutes(r chi.Router) {
 	r.Route("/mock", func(mr chi.Router) {
+		if app.adminToken != "" {
+			mr.Use(guardAdmin(app.adminToken))
+		}
 		mr.Post("/reset", app.handleMockReset)
 		mr.Post("/snapshot", app.handleMockSnapshot)
 		mr.Post("/restore", app.handleMockRestore)
@@ -54,6 +60,55 @@ func (app *Application) registerAdminRoutes(r chi.Router) {
 		mr.Get("/state/{service}", app.handleMockStateService)
 		mr.Post("/images", app.handleMockSeedImage)
 	})
+}
+
+// guardAdmin fronts every /mock path, unknown ones included, when an
+// admin token is set.
+//
+// CRITICAL[mock-admin-origin-loopback-only]: a request whose Origin is
+// present and not loopback is 403 before the token is read, so a page
+// served from a non-loopback origin cannot drive /mock even when it holds
+// the token. A loopback origin or an absent one (a non-browser client)
+// passes on to the token, which is what stops a loopback-served page.
+//
+// CRITICAL[mock-admin-token-required]: anything but
+// `Authorization: Bearer <token>` is 401, and neither refusal names the
+// token. The compare is constant-time only for a token of the right
+// length; subtle.ConstantTimeCompare refuses a wrong length at once.
+func guardAdmin(token string) func(http.Handler) http.Handler {
+	want := []byte(token)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
+				writeAdminError(w, http.StatusForbidden, "cross-origin request refused: /mock answers only pages served on loopback")
+				return
+			}
+			scheme, got, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+			if !strings.EqualFold(scheme, "Bearer") || subtle.ConstantTimeCompare([]byte(got), want) != 1 {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				writeAdminError(w, http.StatusUnauthorized, "admin token required: Authorization: Bearer <token>")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// isLoopbackOrigin reports whether an Origin header names a loopback
+// host: localhost or a loopback IP literal. Ported from infrafactory
+// internal/api/origin_guard.go. It does not resolve names, which would
+// let a DNS-rebound name through; `null` names no host and is refused.
+func isLoopbackOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 var (
@@ -197,6 +252,13 @@ func (app *Application) handleMockReset(w http.ResponseWriter, _ *http.Request) 
 	writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
+// handleMockSnapshot and handleMockRestore save and restore a
+// file-backed db.
+//
+// CRITICAL[file-backed-db-owner-only]: the db fakeaws creates, its
+// -wal and -shm, the .snapshot and a restored db it creates are each
+// 0600, not 0644 under umask 022: they hold every secret a run wrote.
+// An existing db keeps its mode.
 func (app *Application) handleMockSnapshot(w http.ResponseWriter, _ *http.Request) {
 	if err := app.repo.Snapshot(); err != nil {
 		// Snapshot on :memory: returns ErrConflict — expose as 409.
