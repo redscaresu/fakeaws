@@ -172,7 +172,7 @@ func (app *Application) ddbCreateTable(w http.ResponseWriter, account, region st
 		Name: in.TableName, HashKey: hashKey, RangeKey: rangeKey,
 		Attributes: attrs, BillingMode: billing, Status: "ACTIVE",
 		Region:    region,
-		ARN:       awsproto.BuildDynamoDBTableARN(region, in.TableName),
+		ARN:       awsproto.BuildDynamoDBTableARN(region, account, in.TableName),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateDynamoDBTable(account, tab); err != nil {

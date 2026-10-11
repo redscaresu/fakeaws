@@ -286,7 +286,7 @@ func (app *Application) rdsCreateDBSubnetGroup(w http.ResponseWriter, account, r
 	}
 	sg := &repository.RDSSubnetGroup{
 		Name: name, Description: desc, SubnetIDs: subnetIDs, Region: region,
-		ARN:       awsproto.BuildRDSSubnetGroupARN(region, name),
+		ARN:       awsproto.BuildRDSSubnetGroupARN(region, account, name),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateDBSubnetGroup(account, sg); err != nil {
@@ -375,7 +375,7 @@ func (app *Application) rdsCreateDBParameterGroup(w http.ResponseWriter, account
 	pg := &repository.RDSParameterGroup{
 		Name: name, Family: family, Description: req.Params.Get("Description"),
 		Region:    region,
-		ARN:       awsproto.BuildRDSParameterGroupARN(region, name),
+		ARN:       awsproto.BuildRDSParameterGroupARN(region, account, name),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateDBParameterGroup(account, pg); err != nil {
@@ -448,7 +448,7 @@ func (app *Application) rdsCreateDBClusterParameterGroup(w http.ResponseWriter, 
 	pg := &repository.RDSClusterParameterGroup{
 		Name: name, Family: family, Description: req.Params.Get("Description"),
 		Region:    region,
-		ARN:       awsproto.BuildRDSClusterParameterGroupARN(region, name),
+		ARN:       awsproto.BuildRDSClusterParameterGroupARN(region, account, name),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateDBClusterParameterGroup(account, pg); err != nil {
@@ -633,7 +633,7 @@ func (app *Application) rdsCreateDBCluster(w http.ResponseWriter, account, regio
 		MasterUsername:                   p.Get("MasterUsername"),
 		DeletionProtection:               p.Get("DeletionProtection") == "true",
 		Region:                           region,
-		ARN:                              awsproto.BuildRDSClusterARN(region, id),
+		ARN:                              awsproto.BuildRDSClusterARN(region, account, id),
 		CreatedAt:                        time.Now().UTC().Format(time.RFC3339),
 		EngineMode:                       p.Get("EngineMode"),
 		Port:                             atoiOrZero(p.Get("Port")),
@@ -860,7 +860,7 @@ func (app *Application) rdsCreateDBInstance(w http.ResponseWriter, account, regi
 		DeletionProtection: req.Params.Get("DeletionProtection") == "true",
 		SkipFinalSnapshot:  req.Params.Get("SkipFinalSnapshot") != "false",
 		Region:             region,
-		ARN:                awsproto.BuildRDSDBARN(region, id),
+		ARN:                awsproto.BuildRDSDBARN(region, account, id),
 		CreatedAt:          time.Now().UTC().Format(time.RFC3339),
 		// Persist user-supplied values so Read echoes them back
 		// verbatim — see rdsInstanceToXML's comment about plan

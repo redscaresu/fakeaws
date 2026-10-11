@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/redscaresu/fakeaws/models"
+	"github.com/stretchr/testify/assert"
 )
 
 // TestErrorMatrixCoversEveryWireShapeSentinelCell is the load-bearing
@@ -250,35 +251,35 @@ func TestARNBuildersMatchAWSReferenceFormats(t *testing.T) {
 		want string
 	}{
 		// IAM is global — no region, account is "" between two colons
-		{"iam-role", BuildIAMRoleARN("admin"), "arn:aws:iam::000000000000:role/admin"},
-		{"iam-policy", BuildIAMPolicyARN("policy-1"), "arn:aws:iam::000000000000:policy/policy-1"},
-		{"iam-instance-profile", BuildIAMInstanceProfileARN("profile-1"), "arn:aws:iam::000000000000:instance-profile/profile-1"},
-		{"iam-user", BuildIAMUserARN("alice"), "arn:aws:iam::000000000000:user/alice"},
+		{"iam-role", BuildIAMRoleARN(FakeAccountID, "admin"), "arn:aws:iam::000000000000:role/admin"},
+		{"iam-policy", BuildIAMPolicyARN(FakeAccountID, "policy-1"), "arn:aws:iam::000000000000:policy/policy-1"},
+		{"iam-instance-profile", BuildIAMInstanceProfileARN(FakeAccountID, "profile-1"), "arn:aws:iam::000000000000:instance-profile/profile-1"},
+		{"iam-user", BuildIAMUserARN(FakeAccountID, "alice"), "arn:aws:iam::000000000000:user/alice"},
 		// S3 — no region or account
 		{"s3-bucket", BuildS3BucketARN("my-bucket"), "arn:aws:s3:::my-bucket"},
 		{"s3-object", BuildS3ObjectARN("my-bucket", "path/to/key.txt"), "arn:aws:s3:::my-bucket/path/to/key.txt"},
 		// EC2 — region+account, '/' separator
-		{"ec2-instance", BuildEC2InstanceARN("us-east-1", "i-abc"), "arn:aws:ec2:us-east-1:000000000000:instance/i-abc"},
-		{"ec2-vpc", BuildEC2VPCARN("us-east-1", "vpc-1"), "arn:aws:ec2:us-east-1:000000000000:vpc/vpc-1"},
-		{"ec2-subnet", BuildEC2SubnetARN("us-east-1", "subnet-1"), "arn:aws:ec2:us-east-1:000000000000:subnet/subnet-1"},
-		{"ec2-sg", BuildEC2SecurityGroupARN("us-east-1", "sg-1"), "arn:aws:ec2:us-east-1:000000000000:security-group/sg-1"},
-		{"ec2-igw", BuildEC2InternetGatewayARN("us-east-1", "igw-1"), "arn:aws:ec2:us-east-1:000000000000:internet-gateway/igw-1"},
-		{"ec2-rtb", BuildEC2RouteTableARN("us-east-1", "rtb-1"), "arn:aws:ec2:us-east-1:000000000000:route-table/rtb-1"},
+		{"ec2-instance", BuildEC2InstanceARN("us-east-1", FakeAccountID, "i-abc"), "arn:aws:ec2:us-east-1:000000000000:instance/i-abc"},
+		{"ec2-vpc", BuildEC2VPCARN("us-east-1", FakeAccountID, "vpc-1"), "arn:aws:ec2:us-east-1:000000000000:vpc/vpc-1"},
+		{"ec2-subnet", BuildEC2SubnetARN("us-east-1", FakeAccountID, "subnet-1"), "arn:aws:ec2:us-east-1:000000000000:subnet/subnet-1"},
+		{"ec2-sg", BuildEC2SecurityGroupARN("us-east-1", FakeAccountID, "sg-1"), "arn:aws:ec2:us-east-1:000000000000:security-group/sg-1"},
+		{"ec2-igw", BuildEC2InternetGatewayARN("us-east-1", FakeAccountID, "igw-1"), "arn:aws:ec2:us-east-1:000000000000:internet-gateway/igw-1"},
+		{"ec2-rtb", BuildEC2RouteTableARN("us-east-1", FakeAccountID, "rtb-1"), "arn:aws:ec2:us-east-1:000000000000:route-table/rtb-1"},
 		// RDS — region+account, ':' separator (NOT '/')
-		{"rds-db", BuildRDSDBARN("us-east-1", "db-1"), "arn:aws:rds:us-east-1:000000000000:db:db-1"},
-		{"rds-cluster", BuildRDSClusterARN("us-east-1", "cluster-1"), "arn:aws:rds:us-east-1:000000000000:cluster:cluster-1"},
-		{"rds-subnet-group", BuildRDSSubnetGroupARN("us-east-1", "subg-1"), "arn:aws:rds:us-east-1:000000000000:subgrp:subg-1"},
-		{"rds-pg", BuildRDSParameterGroupARN("us-east-1", "pg15"), "arn:aws:rds:us-east-1:000000000000:pg:pg15"},
-		{"rds-cluster-pg", BuildRDSClusterParameterGroupARN("us-east-1", "aurora-pg"), "arn:aws:rds:us-east-1:000000000000:cluster-pg:aurora-pg"},
+		{"rds-db", BuildRDSDBARN("us-east-1", FakeAccountID, "db-1"), "arn:aws:rds:us-east-1:000000000000:db:db-1"},
+		{"rds-cluster", BuildRDSClusterARN("us-east-1", FakeAccountID, "cluster-1"), "arn:aws:rds:us-east-1:000000000000:cluster:cluster-1"},
+		{"rds-subnet-group", BuildRDSSubnetGroupARN("us-east-1", FakeAccountID, "subg-1"), "arn:aws:rds:us-east-1:000000000000:subgrp:subg-1"},
+		{"rds-pg", BuildRDSParameterGroupARN("us-east-1", FakeAccountID, "pg15"), "arn:aws:rds:us-east-1:000000000000:pg:pg15"},
+		{"rds-cluster-pg", BuildRDSClusterParameterGroupARN("us-east-1", FakeAccountID, "aurora-pg"), "arn:aws:rds:us-east-1:000000000000:cluster-pg:aurora-pg"},
 		// EKS — region+account, '/' separator, nodegroup has trailing /<id>
-		{"eks-cluster", BuildEKSClusterARN("us-east-1", "demo"), "arn:aws:eks:us-east-1:000000000000:cluster/demo"},
-		{"eks-nodegroup", BuildEKSNodegroupARN("us-east-1", "demo", "ng1", "abc-123"), "arn:aws:eks:us-east-1:000000000000:nodegroup/demo/ng1/abc-123"},
+		{"eks-cluster", BuildEKSClusterARN("us-east-1", FakeAccountID, "demo"), "arn:aws:eks:us-east-1:000000000000:cluster/demo"},
+		{"eks-nodegroup", BuildEKSNodegroupARN("us-east-1", FakeAccountID, "demo", "ng1", "abc-123"), "arn:aws:eks:us-east-1:000000000000:nodegroup/demo/ng1/abc-123"},
 		// SQS — no resource-type prefix
-		{"sqs-queue", BuildSQSQueueARN("us-east-1", "my-queue"), "arn:aws:sqs:us-east-1:000000000000:my-queue"},
+		{"sqs-queue", BuildSQSQueueARN("us-east-1", FakeAccountID, "my-queue"), "arn:aws:sqs:us-east-1:000000000000:my-queue"},
 		// Secrets Manager — random suffix
-		{"sm-secret", BuildSecretsManagerSecretARN("us-east-1", "db-creds", "AbCdEf"), "arn:aws:secretsmanager:us-east-1:000000000000:secret:db-creds-AbCdEf"},
+		{"sm-secret", BuildSecretsManagerSecretARN("us-east-1", FakeAccountID, "db-creds", "AbCdEf"), "arn:aws:secretsmanager:us-east-1:000000000000:secret:db-creds-AbCdEf"},
 		// DynamoDB
-		{"ddb-table", BuildDynamoDBTableARN("us-east-1", "Users"), "arn:aws:dynamodb:us-east-1:000000000000:table/Users"},
+		{"ddb-table", BuildDynamoDBTableARN("us-east-1", FakeAccountID, "Users"), "arn:aws:dynamodb:us-east-1:000000000000:table/Users"},
 		// Route53 — global
 		{"route53-zone", BuildRoute53HostedZoneARN("Z123"), "arn:aws:route53:::hostedzone/Z123"},
 	}
@@ -291,15 +292,53 @@ func TestARNBuildersMatchAWSReferenceFormats(t *testing.T) {
 	}
 }
 
+// TestARNBuildersUseGivenAccount pins every account-bearing builder to
+// the account it is handed, not the default one.
+func TestARNBuildersUseGivenAccount(t *testing.T) {
+	const account = "123456789012"
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"iam-role", BuildIAMRoleARN(account, "admin"), "arn:aws:iam::123456789012:role/admin"},
+		{"iam-policy", BuildIAMPolicyARN(account, "policy-1"), "arn:aws:iam::123456789012:policy/policy-1"},
+		{"iam-instance-profile", BuildIAMInstanceProfileARN(account, "profile-1"), "arn:aws:iam::123456789012:instance-profile/profile-1"},
+		{"iam-user", BuildIAMUserARN(account, "alice"), "arn:aws:iam::123456789012:user/alice"},
+		{"ec2-instance", BuildEC2InstanceARN("us-east-1", account, "i-abc"), "arn:aws:ec2:us-east-1:123456789012:instance/i-abc"},
+		{"ec2-vpc", BuildEC2VPCARN("us-east-1", account, "vpc-1"), "arn:aws:ec2:us-east-1:123456789012:vpc/vpc-1"},
+		{"ec2-subnet", BuildEC2SubnetARN("us-east-1", account, "subnet-1"), "arn:aws:ec2:us-east-1:123456789012:subnet/subnet-1"},
+		{"ec2-sg", BuildEC2SecurityGroupARN("us-east-1", account, "sg-1"), "arn:aws:ec2:us-east-1:123456789012:security-group/sg-1"},
+		{"ec2-igw", BuildEC2InternetGatewayARN("us-east-1", account, "igw-1"), "arn:aws:ec2:us-east-1:123456789012:internet-gateway/igw-1"},
+		{"ec2-rtb", BuildEC2RouteTableARN("us-east-1", account, "rtb-1"), "arn:aws:ec2:us-east-1:123456789012:route-table/rtb-1"},
+		{"ec2-eip", BuildEC2EIPARN("us-east-1", account, "eipalloc-1"), "arn:aws:ec2:us-east-1:123456789012:elastic-ip/eipalloc-1"},
+		{"rds-db", BuildRDSDBARN("us-east-1", account, "db-1"), "arn:aws:rds:us-east-1:123456789012:db:db-1"},
+		{"rds-cluster", BuildRDSClusterARN("us-east-1", account, "cluster-1"), "arn:aws:rds:us-east-1:123456789012:cluster:cluster-1"},
+		{"rds-subnet-group", BuildRDSSubnetGroupARN("us-east-1", account, "subg-1"), "arn:aws:rds:us-east-1:123456789012:subgrp:subg-1"},
+		{"rds-pg", BuildRDSParameterGroupARN("us-east-1", account, "pg15"), "arn:aws:rds:us-east-1:123456789012:pg:pg15"},
+		{"rds-cluster-pg", BuildRDSClusterParameterGroupARN("us-east-1", account, "aurora-pg"), "arn:aws:rds:us-east-1:123456789012:cluster-pg:aurora-pg"},
+		{"eks-cluster", BuildEKSClusterARN("us-east-1", account, "demo"), "arn:aws:eks:us-east-1:123456789012:cluster/demo"},
+		{"eks-nodegroup", BuildEKSNodegroupARN("us-east-1", account, "demo", "ng1", "abc-123"), "arn:aws:eks:us-east-1:123456789012:nodegroup/demo/ng1/abc-123"},
+		{"sqs-queue", BuildSQSQueueARN("us-east-1", account, "my-queue"), "arn:aws:sqs:us-east-1:123456789012:my-queue"},
+		{"sm-secret", BuildSecretsManagerSecretARN("us-east-1", account, "db-creds", "AbCdEf"), "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-creds-AbCdEf"},
+		{"ddb-table", BuildDynamoDBTableARN("us-east-1", account, "Users"), "arn:aws:dynamodb:us-east-1:123456789012:table/Users"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, c.got)
+		})
+	}
+}
+
 // TestARNBuildersUseSyntheticAccount asserts no builder hardcodes a
-// real AWS account number. If the FakeAccountID constant moves, every
-// builder picks up the change.
+// real AWS account number and the default account, FakeAccountID, is
+// still the synthetic one.
 func TestARNBuildersUseSyntheticAccount(t *testing.T) {
 	if FakeAccountID != "000000000000" {
 		t.Fatalf("FakeAccountID changed without test update: %s", FakeAccountID)
 	}
 	// IAM ARN must contain the synthetic account.
-	if !strings.Contains(BuildIAMRoleARN("x"), FakeAccountID) {
+	if !strings.Contains(BuildIAMRoleARN(FakeAccountID, "x"), FakeAccountID) {
 		t.Errorf("IAM ARN missing synthetic account")
 	}
 	// S3 ARN must NOT contain the account (S3 ARNs omit account).

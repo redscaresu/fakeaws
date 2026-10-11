@@ -150,7 +150,7 @@ func (app *Application) sqsCreateQueue(w http.ResponseWriter, host, account, reg
 		// /mock/state consumers, but emitted by sqsQueueURL(host, ...)
 		// in responses so the URL is always reachable.
 		QueueURL:   sqsQueueURL(host, region, in.QueueName),
-		ARN:        awsproto.BuildSQSQueueARN(region, in.QueueName),
+		ARN:        awsproto.BuildSQSQueueARN(region, account, in.QueueName),
 		Attributes: in.Attributes,
 		Fifo:       fifoNamed,
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
@@ -282,7 +282,7 @@ func sqsTagCall(w http.ResponseWriter, region string, req awsproto.XAmzTargetReq
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON10, fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return in, "", false
 	}
-	return in, awsproto.BuildSQSQueueARN(region, queueNameFromURL(in.QueueUrl)), true
+	return in, awsproto.BuildSQSQueueARN(region, awsproto.FakeAccountID, queueNameFromURL(in.QueueUrl)), true
 }
 
 // sqsWriteTagError writes a tag op's failure, NonExistentQueue for a
