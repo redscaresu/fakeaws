@@ -36,7 +36,7 @@ import (
 //	  "route53":        {...},
 //	  "ssm":            {"parameters": [...]},  // name, type, version, region; no values
 //	  "operations":     [...],   // bookkeeping; ignored by countOrphans
-//	  "audit":          [...]    // request log; ignored by countOrphans
+//	  "audit":          [...]    // request log, {service, protocol, action, status, class}; ignored by countOrphans
 //	}
 //
 // Per concepts.md "Required surface" item 4 (S43-T4 acceptance): the
@@ -61,6 +61,10 @@ func (app *Application) registerAdminRoutes(r chi.Router) {
 		mr.Get("/state/{service}", app.handleMockStateService)
 		mr.Post("/images", app.handleMockSeedImage)
 		mr.Post("/identity", app.handleMockIdentity)
+		if app.requests != nil {
+			mr.Get("/requests", app.handleMockRequests)
+			mr.Post("/requests/clear", app.handleMockRequestsClear)
+		}
 	})
 }
 
@@ -349,6 +353,7 @@ func (app *Application) handleMockReset(w http.ResponseWriter, _ *http.Request) 
 		})
 		return
 	}
+	app.requests.clear()
 	writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
@@ -432,7 +437,7 @@ func (app *Application) collectState(service string) (map[string]any, error) {
 		// Universal bookkeeping. countOrphans must continue to ignore
 		// these on destroy assertions.
 		"operations": []any{},
-		"audit":      []any{},
+		"audit":      app.requests.audit(),
 	}
 
 	// Per-service gather hooks. Each one returns either a populated

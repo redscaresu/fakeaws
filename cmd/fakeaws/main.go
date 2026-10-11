@@ -55,6 +55,7 @@ func optionsFromFlags(args []string, getenv func(string) string) (handlers.Optio
 	fs.StringVar(&opts.DBPath, "db", ":memory:", "SQLite path; ':memory:' for ephemeral, file path for persistent")
 	fs.BoolVar(&opts.Echo, "echo", false, "log every request method+path (useful for discovering unimplemented endpoints)")
 	fs.StringVar(&opts.AdminToken, "admin-token", "", "require Authorization: Bearer <token> on /mock/*; else "+adminTokenEnv)
+	fs.BoolVar(&opts.RecordRequests, "record-requests", false, "log every AWS request in memory, served on GET /mock/requests; needs -admin-token or "+adminTokenEnv)
 	fs.Func("account", "12-digit account id to store and answer as (default "+awsproto.FakeAccountID+"); refused when the db holds rows under another", func(v string) error {
 		opts.AccountID = v
 		return handlers.CheckAccountID(v)

@@ -3,6 +3,8 @@ package main
 import (
 	"database/sql"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -100,4 +102,34 @@ func TestBootWithoutAccountWritesNoIdentity(t *testing.T) {
 
 	_, err = app.Repository().GetIdentity()
 	assert.ErrorIs(t, err, sql.ErrNoRows)
+}
+
+func TestRecordRequestsNeedsAToken(t *testing.T) {
+	opts, err := optionsFromFlags([]string{"-record-requests"}, env(nil))
+	require.NoError(t, err)
+	_, err = handlers.NewApplication(opts)
+	assert.ErrorIs(t, err, handlers.ErrRecordRequestsNeedsAdminToken, "main exits 1 on it, naming the token")
+
+	for name, tc := range map[string]struct {
+		args []string
+		env  map[string]string
+	}{
+		"-admin-token": {[]string{"-record-requests", "-admin-token", testToken}, nil},
+		adminTokenEnv:  {[]string{"-record-requests"}, map[string]string{adminTokenEnv: testToken}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts, err := optionsFromFlags(tc.args, env(tc.env))
+			require.NoError(t, err)
+			assert.True(t, opts.RecordRequests)
+
+			app, err := handlers.NewApplication(opts)
+			require.NoError(t, err)
+			defer app.Close()
+			req := httptest.NewRequest(http.MethodGet, "/mock/requests", nil)
+			req.Header.Set("Authorization", "Bearer "+testToken)
+			rec := httptest.NewRecorder()
+			app.Router().ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		})
+	}
 }
