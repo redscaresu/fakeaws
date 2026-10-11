@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (files fakeaws creates are 0600, 2026-10-11)
+- **A file-backed db is owner-only.** With `-db <file>`, a db fakeaws creates is created 0600 before SQLite opens it, so its `-wal`/`-shm` (which SQLite gives the db's mode) are 0600 too; `/mock/snapshot` creates `<db>.snapshot` 0600 before `VACUUM INTO` writes it; and `/mock/restore` recreates a removed live db 0600. All were 0644 under umask 022. A db that already exists keeps its mode; `:memory:` is unchanged.
+- **A failed snapshot leaves no `.snapshot`**, so the next `/mock/restore` is 404 instead of copying an empty file over the live db. `TestContract_file_backed_db_owner_only`, `TestAdminMockSnapshot_FailedVacuumLeavesNoSnapshot` and `TestAdminMockRestore_MemoryConflict` pin it.
+
 ### Added (-bind, -admin-token and a loopback-Origin guard on /mock, 2026-10-11)
 - **`-bind <host>`** sets the listen host; empty keeps `:<port>` on all interfaces. `Options.ListenAddr()` joins host and port, so `-bind ::1` listens on `[::1]:<port>`.
 - **`-admin-token <token>`, else `FAKEAWS_ADMIN_TOKEN`**, gates every `/mock` path, unknown ones included: a present `Origin` that is not loopback (`localhost` or a loopback IP literal; `null` and lookalikes such as `http://localhost.evil` refused) is 403, then anything but `Authorization: Bearer <token>` is 401. Neither body names the token, and the startup log says only whether one is set. `/healthz` and the AWS surface are not gated; without a token `/mock` answers exactly as before.

@@ -1,18 +1,23 @@
 package handlers_test
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/redscaresu/fakeaws/handlers"
+	"github.com/redscaresu/fakeaws/repository"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -86,6 +91,72 @@ func TestAdminMockSnapshotRestore_FileBackedRoundTrips(t *testing.T) {
 	// Restore — the snapshot file exists, so this should 200.
 	r, b = doPost(t, srv, "/mock/restore")
 	require.Equal(t, http.StatusOK, r.StatusCode, "restore body %s", b)
+}
+
+func TestAdminMockRestore_MemoryConflict(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, body := doPost(t, srv, "/mock/restore")
+	require.Equal(t, http.StatusConflict, resp.StatusCode, "restore meaningless on :memory:; body: %s", body)
+	assert.NoFileExists(t, ":memory:", ":memory: must not create a file")
+}
+
+// assertOwnerOnly checks each path is a file with mode exactly 0600.
+func assertOwnerOnly(t *testing.T, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if assert.NoError(t, err) {
+			assert.Equal(t, os.FileMode(0o600).String(), fi.Mode().Perm().String(), filepath.Base(p))
+		}
+	}
+}
+
+func TestContract_file_backed_db_owner_only(t *testing.T) {
+	// Under umask 022 a file created without an explicit mode is 0644.
+	umask := syscall.Umask(0o022)
+	t.Cleanup(func() { syscall.Umask(umask) })
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	live := []string{dbPath, dbPath + "-wal", dbPath + "-shm"}
+	srv := newTestServer(t, dbPath)
+
+	resp, body := sqsCall(t, srv, "CreateQueue", `{"QueueName":"owner-only"}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateQueue: %s", body)
+	assertOwnerOnly(t, live...)
+
+	resp, body = doPost(t, srv, "/mock/snapshot")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "snapshot: %s", body)
+	assertOwnerOnly(t, dbPath+".snapshot")
+
+	resp, body = doPost(t, srv, "/mock/restore")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "restore: %s", body)
+	assertOwnerOnly(t, live...)
+
+	require.NoError(t, os.Remove(dbPath))
+	resp, body = doPost(t, srv, "/mock/restore")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "restore over a removed db: %s", body)
+	assertOwnerOnly(t, live...)
+}
+
+// A failed VACUUM INTO leaves no .snapshot, so the next restore is 404
+// instead of copying an empty file over the live db.
+func TestAdminMockSnapshot_FailedVacuumLeavesNoSnapshot(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	srv := newTestServer(t, dbPath)
+	resp, body := sqsCall(t, srv, "CreateQueue", `{"QueueName":"survives"}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateQueue: %s", body)
+
+	vacuum := repository.VacuumInto
+	repository.VacuumInto = func(*sql.DB, string) error { return errors.New("forced vacuum failure") }
+	t.Cleanup(func() { repository.VacuumInto = vacuum })
+
+	resp, body = doPost(t, srv, "/mock/snapshot")
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode, "snapshot: %s", body)
+	assert.NoFileExists(t, dbPath+".snapshot")
+
+	resp, body = doPost(t, srv, "/mock/restore")
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "restore after a failed snapshot: %s", body)
+	resp, body = sqsCall(t, srv, "GetQueueUrl", `{"QueueName":"survives"}`)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "live db intact: %s", body)
 }
 
 func TestAdminMockImages_SeededImageLaunches(t *testing.T) {
