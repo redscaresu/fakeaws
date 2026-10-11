@@ -33,7 +33,10 @@ func (app *Application) handleSQS(w http.ResponseWriter, r *http.Request) {
 			fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSON10)
+	if !ok {
+		return
+	}
 
 	// M68 fix: emit QueueUrls using the request's actual host so the
 	// SDK can route subsequent calls (ListQueueTags, GetQueueAttributes,
@@ -96,9 +99,9 @@ func (app *Application) handleSQS(w http.ResponseWriter, r *http.Request) {
 // block — so fakeaws's existing /sqs/region/{region} routes handle
 // every call. The QueueUrl is just an identifier the body parser
 // extracts the queue name from.
-func sqsQueueURL(host, region, queueName string) string {
+func sqsQueueURL(host, account, queueName string) string {
 	return fmt.Sprintf("http://%s/%s/%s",
-		host, awsproto.FakeAccountID, queueName)
+		host, account, queueName)
 }
 
 // sqsRequestHost returns the host fakeaws was reached at for this
@@ -149,7 +152,7 @@ func (app *Application) sqsCreateQueue(w http.ResponseWriter, host, account, reg
 		// QueueURL kept on the repo row for backwards compat with
 		// /mock/state consumers, but emitted by sqsQueueURL(host, ...)
 		// in responses so the URL is always reachable.
-		QueueURL:   sqsQueueURL(host, region, in.QueueName),
+		QueueURL:   sqsQueueURL(host, account, in.QueueName),
 		ARN:        awsproto.BuildSQSQueueARN(region, account, in.QueueName),
 		Attributes: in.Attributes,
 		Fifo:       fifoNamed,
@@ -166,7 +169,7 @@ func (app *Application) sqsCreateQueue(w http.ResponseWriter, host, account, reg
 		return
 	}
 	awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{
-		"QueueUrl": sqsQueueURL(host, region, in.QueueName),
+		"QueueUrl": sqsQueueURL(host, account, in.QueueName),
 	})
 }
 
@@ -181,7 +184,7 @@ func (app *Application) sqsGetQueueURL(w http.ResponseWriter, host, account, reg
 		return
 	}
 	awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{
-		"QueueUrl": sqsQueueURL(host, q.Region, q.Name),
+		"QueueUrl": sqsQueueURL(host, account, q.Name),
 	})
 }
 
@@ -247,7 +250,7 @@ func (app *Application) sqsListQueues(w http.ResponseWriter, host, account, regi
 	}
 	urls := make([]string, 0, len(queues))
 	for _, q := range queues {
-		urls = append(urls, sqsQueueURL(host, q.Region, q.Name))
+		urls = append(urls, sqsQueueURL(host, account, q.Name))
 	}
 	awsproto.WriteJSON10Response(w, http.StatusOK, map[string]any{
 		"QueueUrls": urls,
@@ -276,13 +279,13 @@ type sqsQueueTagsInput struct {
 
 // sqsTagCall decodes a tag op's body and returns it with the queue's
 // ARN. It writes the error itself and reports false on a bad body.
-func sqsTagCall(w http.ResponseWriter, region string, req awsproto.XAmzTargetRequest) (sqsQueueTagsInput, string, bool) {
+func sqsTagCall(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) (sqsQueueTagsInput, string, bool) {
 	var in sqsQueueTagsInput
 	if err := json.Unmarshal(req.Body, &in); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON10, fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return in, "", false
 	}
-	return in, awsproto.BuildSQSQueueARN(region, awsproto.FakeAccountID, queueNameFromURL(in.QueueUrl)), true
+	return in, awsproto.BuildSQSQueueARN(region, account, queueNameFromURL(in.QueueUrl)), true
 }
 
 // sqsWriteTagError writes a tag op's failure, NonExistentQueue for a
@@ -298,7 +301,7 @@ func sqsWriteTagError(w http.ResponseWriter, queueURL string, err error) {
 }
 
 func (app *Application) sqsListQueueTags(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
-	in, arn, ok := sqsTagCall(w, region, req)
+	in, arn, ok := sqsTagCall(w, account, region, req)
 	if !ok {
 		return
 	}
@@ -311,7 +314,7 @@ func (app *Application) sqsListQueueTags(w http.ResponseWriter, account, region 
 }
 
 func (app *Application) sqsTagQueue(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
-	in, arn, ok := sqsTagCall(w, region, req)
+	in, arn, ok := sqsTagCall(w, account, region, req)
 	if !ok {
 		return
 	}
@@ -323,7 +326,7 @@ func (app *Application) sqsTagQueue(w http.ResponseWriter, account, region strin
 }
 
 func (app *Application) sqsUntagQueue(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
-	in, arn, ok := sqsTagCall(w, region, req)
+	in, arn, ok := sqsTagCall(w, account, region, req)
 	if !ok {
 		return
 	}
@@ -427,8 +430,7 @@ func sqsRandID() string {
 
 // ----- /mock/state gather -----
 
-func (app *Application) gatherSQSStateReal() map[string]any {
-	const account = awsproto.FakeAccountID
+func (app *Application) gatherSQSStateReal(account string) map[string]any {
 	out := map[string]any{
 		"queues":              []any{},
 		"messages":            []any{},

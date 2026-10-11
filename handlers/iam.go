@@ -217,12 +217,10 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// gatherIAMState (override of the stub in admin.go) emits the IAM
-// block of /mock/state. Per concepts.md "Required surface" item 4 —
-// topology_derive_aws (S43-T9) keys off this shape.
-func (app *Application) gatherIAMStateReal() map[string]any {
-	// collectState has already failed on an unreadable identity.
-	account, _ := app.AccountID()
+// gatherIAMStateReal emits the IAM block of /mock/state. Per
+// concepts.md "Required surface" item 4 — topology_derive_aws (S43-T9)
+// keys off this shape.
+func (app *Application) gatherIAMStateReal(account string) map[string]any {
 	out := map[string]any{
 		"roles":             []any{},
 		"policies":          []any{},

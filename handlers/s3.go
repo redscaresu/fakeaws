@@ -47,8 +47,7 @@ func (app *Application) registerS3Routes(r chi.Router) {
 }
 
 // gatherS3StateReal returns the S3 block of /mock/state.
-func (app *Application) gatherS3StateReal() map[string]any {
-	const account = awsproto.FakeAccountID
+func (app *Application) gatherS3StateReal(account string) map[string]any {
 	out := map[string]any{
 		"buckets": []any{},
 	}
@@ -83,7 +82,10 @@ func (app *Application) gatherS3StateReal() map[string]any {
 // with ?versioning etc. is a config write; without subresource it's
 // CreateBucket.
 func (app *Application) s3PutBucket(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	bucket := chi.URLParam(r, "bucket")
 	q := r.URL.Query()
 	switch {
@@ -128,7 +130,10 @@ func (app *Application) s3PutBucket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *Application) s3HeadBucket(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	if _, err := app.repo.GetBucket(account, chi.URLParam(r, "bucket")); err != nil {
 		// HeadBucket returns 404 with no body when the bucket doesn't exist.
 		w.WriteHeader(http.StatusNotFound)
@@ -142,7 +147,10 @@ func (app *Application) s3HeadBucket(w http.ResponseWriter, r *http.Request) {
 // ListObjectsV2 (which returns an empty list at v1 since we don't
 // store objects).
 func (app *Application) s3GetBucketOrListObjects(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	bucket := chi.URLParam(r, "bucket")
 	if _, err := app.repo.GetBucket(account, bucket); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
@@ -170,7 +178,10 @@ func (app *Application) s3GetBucketOrListObjects(w http.ResponseWriter, r *http.
 }
 
 func (app *Application) s3DeleteBucket(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	bucket := chi.URLParam(r, "bucket")
 	q := r.URL.Query()
 
@@ -201,7 +212,10 @@ func (app *Application) s3DeleteBucket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *Application) s3ListBuckets(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	buckets, err := app.repo.ListBuckets(account)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
@@ -221,7 +235,7 @@ func (app *Application) s3ListBuckets(w http.ResponseWriter, r *http.Request) {
 		Buckets []bucketXML `xml:"Buckets>Bucket"`
 	}
 	out := result{
-		Owner: ownerXML{ID: awsproto.FakeAccountID, DisplayName: "fakeaws"},
+		Owner: ownerXML{ID: account, DisplayName: "fakeaws"},
 	}
 	for _, b := range buckets {
 		out.Buckets = append(out.Buckets, bucketXML{Name: b.Name, CreationDate: b.CreatedAt})
@@ -401,7 +415,10 @@ func (app *Application) s3ListObjects(w http.ResponseWriter, account, bucket str
 // ----- Object endpoints (payload discarded) -----
 
 func (app *Application) s3PutObject(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	bucket := chi.URLParam(r, "bucket")
 	if _, err := app.repo.GetBucket(account, bucket); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)

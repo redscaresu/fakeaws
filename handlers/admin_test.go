@@ -3,6 +3,7 @@ package handlers_test
 import (
 	"database/sql"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/redscaresu/fakeaws/handlers"
@@ -674,4 +676,288 @@ func TestAdminMockIdentity_InvalidBodyWritesNothing(t *testing.T) {
 	_, guarded := newOptionsApp(t, handlers.Options{DBPath: ":memory:", AdminToken: adminToken})
 	resp, body := doPostJSON(t, guarded, "/mock/identity", `{"account_id":"`+otherAccount+`"}`)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "no bearer: %s", body)
+}
+
+// TestStoredAccount_ServiceARNs: under a stored account the SSM, KMS,
+// DynamoDB, Secrets Manager, SQS, EKS and RDS ARNs, the KMS key
+// policy's root principal and the SQS queue URL carry that account,
+// and /mock/state lists the rows.
+func TestStoredAccount_ServiceARNs(t *testing.T) {
+	_, srv := newOptionsApp(t, handlers.Options{DBPath: ":memory:", AccountID: otherAccount})
+	const region = "us-east-1"
+	acct := ":" + otherAccount + ":"
+	_, _, subnetA, subnetB := eksSetupPrereqs(t, srv, region)
+	created := func(service string, body []byte) []byte {
+		t.Helper()
+		assert.Contains(t, string(body), acct, "%s: %s", service, body)
+		assert.NotContains(t, string(body), awsproto.FakeAccountID, "%s: %s", service, body)
+		return body
+	}
+
+	mustOK(t)(ssmCall(t, srv, "PutParameter", `{"Name":"/acct/param","Type":"String","Value":"v"}`))
+	created("SSM GetParameter", mustOK(t)(ssmCall(t, srv, "GetParameter", `{"Name":"/acct/param"}`)))
+	created("SSM DescribeParameters", mustOK(t)(ssmCall(t, srv, "DescribeParameters", `{}`)))
+
+	var key struct {
+		KeyMetadata struct{ Arn, AWSAccountId, KeyId string }
+	}
+	require.NoError(t, json.Unmarshal(created("KMS CreateKey", mustOK(t)(kmsCall(t, srv, region, "CreateKey", `{}`))), &key))
+	assert.Equal(t, "arn:aws:kms:us-east-1:"+otherAccount+":key/"+key.KeyMetadata.KeyId, key.KeyMetadata.Arn)
+	assert.Equal(t, otherAccount, key.KeyMetadata.AWSAccountId)
+	var policy struct{ Policy string }
+	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, region, "GetKeyPolicy", `{"KeyId":"`+key.KeyMetadata.KeyId+`"}`)), &policy))
+	assert.Contains(t, policy.Policy, `"Principal":{"AWS":"arn:aws:iam::`+otherAccount+`:root"}`)
+	assert.NotContains(t, policy.Policy, awsproto.FakeAccountID)
+
+	created("DynamoDB CreateTable", mustOK(t)(ddbCall(t, srv, region, "CreateTable", `{"TableName":"acct",
+		"AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],
+		"KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],"BillingMode":"PAY_PER_REQUEST"}`)))
+	var secret struct{ ARN string }
+	require.NoError(t, json.Unmarshal(created("CreateSecret", mustOK(t)(smCall(t, srv, "CreateSecret", `{"Name":"acct","SecretString":"s"}`))), &secret))
+
+	var queue struct{ QueueUrl string }
+	require.NoError(t, json.Unmarshal(mustOK(t)(sqsCall(t, srv, "CreateQueue", `{"QueueName":"acct"}`)), &queue))
+	assert.True(t, strings.HasSuffix(queue.QueueUrl, "/"+otherAccount+"/acct"), queue.QueueUrl)
+	created("SQS GetQueueAttributes", mustOK(t)(sqsCall(t, srv, "GetQueueAttributes",
+		`{"QueueUrl":"`+queue.QueueUrl+`","AttributeNames":["QueueArn"]}`)))
+
+	// The EKS creates find the IAM roles and EC2 subnets under the
+	// stored account.
+	created("EKS CreateCluster", mustOK(t)(eksRequest(t, srv, http.MethodPost, "/eks/region/"+region+"/clusters",
+		`{"name":"acct","roleArn":"`+awsproto.BuildIAMRoleARN(otherAccount, "eks-cluster-role")+
+			`","resourcesVpcConfig":{"subnetIds":["`+subnetA+`","`+subnetB+`"]}}`)))
+	created("EKS CreateNodegroup", mustOK(t)(eksRequest(t, srv, http.MethodPost, "/eks/region/"+region+"/clusters/acct/node-groups",
+		`{"nodegroupName":"ng","nodeRole":"`+awsproto.BuildIAMRoleARN(otherAccount, "eks-node-role")+`","subnets":["`+subnetA+`"]}`)))
+
+	// CreateDBSubnetGroup finds the EC2 subnets under the stored account.
+	created("CreateDBSubnetGroup", mustOK(t)(rdsCall(t, srv, region, "CreateDBSubnetGroup", url.Values{
+		"DBSubnetGroupName": {"acct"}, "DBSubnetGroupDescription": {"d"},
+		"SubnetIds.member.1": {subnetA}, "SubnetIds.member.2": {subnetB},
+	})))
+	created("CreateDBParameterGroup", mustOK(t)(rdsCall(t, srv, region, "CreateDBParameterGroup", url.Values{
+		"DBParameterGroupName": {"acct"}, "DBParameterGroupFamily": {"postgres15"}, "Description": {"d"},
+	})))
+	created("CreateDBCluster", mustOK(t)(rdsCall(t, srv, region, "CreateDBCluster", url.Values{
+		"DBClusterIdentifier": {"acct"}, "Engine": {"aurora-postgresql"},
+	})))
+	created("CreateDBInstance", mustOK(t)(rdsCall(t, srv, region, "CreateDBInstance", url.Values{
+		"DBInstanceIdentifier": {"acct"}, "Engine": {"postgres"},
+		"DBInstanceClass": {"db.t3.micro"}, "DBSubnetGroupName": {"acct"},
+	})))
+
+	stateARNs := arnsIn(t, srv)
+	for _, want := range []string{
+		"arn:aws:dynamodb:us-east-1:" + otherAccount + ":table/acct",
+		secret.ARN,
+		"arn:aws:sqs:us-east-1:" + otherAccount + ":acct",
+		"arn:aws:eks:us-east-1:" + otherAccount + ":cluster/acct",
+		"arn:aws:eks:us-east-1:" + otherAccount + ":nodegroup/acct/ng/deterministic",
+		"arn:aws:rds:us-east-1:" + otherAccount + ":db:acct",
+		"arn:aws:rds:us-east-1:" + otherAccount + ":cluster:acct",
+		"arn:aws:rds:us-east-1:" + otherAccount + ":subgrp:acct",
+		"arn:aws:rds:us-east-1:" + otherAccount + ":pg:acct",
+	} {
+		assert.Contains(t, stateARNs, want, "/mock/state ARNs")
+	}
+	assert.Regexp(t, `^arn:aws:secretsmanager:us-east-1:`+otherAccount+`:secret:acct-[A-Za-z0-9]{6}$`, secret.ARN)
+	var state struct {
+		SSM struct{ Parameters []struct{ Name string } } `json:"ssm"`
+	}
+	body := mustOK(t)(doGet(t, srv, "/mock/state"))
+	require.NoError(t, json.Unmarshal(body, &state))
+	require.Len(t, state.SSM.Parameters, 1, "%s", body)
+	assert.Equal(t, "/acct/param", state.SSM.Parameters[0].Name)
+	assert.NotContains(t, string(body), awsproto.FakeAccountID)
+}
+
+// TestStoredAccount_ZonesAndBucketsListed: under a stored account a
+// hosted zone and a bucket created through the API are listed by
+// ListHostedZones, ListBuckets and /mock/state, and the bucket owner is
+// the stored account; rows under 000000000000 in the same database are
+// not listed.
+func TestStoredAccount_ZonesAndBucketsListed(t *testing.T) {
+	app, srv := newOptionsApp(t, handlers.Options{DBPath: ":memory:", AccountID: otherAccount})
+	repo := app.Repository()
+	require.NoError(t, repo.CreateBucket(awsproto.FakeAccountID, &repository.S3Bucket{Name: "default-bucket", Region: "us-east-1"}))
+	require.NoError(t, repo.CreateHostedZone(awsproto.FakeAccountID, &repository.Route53HostedZone{ID: "ZDEFAULT", Name: "default.example."}))
+
+	mustOK(t)(s3Do(t, srv, http.MethodPut, "/s3/acct-bucket/", "", ""))
+	mustOK(t)(r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest><Name>acct.example.</Name><CallerReference>acct</CallerReference></CreateHostedZoneRequest>`))
+
+	var buckets struct {
+		OwnerID string   `xml:"Owner>ID"`
+		Names   []string `xml:"Buckets>Bucket>Name"`
+	}
+	require.NoError(t, xml.Unmarshal(mustOK(t)(s3Do(t, srv, http.MethodGet, "/s3/", "", "")), &buckets))
+	assert.Equal(t, otherAccount, buckets.OwnerID)
+	assert.Equal(t, []string{"acct-bucket"}, buckets.Names)
+
+	var zones struct {
+		Names []string `xml:"HostedZones>HostedZone>Name"`
+	}
+	require.NoError(t, xml.Unmarshal(mustOK(t)(r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone", "")), &zones))
+	assert.Equal(t, []string{"acct.example."}, zones.Names)
+
+	var state struct {
+		S3      struct{ Buckets []struct{ Name string } } `json:"s3"`
+		Route53 struct {
+			HostedZones []struct{ Name string } `json:"hosted_zones"`
+		} `json:"route53"`
+	}
+	body := mustOK(t)(doGet(t, srv, "/mock/state"))
+	require.NoError(t, json.Unmarshal(body, &state))
+	require.Len(t, state.S3.Buckets, 1, "%s", body)
+	assert.Equal(t, "acct-bucket", state.S3.Buckets[0].Name)
+	require.Len(t, state.Route53.HostedZones, 1, "%s", body)
+	assert.Equal(t, "acct.example.", state.Route53.HostedZones[0].Name)
+}
+
+// TestStoredAccount_UnreadableIdentityIs500: with the identity table
+// gone, one call per service answers 500 and never the default account.
+func TestStoredAccount_UnreadableIdentityIs500(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	_, err := app.Repository().DB().Exec(`DROP TABLE identity`)
+	require.NoError(t, err)
+
+	const region = "us-east-1"
+	for service, call := range map[string]func() (*http.Response, []byte){
+		"ssm":            func() (*http.Response, []byte) { return ssmCall(t, srv, "DescribeParameters", `{}`) },
+		"kms":            func() (*http.Response, []byte) { return kmsCall(t, srv, region, "CreateKey", `{}`) },
+		"dynamodb":       func() (*http.Response, []byte) { return ddbCall(t, srv, region, "ListTables", `{}`) },
+		"secretsmanager": func() (*http.Response, []byte) { return smCall(t, srv, "ListSecrets", `{}`) },
+		"sqs":            func() (*http.Response, []byte) { return sqsCall(t, srv, "ListQueues", `{}`) },
+		"eks": func() (*http.Response, []byte) {
+			return eksRequest(t, srv, http.MethodGet, "/eks/region/"+region+"/clusters", "")
+		},
+		"rds": func() (*http.Response, []byte) { return rdsCall(t, srv, region, "DescribeDBInstances", nil) },
+		"route53": func() (*http.Response, []byte) {
+			return r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone", "")
+		},
+		"s3": func() (*http.Response, []byte) { return s3Do(t, srv, http.MethodGet, "/s3/", "", "") },
+	} {
+		resp, body := call()
+		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "%s: %s", service, body)
+		assert.NotContains(t, string(body), awsproto.FakeAccountID, service)
+	}
+}
+
+// TestSetIdentity_RacesCreate races a queue create against an identity
+// change on an empty database, many times: either the change is
+// refused, or no row is left under the old account.
+func TestSetIdentity_RacesCreate(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	for i := range 200 {
+		mustOK(t)(doPost(t, srv, "/mock/reset"))
+		done := postAsync(srv, "/mock/identity", `{"account_id":"`+otherAccount+`"}`)
+		mustOK(t)(sqsCall(t, srv, "CreateQueue", `{"QueueName":"race"}`))
+		res := <-done
+		require.NoError(t, res.err, "iteration %d", i)
+		if res.status == http.StatusConflict {
+			continue
+		}
+		require.Equal(t, http.StatusOK, res.status, "iteration %d", i)
+		queues, err := app.Repository().ListSQSQueues(awsproto.FakeAccountID, "")
+		require.NoError(t, err)
+		require.Empty(t, queues, "iteration %d: a queue was created under the old account after the change", i)
+	}
+}
+
+// TestMockReset_RacesCreate races a queue create against /mock/reset
+// under a stored account, many times: no row is left under an account
+// other than the one AccountID returns after the reset.
+func TestMockReset_RacesCreate(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	for i := range 200 {
+		mustOK(t)(doPost(t, srv, "/mock/reset"))
+		mustOK(t)(doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+otherAccount+`"}`))
+		done := postAsync(srv, "/mock/reset", "")
+		mustOK(t)(sqsCall(t, srv, "CreateQueue", `{"QueueName":"race"}`))
+		res := <-done
+		require.NoError(t, res.err, "iteration %d", i)
+		require.Equal(t, http.StatusOK, res.status, "iteration %d", i)
+		require.Equal(t, awsproto.FakeAccountID, accountID(t, app), "iteration %d", i)
+		queues, err := app.Repository().ListSQSQueues(otherAccount, "")
+		require.NoError(t, err)
+		require.Empty(t, queues, "iteration %d: a queue was created under the reset account", i)
+	}
+}
+
+// TestKMS_KeyKeepsItsAccount: a key made before an identity change
+// keeps its account in DescribeKey and in its policy's root principal.
+func TestKMS_KeyKeepsItsAccount(t *testing.T) {
+	_, srv := newTestApp(t, ":memory:")
+	const region = "us-east-1"
+	var key struct{ KeyMetadata struct{ KeyId string } }
+	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, region, "CreateKey", `{}`)), &key))
+	mustOK(t)(doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+otherAccount+`"}`))
+
+	keyID := `{"KeyId":"` + key.KeyMetadata.KeyId + `"}`
+	var described struct{ KeyMetadata struct{ AWSAccountId string } }
+	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, region, "DescribeKey", keyID)), &described))
+	assert.Equal(t, awsproto.FakeAccountID, described.KeyMetadata.AWSAccountId)
+	var policy struct{ Policy string }
+	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, region, "GetKeyPolicy", keyID)), &policy))
+	assert.Contains(t, policy.Policy, `"Principal":{"AWS":"arn:aws:iam::`+awsproto.FakeAccountID+`:root"}`)
+}
+
+type postResult struct {
+	status int
+	err    error
+}
+
+// postAsync POSTs body to path on a goroutine and sends the status, or
+// the error, on the returned channel, so a failure is asserted on the
+// test goroutine.
+func postAsync(srv *httptest.Server, path, body string) <-chan postResult {
+	done := make(chan postResult, 1)
+	client := *srv.Client()
+	client.Timeout = 30 * time.Second
+	go func() {
+		resp, err := client.Post(srv.URL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			done <- postResult{err: err}
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		done <- postResult{status: resp.StatusCode}
+	}()
+	return done
+}
+
+// TestMockRestore_RacesStateAndSnapshot runs /mock/restore over and
+// over while /mock/state and /mock/snapshot run beside it. Every call
+// answers 200, and every state lists the bucket the live db and the
+// snapshot both hold; go test -race catches a read of the db handle a
+// restore is replacing.
+func TestMockRestore_RacesStateAndSnapshot(t *testing.T) {
+	_, srv := newTestApp(t, filepath.Join(t.TempDir(), "race.db"))
+	mustOK(t)(s3Do(t, srv, http.MethodPut, "/s3/snap-bucket/", "", ""))
+	mustOK(t)(doPost(t, srv, "/mock/snapshot"))
+
+	const rounds = 30
+	loop := func(path string) <-chan []postResult {
+		out := make(chan []postResult, 1)
+		go func() {
+			var results []postResult
+			for range rounds {
+				results = append(results, <-postAsync(srv, path, ""))
+			}
+			out <- results
+		}()
+		return out
+	}
+	restores, snapshots := loop("/mock/restore"), loop("/mock/snapshot")
+	for i := range rounds {
+		resp, body := doGet(t, srv, "/mock/state/s3")
+		require.Equal(t, http.StatusOK, resp.StatusCode, "state %d: %s", i, body)
+		assert.Contains(t, string(body), `"name":"snap-bucket"`, "state %d", i)
+	}
+	for path, done := range map[string]<-chan []postResult{"/mock/restore": restores, "/mock/snapshot": snapshots} {
+		for i, res := range <-done {
+			require.NoError(t, res.err, "%s %d", path, i)
+			assert.Equal(t, http.StatusOK, res.status, "%s %d", path, i)
+		}
+	}
 }

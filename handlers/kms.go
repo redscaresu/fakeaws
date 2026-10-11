@@ -21,8 +21,11 @@ import (
 // round-trip through plan/apply/destroy.
 
 type kmsKey struct {
-	KeyID   string
-	ARN     string
+	KeyID string
+	ARN   string
+	// Account is the account the key was created under; the key keeps
+	// it, as kmsStore is not in the database the identity guards.
+	Account string
 	State   string
 	Created time.Time
 	Deleted *time.Time
@@ -63,7 +66,10 @@ func (app *Application) handleKMS(w http.ResponseWriter, r *http.Request) {
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeJSON11)
+	if !ok {
+		return
+	}
 
 	switch req.Operation {
 	case "CreateKey":
@@ -117,10 +123,11 @@ func (app *Application) kmsCreateKey(w http.ResponseWriter, account, region stri
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	keyID := hex.EncodeToString(b[:4]) + "-" + hex.EncodeToString(b[4:6]) + "-" + hex.EncodeToString(b[6:8]) + "-" + hex.EncodeToString(b[8:10]) + "-" + hex.EncodeToString(b[10:16])
-	arn := fmt.Sprintf("arn:aws:kms:%s:%s:key/%s", region, awsproto.FakeAccountID, keyID)
+	arn := fmt.Sprintf("arn:aws:kms:%s:%s:key/%s", region, account, keyID)
 	k := &kmsKey{
 		KeyID:       keyID,
 		ARN:         arn,
+		Account:     account,
 		State:       "Enabled",
 		Created:     time.Now().UTC(),
 		Tags:        map[string]string{},
@@ -160,7 +167,18 @@ func (app *Application) kmsGetKeyPolicy(w http.ResponseWriter, account, region s
 	// Default key policy — terraform-provider-aws decodes this on
 	// every Read and just stores it. Real AWS returns the resource
 	// policy JSON; we hand back the canonical default-allow shape.
-	policy := `{"Version":"2012-10-17","Statement":[{"Sid":"Enable IAM User Permissions","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:root"},"Action":"kms:*","Resource":"*"}]}`
+	// The root principal is the key's account; an unknown KeyId still
+	// gets the policy, under the stored account.
+	var in struct {
+		KeyId string `json:"KeyId"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+	kmsStore.mu.Lock()
+	if k, ok := kmsStore.keys[in.KeyId]; ok {
+		account = k.Account
+	}
+	kmsStore.mu.Unlock()
+	policy := `{"Version":"2012-10-17","Statement":[{"Sid":"Enable IAM User Permissions","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::` + account + `:root"},"Action":"kms:*","Resource":"*"}]}`
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
 		"Policy":     policy,
 		"PolicyName": "default",
@@ -381,7 +399,7 @@ func kmsKeyMetadata(k *kmsKey) map[string]any {
 	// RFC3339 string surfaces as "expected DateType to be a JSON
 	// Number, got string instead" and apply fails on aws-full-stack.
 	md := map[string]any{
-		"AWSAccountId":          awsproto.FakeAccountID,
+		"AWSAccountId":          k.Account,
 		"KeyId":                 k.KeyID,
 		"Arn":                   k.ARN,
 		"CreationDate":          float64(k.Created.Unix()),

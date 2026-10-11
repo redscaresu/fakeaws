@@ -143,7 +143,10 @@ func r53ZoneToXML(z *repository.Route53HostedZone) r53HostedZoneXML {
 }
 
 func (app *Application) r53CreateHostedZone(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeXML, fmt.Errorf("%w: %v", models.ErrConflict, err))
@@ -186,7 +189,10 @@ func (app *Application) r53CreateHostedZone(w http.ResponseWriter, r *http.Reque
 }
 
 func (app *Application) r53GetHostedZone(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	zoneID := strings.TrimPrefix(chi.URLParam(r, "id"), "/hostedzone/")
 	z, err := app.repo.GetHostedZone(account, zoneID)
 	if err != nil {
@@ -200,7 +206,10 @@ func (app *Application) r53GetHostedZone(w http.ResponseWriter, r *http.Request)
 }
 
 func (app *Application) r53ListHostedZones(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	zones, err := app.repo.ListHostedZones(account)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
@@ -214,7 +223,10 @@ func (app *Application) r53ListHostedZones(w http.ResponseWriter, r *http.Reques
 }
 
 func (app *Application) r53DeleteHostedZone(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	zoneID := strings.TrimPrefix(chi.URLParam(r, "id"), "/hostedzone/")
 	if err := app.repo.DeleteHostedZone(account, zoneID); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
@@ -269,7 +281,10 @@ type r53AliasTarget struct {
 }
 
 func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	zoneID := strings.TrimPrefix(chi.URLParam(r, "id"), "/hostedzone/")
 
 	z, err := app.repo.GetHostedZone(account, zoneID)
@@ -376,7 +391,10 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 // never converges. Locked in by
 // TestContract_route53_records_sorted_lexicographically (S96 fix).
 func (app *Application) r53ListResourceRecordSets(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	zoneID := strings.TrimPrefix(chi.URLParam(r, "id"), "/hostedzone/")
 	rsets, err := app.repo.ListRecordSets(account, zoneID)
 	if err != nil {
@@ -489,7 +507,10 @@ func r53NormaliseName(name string) string {
 }
 
 func (app *Application) r53GetChange(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	id := strings.TrimPrefix(chi.URLParam(r, "id"), "/change/")
 	c, err := app.repo.GetChange(account, id)
 	if err != nil {
@@ -568,7 +589,10 @@ func r53WriteTagError(w http.ResponseWriter, r *http.Request, err error) {
 
 // r53ListTagsForResource is aws_route53_zone's tag read.
 func (app *Application) r53ListTagsForResource(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	arn, ok := r53TagTarget(w, r)
 	if !ok {
 		return
@@ -611,7 +635,10 @@ func r53IsApex(recordName, zoneName string) bool {
 // r53ChangeTagsForResource adds and removes a zone's tags in one call;
 // aws_route53_zone tags this way at create as well as on update.
 func (app *Application) r53ChangeTagsForResource(w http.ResponseWriter, r *http.Request) {
-	const account = awsproto.FakeAccountID
+	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	if !ok {
+		return
+	}
 	arn, ok := r53TagTarget(w, r)
 	if !ok {
 		return
@@ -634,8 +661,7 @@ func (app *Application) r53ChangeTagsForResource(w http.ResponseWriter, r *http.
 	}{})
 }
 
-func (app *Application) gatherRoute53StateReal() map[string]any {
-	const account = awsproto.FakeAccountID
+func (app *Application) gatherRoute53StateReal(account string) map[string]any {
 	out := map[string]any{
 		"hosted_zones": []any{},
 		"record_sets":  []any{},
