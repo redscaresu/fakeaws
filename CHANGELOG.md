@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (-bind, -admin-token and a loopback-Origin guard on /mock, 2026-10-11)
+- **`-bind <host>`** sets the listen host; empty keeps `:<port>` on all interfaces. `Options.ListenAddr()` joins host and port, so `-bind ::1` listens on `[::1]:<port>`.
+- **`-admin-token <token>`, else `FAKEAWS_ADMIN_TOKEN`**, gates every `/mock` path, unknown ones included: a present `Origin` that is not loopback (`localhost` or a loopback IP literal; `null` and lookalikes such as `http://localhost.evil` refused) is 403, then anything but `Authorization: Bearer <token>` is 401. Neither body names the token, and the startup log says only whether one is set. `/healthz` and the AWS surface are not gated; without a token `/mock` answers exactly as before.
+- **`handlers.NewApplication` takes `handlers.Options{DBPath, Echo, Bind, Port, AdminToken}`** instead of `(dbPath, echo)`. `TestContract_listen_addr_default_all_interfaces`, `TestContract_mock_admin_token_required`, `TestContract_mock_admin_origin_loopback_only` and `TestAdminMock_NoTokenIsUngated` pin it.
+
 ### Fixed (region endpoints accept a trailing slash, 2026-10-11)
 - **`POST /<service>/region/<region>/` routes like the slash-less endpoint.** smithy-go 1.28.2 keeps a trailing slash when it joins a path-style `BaseEndpoint` with an operation path of `/`, so aws-sdk-go-v2 clients pointed at e.g. `/ssm/region/us-east-1` now post to `/ssm/region/us-east-1/`, which was 501. Only the region root is normalised; S3 paths keep their trailing slash. `TestSSM_RegionRootTrailingSlashRoutes` pins it.
 

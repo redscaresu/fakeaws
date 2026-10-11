@@ -1145,7 +1145,7 @@ const regressionVersion = "2010-05-08"
 
 func newTestServerForRegression(t *testing.T) *httptest.Server {
 	t.Helper()
-	app, err := handlers.NewApplication(":memory:", false)
+	app, err := handlers.NewApplication(handlers.Options{DBPath: ":memory:"})
 	require.NoError(t, err, "NewApplication")
 	srv := httptest.NewServer(app.Router())
 	t.Cleanup(func() {
