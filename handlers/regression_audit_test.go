@@ -232,6 +232,7 @@ func matchHandlerFile(t *testing.T, dir, id string) bool {
 var knownNonServiceFiles = map[string]bool{
 	"handlers.go":            true,
 	"admin.go":               true,
+	"recorder.go":            true,
 	"regression_manifest.go": true,
 	"tags.go":                true,
 }

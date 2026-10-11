@@ -8,6 +8,7 @@
 package handlers
 
 import (
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -28,6 +29,7 @@ type Application struct {
 	echo       bool
 	dbPath     string
 	adminToken string
+	requests   *requestLog // nil unless Options.RecordRequests
 }
 
 // Options configures an Application and the address it serves on.
@@ -49,6 +51,14 @@ type Options struct {
 	// database that is not empty. Empty leaves the stored identity alone.
 	AccountID string
 	Region    string
+	// RecordRequests keeps an in-process log of every provider request,
+	// served on GET /mock/requests. The log holds request values, so
+	// NewApplication refuses it without an AdminToken.
+	//
+	// CRITICAL[request-log-off-by-default]: without it nothing is
+	// recorded, /mock/state's audit is [], and /mock/requests and
+	// /mock/requests/clear are the router's 501.
+	RecordRequests bool
 }
 
 // ListenAddr is the address to listen on.
@@ -61,11 +71,22 @@ func (o Options) ListenAddr() string {
 	return net.JoinHostPort(o.Bind, strconv.Itoa(o.Port))
 }
 
+// ErrRecordRequestsNeedsAdminToken is NewApplication's refusal of
+// RecordRequests without an AdminToken.
+var ErrRecordRequestsNeedsAdminToken = errors.New("recording requests needs an admin token: the log holds request values")
+
 // NewApplication boots an Application from opts.
 //
 // In S43-T4 this attaches the admin (/mock/*) routes; S43-T5/T6 add
 // IAM; S43-T7/T8 add S3; later phases add the rest.
+//
+// CRITICAL[request-log-needs-admin-token]: RecordRequests without an
+// AdminToken is ErrRecordRequestsNeedsAdminToken before the db opens, so
+// no caller can serve the log, whose paths hold values, unauthenticated.
 func NewApplication(opts Options) (*Application, error) {
+	if opts.RecordRequests && opts.AdminToken == "" {
+		return nil, ErrRecordRequestsNeedsAdminToken
+	}
 	repo, err := repository.New(opts.DBPath)
 	if err != nil {
 		return nil, err
@@ -79,6 +100,10 @@ func NewApplication(opts Options) (*Application, error) {
 	}
 
 	app.router.Use(middleware.Recoverer)
+	if opts.RecordRequests {
+		app.requests = &requestLog{}
+		app.router.Use(app.recordRequests) // inside Recoverer, to see the panic
+	}
 	app.router.Use(stripRegionRootSlash)
 	if opts.Echo {
 		app.router.Use(echoMiddleware)
@@ -166,7 +191,9 @@ func unimplementedHandler(w http.ResponseWriter, r *http.Request) {
 
 // writeUnimplemented is unimplementedHandler for a dispatcher that
 // routed the request but does not model its action; what names it.
+// It marks unimplemented-501; a caller may mark another class after.
 func writeUnimplemented(w http.ResponseWriter, what string) {
+	markClass(w, classUnimplemented)
 	log.Printf("UNIMPLEMENTED: %s", what)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotImplemented)
