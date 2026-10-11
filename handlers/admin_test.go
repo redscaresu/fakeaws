@@ -925,3 +925,39 @@ func postAsync(srv *httptest.Server, path, body string) <-chan postResult {
 	}()
 	return done
 }
+
+// TestMockRestore_RacesStateAndSnapshot runs /mock/restore over and
+// over while /mock/state and /mock/snapshot run beside it. Every call
+// answers 200, and every state lists the bucket the live db and the
+// snapshot both hold; go test -race catches a read of the db handle a
+// restore is replacing.
+func TestMockRestore_RacesStateAndSnapshot(t *testing.T) {
+	_, srv := newTestApp(t, filepath.Join(t.TempDir(), "race.db"))
+	mustOK(t)(s3Do(t, srv, http.MethodPut, "/s3/snap-bucket/", "", ""))
+	mustOK(t)(doPost(t, srv, "/mock/snapshot"))
+
+	const rounds = 30
+	loop := func(path string) <-chan []postResult {
+		out := make(chan []postResult, 1)
+		go func() {
+			var results []postResult
+			for range rounds {
+				results = append(results, <-postAsync(srv, path, ""))
+			}
+			out <- results
+		}()
+		return out
+	}
+	restores, snapshots := loop("/mock/restore"), loop("/mock/snapshot")
+	for i := range rounds {
+		resp, body := doGet(t, srv, "/mock/state/s3")
+		require.Equal(t, http.StatusOK, resp.StatusCode, "state %d: %s", i, body)
+		assert.Contains(t, string(body), `"name":"snap-bucket"`, "state %d", i)
+	}
+	for path, done := range map[string]<-chan []postResult{"/mock/restore": restores, "/mock/snapshot": snapshots} {
+		for i, res := range <-done {
+			require.NoError(t, res.err, "%s %d", path, i)
+			assert.Equal(t, http.StatusOK, res.status, "%s %d", path, i)
+		}
+	}
+}

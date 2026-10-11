@@ -31,11 +31,12 @@ type Application struct {
 	dbPath     string
 	adminToken string
 	requests   *requestLog // nil unless Options.RecordRequests
-	// identityMu is held shared by every AWS request and /mock/images,
-	// from the account read to the last write, and exclusively by
-	// everything that changes the identity (setIdentity, /mock/reset,
-	// /mock/restore), so an identity change never lands between a
-	// handler's account read and the row it writes under that account.
+	// identityMu is held shared by every AWS request, /mock/images and
+	// /mock/state, from the account read to the last read or write, and
+	// exclusively by everything that changes the identity or the db
+	// handle (setIdentity, /mock/reset, /mock/restore) and by
+	// /mock/snapshot, so none of them lands between a handler's account
+	// read and the rows it reads or writes under that account.
 	identityMu sync.RWMutex
 }
 

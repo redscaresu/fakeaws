@@ -58,8 +58,8 @@ func (app *Application) registerAdminRoutes(r chi.Router) {
 		mr.Post("/reset", app.handleMockReset)
 		mr.Post("/snapshot", app.handleMockSnapshot)
 		mr.Post("/restore", app.handleMockRestore)
-		mr.Get("/state", app.handleMockState)
-		mr.Get("/state/{service}", app.handleMockStateService)
+		mr.With(app.holdIdentity).Get("/state", app.handleMockState)
+		mr.With(app.holdIdentity).Get("/state/{service}", app.handleMockStateService)
 		mr.With(app.holdIdentity).Post("/images", app.handleMockSeedImage)
 		mr.Post("/identity", app.handleMockIdentity)
 		if app.requests != nil {
@@ -384,7 +384,12 @@ func (app *Application) handleMockReset(w http.ResponseWriter, _ *http.Request) 
 // -wal and -shm, the .snapshot and a restored db it creates are each
 // 0600, not 0644 under umask 022: they hold every secret a run wrote.
 // An existing db keeps its mode.
+//
+// Snapshot holds identityMu exclusively: its VACUUM INTO must not catch
+// half a request's writes, nor run on the handle a restore replaces.
 func (app *Application) handleMockSnapshot(w http.ResponseWriter, _ *http.Request) {
+	app.identityMu.Lock()
+	defer app.identityMu.Unlock()
 	if err := app.repo.Snapshot(); err != nil {
 		// Snapshot on :memory: returns ErrConflict — expose as 409.
 		status := http.StatusInternalServerError
