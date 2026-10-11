@@ -40,7 +40,11 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const account = awsproto.FakeAccountID
+	account, err := app.AccountID()
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, fmt.Errorf("read account id: %w", err))
+		return
+	}
 
 	switch req.Action {
 	// ----- Roles -----
@@ -217,7 +221,8 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 // block of /mock/state. Per concepts.md "Required surface" item 4 —
 // topology_derive_aws (S43-T9) keys off this shape.
 func (app *Application) gatherIAMStateReal() map[string]any {
-	const account = awsproto.FakeAccountID
+	// collectState has already failed on an unreadable identity.
+	account, _ := app.AccountID()
 	out := map[string]any{
 		"roles":             []any{},
 		"policies":          []any{},

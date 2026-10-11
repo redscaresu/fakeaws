@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/redscaresu/fakeaws/handlers"
 	"github.com/redscaresu/fakeaws/handlers/awsproto"
 )
 
@@ -56,4 +57,24 @@ func TestSTS_AssumeRoleUnimplemented(t *testing.T) {
 	resp, body := stsCall(t, srv, "AssumeRole")
 	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "body=%s", body)
 	assert.Contains(t, logs.String(), "UNIMPLEMENTED: POST /sts Action=AssumeRole")
+}
+
+func TestSTS_CallerIdentityAnswersStoredAccount(t *testing.T) {
+	_, srv := newOptionsApp(t, handlers.Options{DBPath: ":memory:", AccountID: otherAccount})
+
+	resp, body := stsCall(t, srv, "GetCallerIdentity")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body=%s", body)
+	assert.Contains(t, string(body), "<Account>123456789012</Account>")
+	assert.Contains(t, string(body), "<Arn>arn:aws:iam::123456789012:user/fakeaws</Arn>")
+}
+
+func TestSTS_UnreadableIdentityIs500(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	_, err := app.Repository().DB().Exec(`DROP TABLE identity`)
+	require.NoError(t, err)
+
+	resp, body := stsCall(t, srv, "GetCallerIdentity")
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "body=%s", body)
+	assert.Contains(t, string(body), "<Code>InternalFailure</Code>")
+	assert.NotContains(t, string(body), awsproto.FakeAccountID)
 }

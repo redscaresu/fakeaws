@@ -1,6 +1,7 @@
 package handlers_test
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/redscaresu/fakeaws/handlers"
 )
 
 // IAM handler tests. Each in-scope endpoint has at least one
@@ -500,4 +503,56 @@ func TestIAM_RolesAreListMembers(t *testing.T) {
 	_, body = iamCall(t, srv, "GetRole", url.Values{"RoleName": {"r"}})
 	require.NoError(t, xml.Unmarshal(body, &role), "%s", body)
 	assert.Equal(t, "r", role.Name, "%s", body)
+}
+
+func TestIAM_ARNsCarryStoredAccount(t *testing.T) {
+	_, srv := newOptionsApp(t, handlers.Options{DBPath: ":memory:", AccountID: otherAccount})
+	cases := []struct {
+		action, collection, name, arn string
+		params                        url.Values
+	}{
+		{"CreateRole", "roles", "acct-role", "arn:aws:iam::123456789012:role/acct-role",
+			url.Values{"RoleName": {"acct-role"}, "AssumeRolePolicyDocument": {`{"Version":"2012-10-17"}`}}},
+		{"CreatePolicy", "policies", "acct-policy", "arn:aws:iam::123456789012:policy/acct-policy",
+			url.Values{"PolicyName": {"acct-policy"}, "PolicyDocument": {`{"Version":"2012-10-17"}`}}},
+		{"CreateInstanceProfile", "instance_profiles", "acct-profile", "arn:aws:iam::123456789012:instance-profile/acct-profile",
+			url.Values{"InstanceProfileName": {"acct-profile"}}},
+		{"CreateUser", "users", "acct-user", "arn:aws:iam::123456789012:user/acct-user",
+			url.Values{"UserName": {"acct-user"}}},
+	}
+	for _, c := range cases {
+		resp, body := iamCall(t, srv, c.action, c.params)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", c.action, body)
+		assert.Equal(t, c.arn, xmlExtract(body, "Arn"), c.action)
+	}
+
+	type row struct {
+		Name string `json:"name"`
+		ARN  string `json:"arn"`
+	}
+	var state struct {
+		IAM map[string][]row `json:"iam"`
+	}
+	resp, body := doGet(t, srv, "/mock/state")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GET /mock/state: %s", body)
+	require.NoError(t, json.Unmarshal(body, &state), "body=%s", body)
+	for _, c := range cases {
+		assert.Equal(t, []row{{Name: c.name, ARN: c.arn}}, state.IAM[c.collection], c.collection)
+	}
+}
+
+func TestIAM_UnreadableIdentityIs500(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	_, err := app.Repository().DB().Exec(`DROP TABLE identity`)
+	require.NoError(t, err)
+
+	resp, body := iamCall(t, srv, "CreateRole", url.Values{
+		"RoleName":                 {"no-identity"},
+		"AssumeRolePolicyDocument": {`{"Version":"2012-10-17"}`},
+	})
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "body=%s", body)
+	assert.Contains(t, string(body), "<Code>InternalFailure</Code>")
+	var n int
+	require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM iam_roles`).Scan(&n))
+	assert.Zero(t, n, "role rows written")
 }
