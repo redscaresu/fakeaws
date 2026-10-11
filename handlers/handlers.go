@@ -10,6 +10,7 @@ package handlers
 import (
 	"log"
 	"net/http"
+	"regexp"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -46,6 +47,7 @@ func NewApplication(dbPath string, echo bool) (*Application, error) {
 	}
 
 	app.router.Use(middleware.Recoverer)
+	app.router.Use(stripRegionRootSlash)
 	if echo {
 		app.router.Use(echoMiddleware)
 	}
@@ -122,6 +124,25 @@ func writeUnimplemented(w http.ResponseWriter, what string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotImplemented)
 	_, _ = w.Write([]byte(`{"error":"unimplemented","message":"fakeaws does not yet model this endpoint; see logs for the method+path"}`))
+}
+
+// regionRoot matches a service's region endpoint with a trailing slash,
+// e.g. /ssm/region/us-east-1/. smithy-go 1.28.2 keeps the trailing slash
+// when it joins a path-style BaseEndpoint with an operation path of "/",
+// so SDK clients now send that form.
+var regionRoot = regexp.MustCompile(`^/[a-z0-9-]+/region/[^/]+/$`)
+
+// stripRegionRootSlash routes /<svc>/region/<region>/ like
+// /<svc>/region/<region>. Only the region root: S3 paths keep their
+// trailing slash, where it is meaningful.
+func stripRegionRootSlash(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if regionRoot.MatchString(r.URL.Path) {
+			r.URL.Path = r.URL.Path[:len(r.URL.Path)-1]
+			r.URL.RawPath = ""
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func echoMiddleware(next http.Handler) http.Handler {

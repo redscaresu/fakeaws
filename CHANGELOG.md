@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (region endpoints accept a trailing slash, 2026-10-11)
+- **`POST /<service>/region/<region>/` routes like the slash-less endpoint.** smithy-go 1.28.2 keeps a trailing slash when it joins a path-style `BaseEndpoint` with an operation path of `/`, so aws-sdk-go-v2 clients pointed at e.g. `/ssm/region/us-east-1` now post to `/ssm/region/us-east-1/`, which was 501. Only the region root is normalised; S3 paths keep their trailing slash. `TestSSM_RegionRootTrailingSlashRoutes` pins it.
+
 ### Added (AssociateAddress and DisassociateAddress, 2026-10-10)
 - **An `aws_eip` that sets `instance` applies and destroys.** AssociateAddress takes `AllocationId` with `InstanceId` (the instance's primary ENI) or `NetworkInterfaceId`, stores the association on the address and returns its `eipassoc-` id; DescribeAddresses returns `associationId`, `instanceId`, `networkInterfaceId` and `privateIpAddress`, and honours the `association-id` filter the provider reads it back by. While associated the address is the ENI's public IP, so DescribeInstances shows it; DisassociateAddress clears the association and gives the ENI back the public IP its launch assigned, if any. Both were 404. Errors are EC2's: `InvalidAllocationID.NotFound`, `InvalidInstanceID.NotFound`, `InvalidNetworkInterfaceID.NotFound`, `InvalidAssociationID.NotFound`, and `Resource.AlreadyAssociated` for an address or ENI that already has an association; `AllowReassociation=true` is refused 409 as unmodelled. Terminating an instance disassociates its addresses.
 - **ReleaseAddress answers as EC2 does**: 400 `InvalidIPAddress.InUse` for an associated address and 400 `InvalidAllocationID.NotFound` for a missing one (was a generic 404).
