@@ -572,7 +572,7 @@ func ec2RandID() string {
 func newEC2VPC(account, region, id, cidr string) *repository.EC2VPC {
 	return &repository.EC2VPC{
 		ID: id, CidrBlock: cidr, Region: region,
-		ARN:       awsproto.BuildEC2VPCARN(region, id),
+		ARN:       awsproto.BuildEC2VPCARN(region, account, id),
 		State:     "available",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -582,7 +582,7 @@ func newEC2Subnet(account, region, id, vpcID, cidr, az string) *repository.EC2Su
 	return &repository.EC2Subnet{
 		ID: id, VPCID: vpcID, CidrBlock: cidr, AvailabilityZone: az,
 		Region: region,
-		ARN:    awsproto.BuildEC2SubnetARN(region, id),
+		ARN:    awsproto.BuildEC2SubnetARN(region, account, id),
 		State:  "available", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 }
@@ -677,7 +677,7 @@ func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account,
 	id := "igw-" + ec2RandID()
 	igw := &repository.EC2InternetGateway{
 		ID: id, Region: region,
-		ARN:       awsproto.BuildEC2InternetGatewayARN(region, id),
+		ARN:       awsproto.BuildEC2InternetGatewayARN(region, account, id),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	err := app.repo.CreateInternetGateway(account, igw)
@@ -833,7 +833,7 @@ func (app *Application) ec2CreateRouteTable(w http.ResponseWriter, account, regi
 	id := "rtb-" + ec2RandID()
 	rt := &repository.EC2RouteTable{
 		ID: id, VPCID: vpcID, Region: region,
-		ARN:       awsproto.BuildEC2RouteTableARN(region, id),
+		ARN:       awsproto.BuildEC2RouteTableARN(region, account, id),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	err := app.repo.CreateRouteTable(account, rt)
@@ -1563,7 +1563,7 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 	sg := &repository.EC2SecurityGroup{
 		ID: id, VPCID: vpcID, GroupName: groupName, Description: desc,
 		Region:    region,
-		ARN:       awsproto.BuildEC2SecurityGroupARN(region, id),
+		ARN:       awsproto.BuildEC2SecurityGroupARN(region, account, id),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	err := app.repo.CreateSecurityGroup(account, sg)
@@ -2068,7 +2068,7 @@ func ec2InstanceToXML(inst *repository.EC2Instance, eni *repository.EC2NetworkIn
 	}
 	if inst.IAMInstanceProfileName != "" {
 		x.IamProfile = &ec2IamProfileXML{
-			Arn: awsproto.BuildIAMInstanceProfileARN(inst.IAMInstanceProfileName),
+			Arn: awsproto.BuildIAMInstanceProfileARN(awsproto.FakeAccountID, inst.IAMInstanceProfileName),
 			Id:  inst.IAMInstanceProfileName,
 		}
 	}
@@ -2248,7 +2248,7 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		UserData:               req.Params.Get("UserData"),
 		State:                  "running",
 		Region:                 region,
-		ARN:                    awsproto.BuildEC2InstanceARN(region, id),
+		ARN:                    awsproto.BuildEC2InstanceARN(region, account, id),
 		CreatedAt:              time.Now().UTC().Format(time.RFC3339),
 	}
 	eni := &repository.EC2NetworkInterface{
@@ -3402,7 +3402,7 @@ func (app *Application) gatherEC2StateReal() map[string]any {
 			"instance_id":          eip.InstanceID,
 			"association_id":       eip.AssociationID,
 			"region":               eip.Region,
-			"arn":                  awsproto.BuildEC2EIPARN(eip.Region, eip.AllocationID),
+			"arn":                  awsproto.BuildEC2EIPARN(eip.Region, account, eip.AllocationID),
 		})
 	}
 	out["eips"] = eipOut

@@ -132,7 +132,7 @@ func (app *Application) eksCreateCluster(w http.ResponseWriter, r *http.Request)
 		SecurityGroupIDs:  in.ResourcesVpcConfig.SecurityGroupIds,
 		KubernetesVersion: in.Version,
 		Status:            "ACTIVE", Region: region,
-		ARN:       awsproto.BuildEKSClusterARN(region, in.Name),
+		ARN:       awsproto.BuildEKSClusterARN(region, account, in.Name),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateEKSCluster(account, c); err != nil {
@@ -339,7 +339,7 @@ func (app *Application) eksCreateNodeGroup(w http.ResponseWriter, r *http.Reques
 		NodeRoleARN: in.NodeRole, SubnetIDs: in.Subnets,
 		InstanceTypes: in.InstanceTypes, ScalingConfig: scalingJSON,
 		Status: "ACTIVE", Region: region,
-		ARN:       awsproto.BuildEKSNodegroupARN(region, clusterName, in.NodegroupName, "deterministic"),
+		ARN:       awsproto.BuildEKSNodegroupARN(region, account, clusterName, in.NodegroupName, "deterministic"),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateEKSNodeGroup(account, ng); err != nil {

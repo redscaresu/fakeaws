@@ -112,7 +112,7 @@ func (app *Application) smCreateSecret(w http.ResponseWriter, account, region st
 	}
 	s := &repository.SecretsManagerSecret{
 		Name: in.Name, Description: in.Description, KMSKeyID: in.KmsKeyId,
-		ARN:                  awsproto.BuildSecretsManagerSecretARN(region, in.Name, suffix),
+		ARN:                  awsproto.BuildSecretsManagerSecretARN(region, account, in.Name, suffix),
 		RecoveryWindowInDays: 30,
 		State:                repository.SecretStateActive,
 		Tags:                 tags,
