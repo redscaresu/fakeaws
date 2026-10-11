@@ -45,8 +45,8 @@ func main() {
 
 // optionsFromFlags parses args into Options. -admin-token beats the
 // FAKEAWS_ADMIN_TOKEN environment variable, read through getenv.
-// -account must be 12 digits, -region look like us-east-1, and -region
-// comes only with -account.
+// -account must be 12 digits, -region look like us-east-1, -region
+// comes only with -account, and -record-requests only with a token.
 func optionsFromFlags(args []string, getenv func(string) string) (handlers.Options, error) {
 	var opts handlers.Options
 	fs := flag.NewFlagSet("fakeaws", flag.ContinueOnError)
@@ -55,6 +55,7 @@ func optionsFromFlags(args []string, getenv func(string) string) (handlers.Optio
 	fs.StringVar(&opts.DBPath, "db", ":memory:", "SQLite path; ':memory:' for ephemeral, file path for persistent")
 	fs.BoolVar(&opts.Echo, "echo", false, "log every request method+path (useful for discovering unimplemented endpoints)")
 	fs.StringVar(&opts.AdminToken, "admin-token", "", "require Authorization: Bearer <token> on /mock/*; else "+adminTokenEnv)
+	fs.BoolVar(&opts.RecordRequests, "record-requests", false, "log every AWS request in memory, served on GET /mock/requests; needs -admin-token or "+adminTokenEnv)
 	fs.Func("account", "12-digit account id to store and answer as (default "+awsproto.FakeAccountID+"); refused when the db holds rows under another", func(v string) error {
 		opts.AccountID = v
 		return handlers.CheckAccountID(v)
@@ -74,6 +75,12 @@ func optionsFromFlags(args []string, getenv func(string) string) (handlers.Optio
 	}
 	if opts.AdminToken == "" {
 		opts.AdminToken = getenv(adminTokenEnv)
+	}
+	if opts.RecordRequests && opts.AdminToken == "" {
+		err := errors.New("-record-requests needs an admin token: -admin-token or " + adminTokenEnv)
+		fmt.Fprintln(fs.Output(), err)
+		fs.Usage()
+		return handlers.Options{}, err
 	}
 	return opts, nil
 }

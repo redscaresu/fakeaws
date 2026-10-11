@@ -28,6 +28,7 @@ type Application struct {
 	echo       bool
 	dbPath     string
 	adminToken string
+	requests   *requestLog // nil unless Options.RecordRequests
 }
 
 // Options configures an Application and the address it serves on.
@@ -49,6 +50,14 @@ type Options struct {
 	// database that is not empty. Empty leaves the stored identity alone.
 	AccountID string
 	Region    string
+	// RecordRequests keeps an in-process log of every provider request,
+	// served on GET /mock/requests. The log holds request values, so
+	// cmd/fakeaws refuses it without an admin token.
+	//
+	// CRITICAL[request-log-off-by-default]: without it nothing is
+	// recorded, /mock/state's audit is [], and /mock/requests and
+	// /mock/requests/clear are the router's 501.
+	RecordRequests bool
 }
 
 // ListenAddr is the address to listen on.
@@ -78,6 +87,10 @@ func NewApplication(opts Options) (*Application, error) {
 		adminToken: opts.AdminToken,
 	}
 
+	if opts.RecordRequests {
+		app.requests = &requestLog{}
+		app.router.Use(app.recordRequests) // before Recoverer, to see its 500
+	}
 	app.router.Use(middleware.Recoverer)
 	app.router.Use(stripRegionRootSlash)
 	if opts.Echo {
@@ -166,7 +179,9 @@ func unimplementedHandler(w http.ResponseWriter, r *http.Request) {
 
 // writeUnimplemented is unimplementedHandler for a dispatcher that
 // routed the request but does not model its action; what names it.
+// It marks unimplemented-501; a caller may mark another class after.
 func writeUnimplemented(w http.ResponseWriter, what string) {
+	markClass(w, classUnimplemented)
 	log.Printf("UNIMPLEMENTED: %s", what)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotImplemented)
