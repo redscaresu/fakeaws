@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (EC2 answers the stored account, 2026-10-11)
+- **EC2 reads `Application.AccountID()` instead of `000000000000`.** Every EC2 row key and ARN, every `ownerId` (VPC, subnet, internet gateway, route table, security group, reservation, ENI), the ENI attachment's `instanceOwnerId`, the instance's `iamInstanceProfile` Arn and the ec2 block of `/mock/state` use the stored account, so RunInstances finds the boot AMI fixtures and IAM instance profiles created through IAM under it, and the lazy AMI seed of a region outside the boot list seeds under it. An unreadable identity is 500 `InternalFailure` on every EC2 action, never the default. With no identity stored EC2 answers `000000000000` as before. `TestEC2_AnswersStoredAccount`, `TestEC2_LazySeedUnderStoredAccount` and `TestEC2_UnreadableIdentityIs500` pin it.
+
 ### Changed (IAM and STS answer the stored account, 2026-10-11)
 - **IAM and STS read `Application.AccountID()` instead of `000000000000`.** Every IAM ARN and row key, and the IAM block of `/mock/state`, use the stored account; `GetCallerIdentity` answers it as `Account` and in `Arn` (`arn:aws:iam::<account>:user/fakeaws`). An unreadable identity is 500 `InternalFailure` on every IAM action and on `GetCallerIdentity`, never the default, and writes nothing. With no identity stored both answer `000000000000` as before. EC2 and the other services still answer as `000000000000`, so under another account EC2 and EKS do not find IAM instance profiles and roles created through IAM until they move too. `TestIAM_ARNsCarryStoredAccount`, `TestIAM_UnreadableIdentityIs500`, `TestSTS_CallerIdentityAnswersStoredAccount` and `TestSTS_UnreadableIdentityIs500` pin it.
 

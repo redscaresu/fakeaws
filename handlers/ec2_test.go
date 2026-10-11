@@ -1835,3 +1835,105 @@ func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 	resp, _ := ec2Call(t, srv, tagRegion, "DescribeRouteTables", filter("route.gateway-id", "igw-1"))
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "an unmodelled filter is refused, not ignored")
 }
+
+// TestEC2_AnswersStoredAccount: under a stored account every ownerId,
+// the instance's ENI and its IAM instance profile Arn carry that
+// account, and so does every ARN in the ec2 block of /mock/state.
+func TestEC2_AnswersStoredAccount(t *testing.T) {
+	_, srv := newOptionsApp(t, handlers.Options{DBPath: ":memory:", AccountID: otherAccount})
+	const region = "us-east-1"
+	owned := func(action string, params url.Values) []byte {
+		t.Helper()
+		resp, body := ec2Call(t, srv, region, action, params)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", action, body)
+		assert.Equal(t, otherAccount, extractEC2Tag(body, "ownerId"), "%s: %s", action, body)
+		assert.NotContains(t, string(body), awsproto.FakeAccountID, action)
+		return body
+	}
+
+	vpcID := extractEC2Tag(owned("CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}}), "vpcId")
+	owned("DescribeVpcs", url.Values{"VpcId.1": {vpcID}})
+	subnetID := extractEC2Tag(owned("CreateSubnet", url.Values{"VpcId": {vpcID}, "CidrBlock": {"10.0.1.0/24"}}), "subnetId")
+	owned("CreateInternetGateway", nil)
+	rtID := extractEC2Tag(owned("CreateRouteTable", url.Values{"VpcId": {vpcID}}), "routeTableId")
+	owned("DescribeRouteTables", url.Values{"RouteTableId.1": {rtID}})
+	// CreateSecurityGroup answers only the group id.
+	sgID := createOK(t, srv, "CreateSecurityGroup", "groupId", url.Values{
+		"GroupName": {"acct"}, "GroupDescription": {"acct"}, "VpcId": {vpcID},
+	})
+	owned("DescribeSecurityGroups", url.Values{"GroupId.1": {sgID}})
+
+	resp, body := iamCall(t, srv, "CreateInstanceProfile", url.Values{"InstanceProfileName": {"acct-profile"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateInstanceProfile: %s", body)
+	profileARN := xmlExtract(body, "Arn")
+	require.Equal(t, "arn:aws:iam::"+otherAccount+":instance-profile/acct-profile", profileARN, "%s", body)
+
+	params := topLevelParams(subnetID, []string{sgID})
+	params.Set("IamInstanceProfile.Name", "acct-profile")
+	run := owned("RunInstances", params)
+	instID := extractEC2Tag(run, "instanceId")
+	for action, body := range map[string][]byte{
+		"RunInstances":      run,
+		"DescribeInstances": owned("DescribeInstances", url.Values{"InstanceId.1": {instID}}),
+	} {
+		type instanceXML struct {
+			ProfileARN string `xml:"iamInstanceProfile>arn"`
+			ENIs       []struct {
+				OwnerId         string `xml:"ownerId"`
+				InstanceOwnerId string `xml:"attachment>instanceOwnerId"`
+			} `xml:"networkInterfaceSet>item"`
+		}
+		var out struct {
+			Run      []instanceXML `xml:"instancesSet>item"`
+			Describe []instanceXML `xml:"reservationSet>item>instancesSet>item"`
+		}
+		require.NoError(t, xml.Unmarshal(body, &out), "%s: %s", action, body)
+		insts := append(out.Run, out.Describe...)
+		require.Len(t, insts, 1, "%s: %s", action, body)
+		assert.Equal(t, profileARN, insts[0].ProfileARN, action)
+		require.Len(t, insts[0].ENIs, 1, "%s: %s", action, body)
+		assert.Equal(t, otherAccount, insts[0].ENIs[0].OwnerId, action)
+		assert.Equal(t, otherAccount, insts[0].ENIs[0].InstanceOwnerId, action)
+	}
+
+	resp, body = doGet(t, srv, "/mock/state/ec2")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GET /mock/state/ec2: %s", body)
+	var state struct {
+		EC2 map[string][]map[string]any `json:"ec2"`
+	}
+	require.NoError(t, json.Unmarshal(body, &state), "%s", body)
+	for _, collection := range []string{"vpcs", "subnets", "internet_gateways", "route_tables", "security_groups", "instances"} {
+		rows := state.EC2[collection]
+		require.NotEmpty(t, rows, collection)
+		for _, row := range rows {
+			assert.Contains(t, row["arn"], ":"+otherAccount+":", collection)
+		}
+	}
+	assert.NotContains(t, string(body), awsproto.FakeAccountID)
+}
+
+// TestEC2_LazySeedUnderStoredAccount: a region outside boot's list
+// gets the AMI fixtures on first use under the stored account, so
+// RunInstances finds the AL2023 fixture there.
+func TestEC2_LazySeedUnderStoredAccount(t *testing.T) {
+	_, srv := newOptionsApp(t, handlers.Options{DBPath: ":memory:", AccountID: otherAccount})
+	const region = "ap-south-1"
+	n := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+	params := topLevelParams(n.subnet, n.sgs[:1])
+	params.Set("ImageId", handlers.AL2023AMIID)
+
+	resp, body := ec2Call(t, srv, region, "RunInstances", params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "RunInstances: %s", body)
+	assert.Equal(t, otherAccount, extractEC2Tag(body, "ownerId"), "%s", body)
+}
+
+func TestEC2_UnreadableIdentityIs500(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	_, err := app.Repository().DB().Exec(`DROP TABLE identity`)
+	require.NoError(t, err)
+
+	resp, body := ec2Call(t, srv, "us-east-1", "DescribeVpcs", nil)
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "body=%s", body)
+	assert.Contains(t, string(body), "<Code>InternalFailure</Code>")
+	assert.NotContains(t, string(body), awsproto.FakeAccountID)
+}

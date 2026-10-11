@@ -46,7 +46,11 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 			fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
-	const account = awsproto.FakeAccountID
+	account, err := app.AccountID()
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, fmt.Errorf("read account id: %w", err))
+		return
+	}
 
 	switch req.Action {
 	// ----- VPC -----
@@ -268,7 +272,7 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	out := ec2CreateVpcResult{Vpc: ec2VpcToXML(v)}
+	out := ec2CreateVpcResult{Vpc: ec2VpcToXML(account, v)}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateVpc", &out)
 }
 
@@ -305,7 +309,7 @@ func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region s
 	}
 	out := ec2DescribeVpcsResult{VpcSet: make([]ec2VpcXML, 0, len(vpcs))}
 	for _, v := range vpcs {
-		x := ec2VpcToXML(v)
+		x := ec2VpcToXML(account, v)
 		x.TagSet = tags[v.ID]
 		out.VpcSet = append(out.VpcSet, x)
 	}
@@ -456,7 +460,7 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	out := ec2CreateSubnetResult{Subnet: ec2SubnetToXML(s)}
+	out := ec2CreateSubnetResult{Subnet: ec2SubnetToXML(account, s)}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateSubnet", &out)
 }
 
@@ -515,7 +519,7 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 				continue
 			}
 		}
-		x := ec2SubnetToXML(s)
+		x := ec2SubnetToXML(account, s)
 		x.TagSet = tags[s.ID]
 		out.SubnetSet = append(out.SubnetSet, x)
 	}
@@ -587,14 +591,14 @@ func newEC2Subnet(account, region, id, vpcID, cidr, az string) *repository.EC2Su
 	}
 }
 
-func ec2VpcToXML(v *repository.EC2VPC) ec2VpcXML {
+func ec2VpcToXML(account string, v *repository.EC2VPC) ec2VpcXML {
 	return ec2VpcXML{
 		VpcId:           v.ID,
 		State:           v.State,
 		CidrBlock:       v.CidrBlock,
 		DhcpOptionsId:   "dopt-fakeaws-default",
 		InstanceTenancy: "default",
-		OwnerId:         awsproto.FakeAccountID,
+		OwnerId:         account,
 		IsDefault:       false,
 		CidrBlockAssociationSet: []ec2VpcCidrBlockAssociationXML{
 			{
@@ -606,7 +610,7 @@ func ec2VpcToXML(v *repository.EC2VPC) ec2VpcXML {
 	}
 }
 
-func ec2SubnetToXML(s *repository.EC2Subnet) ec2SubnetXML {
+func ec2SubnetToXML(account string, s *repository.EC2Subnet) ec2SubnetXML {
 	// availableIpAddressCount derived from CIDR mask: /24 → 251 usable
 	// (256 − 5 reserved by AWS), /25 → 123, etc. Defaults to 251 if
 	// we can't parse the CIDR — close enough for tests that just
@@ -629,7 +633,7 @@ func ec2SubnetToXML(s *repository.EC2Subnet) ec2SubnetXML {
 		AvailabilityZone:        s.AvailabilityZone,
 		AvailabilityZoneId:      s.AvailabilityZone + "-az1",
 		AvailableIpAddressCount: available,
-		OwnerId:                 awsproto.FakeAccountID,
+		OwnerId:                 account,
 		SubnetArn:               s.ARN,
 		MapPublicIpOnLaunch:     s.MapPublicIPOnLaunch,
 		PrivateDnsNameOptionsOnLaunch: &ec2SubnetPrivateDnsOptionsXML{
@@ -661,8 +665,8 @@ type ec2DescribeIgwsResult struct {
 	InternetGatewaySet []ec2IgwXML `xml:"internetGatewaySet>item"`
 }
 
-func ec2IgwToXML(igw *repository.EC2InternetGateway) ec2IgwXML {
-	out := ec2IgwXML{InternetGatewayId: igw.ID, OwnerId: awsproto.FakeAccountID}
+func ec2IgwToXML(account string, igw *repository.EC2InternetGateway) ec2IgwXML {
+	out := ec2IgwXML{InternetGatewayId: igw.ID, OwnerId: account}
 	if igw.VPCID != "" {
 		out.Attachments = []ec2IgwAttachmentXML{{VpcId: igw.VPCID, State: "available"}}
 	}
@@ -689,7 +693,7 @@ func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account,
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	awsproto.WriteEC2QueryRPCResponse(w, "CreateInternetGateway", &ec2CreateIgwResult{InternetGateway: ec2IgwToXML(igw)})
+	awsproto.WriteEC2QueryRPCResponse(w, "CreateInternetGateway", &ec2CreateIgwResult{InternetGateway: ec2IgwToXML(account, igw)})
 }
 
 // ec2DescribeInternetGateways answers InternetGatewayId.N with exactly
@@ -724,7 +728,7 @@ func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, accou
 	}
 	out := ec2DescribeIgwsResult{InternetGatewaySet: make([]ec2IgwXML, 0, len(igws))}
 	for _, igw := range igws {
-		x := ec2IgwToXML(igw)
+		x := ec2IgwToXML(account, igw)
 		x.TagSet = tags[igw.ID]
 		out.InternetGatewaySet = append(out.InternetGatewaySet, x)
 	}
@@ -846,7 +850,7 @@ func (app *Application) ec2CreateRouteTable(w http.ResponseWriter, account, regi
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateRouteTable",
-		&ec2CreateRouteTableResult{RouteTable: ec2RouteTableXML{RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: awsproto.FakeAccountID}})
+		&ec2CreateRouteTableResult{RouteTable: ec2RouteTableXML{RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: account}})
 }
 
 // ec2NoOpSuccess returns a minimal 200 response for EC2 actions we
@@ -943,7 +947,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 		}
 		for _, rt := range rts {
 			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableXML{
-				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: awsproto.FakeAccountID,
+				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: account,
 				Routes:       routesByRT[rt.ID],
 				Associations: assocsByRT[rt.ID],
 				TagSet:       tags[rt.ID],
@@ -966,7 +970,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 				return
 			}
 			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableXML{
-				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: awsproto.FakeAccountID,
+				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: account,
 				Routes:       routesByRT[rt.ID],
 				Associations: assocsByRT[rt.ID],
 				TagSet:       tags[rt.ID],
@@ -1650,7 +1654,7 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 		}
 		out.SecurityGroupSet = append(out.SecurityGroupSet, ec2SecurityGroupXML{
 			GroupId: sg.ID, GroupName: sg.GroupName, GroupDesc: sg.Description, VpcId: sg.VPCID,
-			OwnerId:       awsproto.FakeAccountID,
+			OwnerId:       account,
 			IpPermissions: ingress,
 			IpPermsEgress: egress,
 			TagSet:        tags[sg.ID],
@@ -2058,7 +2062,7 @@ func ec2InstanceStateForName(name string) ec2InstanceStateXML {
 
 // ec2InstanceToXML renders inst; eni is its primary ENI, nil once
 // terminated.
-func ec2InstanceToXML(inst *repository.EC2Instance, eni *repository.EC2NetworkInterface) ec2InstanceXML {
+func ec2InstanceToXML(account string, inst *repository.EC2Instance, eni *repository.EC2NetworkInterface) ec2InstanceXML {
 	x := ec2InstanceXML{
 		InstanceId:    inst.ID,
 		ImageId:       inst.AMIID,
@@ -2068,14 +2072,14 @@ func ec2InstanceToXML(inst *repository.EC2Instance, eni *repository.EC2NetworkIn
 	}
 	if inst.IAMInstanceProfileName != "" {
 		x.IamProfile = &ec2IamProfileXML{
-			Arn: awsproto.BuildIAMInstanceProfileARN(awsproto.FakeAccountID, inst.IAMInstanceProfileName),
+			Arn: awsproto.BuildIAMInstanceProfileARN(account, inst.IAMInstanceProfileName),
 			Id:  inst.IAMInstanceProfileName,
 		}
 	}
 	if eni == nil {
 		return x
 	}
-	eniXML := ec2ENIToXML(eni)
+	eniXML := ec2ENIToXML(account, eni)
 	x.PrivateIpAddress = eni.PrivateIP
 	x.IpAddress = eni.PublicIP
 	x.SourceDestCheck = &eniXML.SourceDestCheck
@@ -2084,12 +2088,12 @@ func ec2InstanceToXML(inst *repository.EC2Instance, eni *repository.EC2NetworkIn
 	return x
 }
 
-func ec2ENIToXML(eni *repository.EC2NetworkInterface) ec2NetworkInterfaceXML {
+func ec2ENIToXML(account string, eni *repository.EC2NetworkInterface) ec2NetworkInterfaceXML {
 	x := ec2NetworkInterfaceXML{
 		NetworkInterfaceId: eni.ID,
 		SubnetId:           eni.SubnetID,
 		VpcId:              eni.VPCID,
-		OwnerId:            awsproto.FakeAccountID,
+		OwnerId:            account,
 		Status:             "in-use",
 		InterfaceType:      "interface",
 		PrivateIpAddress:   eni.PrivateIP,
@@ -2098,7 +2102,7 @@ func ec2ENIToXML(eni *repository.EC2NetworkInterface) ec2NetworkInterfaceXML {
 		Attachment: ec2ENIAttachmentXML{
 			AttachmentId:        eni.AttachmentID,
 			InstanceId:          eni.InstanceID,
-			InstanceOwnerId:     awsproto.FakeAccountID,
+			InstanceOwnerId:     account,
 			Status:              "attached",
 			DeleteOnTermination: true,
 		},
@@ -2271,8 +2275,8 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "RunInstances", &ec2RunInstancesResult{
 		Reservation:  "r-" + ec2RandID(),
-		OwnerId:      awsproto.FakeAccountID,
-		InstancesSet: []ec2InstanceXML{ec2InstanceToXML(inst, eni)},
+		OwnerId:      account,
+		InstancesSet: []ec2InstanceXML{ec2InstanceToXML(account, inst, eni)},
 	})
 }
 
@@ -2317,11 +2321,11 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 		ReservationSet: make([]ec2ReservationXML, 0, len(instances)),
 	}
 	for _, inst := range instances {
-		x := ec2InstanceToXML(inst, enis[inst.ID])
+		x := ec2InstanceToXML(account, inst, enis[inst.ID])
 		x.TagSet = tags[inst.ID]
 		out.ReservationSet = append(out.ReservationSet, ec2ReservationXML{
 			ReservationId: "r-" + ec2RandID(),
-			OwnerId:       awsproto.FakeAccountID,
+			OwnerId:       account,
 			InstancesSet:  []ec2InstanceXML{x},
 		})
 	}
@@ -2413,7 +2417,7 @@ func (app *Application) ec2DescribeNetworkInterfaces(w http.ResponseWriter, acco
 			continue
 		}
 		if eniMatches(eni, filters) {
-			out.NetworkInterfaceSet = append(out.NetworkInterfaceSet, ec2ENIToXML(eni))
+			out.NetworkInterfaceSet = append(out.NetworkInterfaceSet, ec2ENIToXML(account, eni))
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeNetworkInterfaces", &out)
@@ -3233,7 +3237,8 @@ func synthesizeInstanceType(name string) ec2InstanceTypeXML {
 // its actual contents (was previously declaring keys but only
 // filling vpcs/subnets/instances).
 func (app *Application) gatherEC2StateReal() map[string]any {
-	const account = awsproto.FakeAccountID
+	// collectState has already failed on an unreadable identity.
+	account, _ := app.AccountID()
 	out := map[string]any{
 		"vpcs":                     []any{},
 		"subnets":                  []any{},

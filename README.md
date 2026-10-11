@@ -97,7 +97,7 @@ make build && ./fakeaws --port 8082 --db :memory:
 | `-echo` | `false` | Log every request method+path |
 | `-admin-token` | empty | When set, every `/mock` path needs `Authorization: Bearer <token>` (401 otherwise) and refuses a non-loopback `Origin` (403). `/healthz` and the AWS surface are not gated. The flag shows in `ps`; prefer the env var. |
 | `FAKEAWS_ADMIN_TOKEN` | unset | The admin token when `-admin-token` is not given; the flag wins. |
-| `-account` | unset (`000000000000`) | 12-digit account id to store in the database. Boot fails, naming both ids, when the database holds rows under another account; without the flag nothing is written. IAM and STS answer as the stored account; for now EC2 and the other services still answer as `000000000000`, though the boot AMI fixtures and `/mock/images` rows go under the stored account. Until they move, EC2 and EKS look up IAM instance profiles and roles under `000000000000`, so under another account they do not find ones created through IAM. |
+| `-account` | unset (`000000000000`) | 12-digit account id to store in the database. Boot fails, naming both ids, when the database holds rows under another account; without the flag nothing is written. IAM, STS and EC2, with the boot AMI fixtures and `/mock/images` rows, answer as the stored account; for now the other services still answer as `000000000000`. Until it moves, EKS looks up IAM roles under `000000000000`, so under another account it does not find ones created through IAM. |
 | `-region` | unset | Region stored with `-account` (which it needs), e.g. `eu-west-1`. Nothing reads it yet. |
 
 The startup log line says whether an admin token is set and never prints it.
