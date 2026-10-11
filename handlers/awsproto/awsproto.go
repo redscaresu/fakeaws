@@ -27,6 +27,6 @@ package awsproto
 // FakeAccountID is the default synthetic AWS account fakeaws-emitted
 // resources live under (concepts.md "Open question 1 / Resolved").
 // ARN builders take the account as a parameter; handlers pass this
-// default. Tests reference this constant rather than hard-coding the
-// literal.
+// default. Golden ARN tests spell out the literal to pin the wire
+// output.
 const FakeAccountID = "000000000000"
