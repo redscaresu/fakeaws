@@ -252,6 +252,13 @@ func (app *Application) handleMockReset(w http.ResponseWriter, _ *http.Request) 
 	writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
+// handleMockSnapshot and handleMockRestore save and restore a
+// file-backed db.
+//
+// CRITICAL[file-backed-db-owner-only]: the db fakeaws creates, its
+// -wal and -shm, the .snapshot and a restored db it creates are each
+// 0600, not 0644 under umask 022: they hold every secret a run wrote.
+// An existing db keeps its mode.
 func (app *Application) handleMockSnapshot(w http.ResponseWriter, _ *http.Request) {
 	if err := app.repo.Snapshot(); err != nil {
 		// Snapshot on :memory: returns ErrConflict — expose as 409.

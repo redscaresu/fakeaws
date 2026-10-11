@@ -24,6 +24,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -89,6 +90,13 @@ func New(dbPath string) (*Repository, error) {
 // New and by Restore (which closes and reopens after copying the
 // snapshot baseline back).
 func openDB(dbPath string) (*sql.DB, error) {
+	// SQLite gives -wal and -shm the db file's mode, so a db created
+	// 0600 here keeps all three owner-only. An existing db keeps its mode.
+	if dbPath != ":memory:" {
+		if err := createOwnerOnly(dbPath); err != nil && !errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("create db file: %w", err)
+		}
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -218,10 +226,11 @@ func (r *Repository) RegisterCache(c Cache) {
 // during reset. Universal bookkeeping is reset last.
 //
 // Service tickets append to this list:
-//   S43-T5 (IAM): role_policy_attachments, iam_access_keys, iam_users,
-//                 iam_instance_profiles, iam_policies, iam_roles
-//   S43-T7 (S3):  s3_bucket_configs, s3_buckets
-//   S44 (EC2):    ... etc
+//
+//	S43-T5 (IAM): role_policy_attachments, iam_access_keys, iam_users,
+//	              iam_instance_profiles, iam_policies, iam_roles
+//	S43-T7 (S3):  s3_bucket_configs, s3_buckets
+//	S44 (EC2):    ... etc
 var resetTables = []string{
 	// Universal bookkeeping always reset last.
 	"operations",
@@ -309,7 +318,8 @@ func (r *Repository) Reset() error {
 }
 
 // Snapshot writes a deterministic baseline of the current SQLite state
-// to <dbPath>.snapshot via VACUUM INTO. Each registered cache's
+// to <dbPath>.snapshot: VACUUM INTO <dbPath>.snapshot.tmp, then a
+// rename, so Restore never reads a partial file. Each registered cache's
 // Snapshot is called too. Caller responsible for ensuring no
 // concurrent writes are happening.
 //
@@ -329,9 +339,25 @@ func (r *Repository) Snapshot() error {
 	if _, err := r.db.Exec("PRAGMA wal_checkpoint(FULL)"); err != nil {
 		return fmt.Errorf("wal_checkpoint: %w", err)
 	}
-	stmt := fmt.Sprintf("VACUUM INTO '%s'", strings.ReplaceAll(snap, "'", "''"))
-	if _, err := r.db.Exec(stmt); err != nil {
+	// VACUUM INTO would create its target 0644; it accepts an empty
+	// existing one, so create that 0600 first. The target is a .tmp
+	// because an empty or partial file at snap, left by an error or a
+	// kill mid-VACUUM, would pass Restore's Stat and be copied over
+	// the live db. The rename keeps the 0600.
+	tmp := snap + ".tmp"
+	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale snapshot tmp: %w", err)
+	}
+	if err := createOwnerOnly(tmp); err != nil {
+		return fmt.Errorf("create snapshot tmp: %w", err)
+	}
+	if err := VacuumInto(r.db, tmp); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("vacuum into: %w", err)
+	}
+	if err := os.Rename(tmp, snap); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename snapshot tmp: %w", err)
 	}
 
 	r.cachesMu.Lock()
@@ -395,12 +421,29 @@ func (r *Repository) Restore() error {
 	return nil
 }
 
+// VacuumInto writes db to the empty file dst. A var so a test can make
+// Snapshot's VACUUM fail.
+var VacuumInto = func(db *sql.DB, dst string) error {
+	_, err := db.Exec(fmt.Sprintf("VACUUM INTO '%s'", strings.ReplaceAll(dst, "'", "''")))
+	return err
+}
+
+// createOwnerOnly creates path empty and 0600; fs.ErrExist if it exists.
+func createOwnerOnly(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// copyFile copies src over dst; a dst it creates is 0600.
 func copyFile(src, dst string) error {
 	in, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, in, 0o644)
+	return os.WriteFile(dst, in, 0o600)
 }
 
 // ----- Cross-resource FK helpers -----
