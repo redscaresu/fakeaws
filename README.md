@@ -97,8 +97,22 @@ make build && ./fakeaws --port 8082 --db :memory:
 | `-echo` | `false` | Log every request method+path |
 | `-admin-token` | empty | When set, every `/mock` path needs `Authorization: Bearer <token>` (401 otherwise) and refuses a non-loopback `Origin` (403). `/healthz` and the AWS surface are not gated. The flag shows in `ps`; prefer the env var. |
 | `FAKEAWS_ADMIN_TOKEN` | unset | The admin token when `-admin-token` is not given; the flag wins. |
+| `-account` | unset (`000000000000`) | 12-digit account id to store in the database. Boot fails, naming both ids, when the database holds rows under another account; without the flag nothing is written. For now IAM, STS and EC2 still answer as `000000000000`; the boot AMI fixtures and `/mock/images` rows go under the stored account. |
+| `-region` | unset | Region stored with `-account` (which it needs), e.g. `eu-west-1`. Nothing reads it yet. |
 
 The startup log line says whether an admin token is set and never prints it.
+
+### Admin endpoints
+
+Behind `-admin-token` when it is set.
+
+| Endpoint | Meaning |
+|---|---|
+| `POST /mock/reset` | Deletes every row, the stored identity included, and the snapshot baseline. |
+| `POST /mock/snapshot`, `POST /mock/restore` | Save and bring back a file database (409 on `:memory:`). |
+| `GET /mock/state`, `GET /mock/state/{service}` | The state documented in `handlers/admin.go`, or one service's block. |
+| `POST /mock/images` | Seeds one AMI (see CHANGELOG). |
+| `POST /mock/identity` | `{"account_id": "123456789012", "region": "eu-west-1"}` (region optional) stores the identity: 200, 400 naming a bad field, 409 naming both ids when the account differs and the database holds rows (the boot AMI fixtures and the operations and audit logs do not count). Snapshot, restore and restart keep it; `/mock/reset` deletes it, returning to `000000000000`. |
 
 ### Docker
 

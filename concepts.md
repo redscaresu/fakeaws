@@ -61,7 +61,7 @@ From the 33 codex review passes that landed fakegcp, the patterns that paid for 
 4. **Distinct 409 sentinels.** `ErrInUse` (FK-blocked delete) and `ErrTerminalState` (resource state can't transition further) carry different messages and reason strings. `ErrConflict` stays as a generic catch-all; new code should pick the specific sentinel.
 5. **Three-tier test pyramid.** Unit tests (helper functions, internal package). Integration tests via `testutil.NewTestServer(t)` + `httptest` (handler tests). End-to-end tests gated by `INFRAFACTORY_ENABLE_E2E=1` driving the real Terraform provider through tofu. Each new behaviour gets a regression test in `handlers/regression_test.go` so the next refactor can't quietly break it.
 6. **Examples as documentation.** `examples/working/` proves apply-then-destroy. `examples/misconfigured/` proves the FK gates. `examples/updates/` (with `v1.tfvars`/`v2.tfvars`) proves in-place patches don't drift.
-7. **Admin lifecycle in one file.** `/mock/reset`, `/mock/snapshot`, `/mock/restore`, `/mock/state`, `/mock/state/{service}`, `/mock/images` (seeds one AMI). The repo's `Reset()` clears all tables and the snapshot baseline; `Snapshot()` is `VACUUM INTO`; `Restore()` swaps the file back. Any in-memory cache (DNS changes, similar) is reset/snapshot/restored at the same time so the lifecycle stays consistent. Unauthenticated by default, like mockway and fakegcp; with `-admin-token` (or `FAKEAWS_ADMIN_TOKEN`) every `/mock` path refuses a non-loopback `Origin` with 403 and anything but `Authorization: Bearer <token>` with 401. `/healthz` and the AWS surface are never gated.
+7. **Admin lifecycle in one file.** `/mock/reset`, `/mock/snapshot`, `/mock/restore`, `/mock/state`, `/mock/state/{service}`, `/mock/images` (seeds one AMI), `/mock/identity` (stores the account id and region, refused on a non-empty database under another account). The repo's `Reset()` clears all tables and the snapshot baseline; `Snapshot()` is `VACUUM INTO`; `Restore()` swaps the file back. Any in-memory cache (DNS changes, similar) is reset/snapshot/restored at the same time so the lifecycle stays consistent. Unauthenticated by default, like mockway and fakegcp; with `-admin-token` (or `FAKEAWS_ADMIN_TOKEN`) every `/mock` path refuses a non-loopback `Origin` with 403 and anything but `Authorization: Bearer <token>` with 401. `/healthz` and the AWS surface are never gated.
 8. **Server-stamped metadata, never trust the client.** `id`, `creationTimestamp`, `selfLink` (or AWS equivalent ARN/Id) are written by the repo on insert and never honoured from the request body. PATCH handlers carry an explicit skip-list of immutable fields.
 9. **PATCH validation runs on the post-merge state, not the raw patch.** A partial PATCH that flips `subnetwork` without touching `network` should still be FK-validated against the merged result.
 
@@ -126,10 +126,10 @@ Verbatim from fakegcp's pattern. The only fakeaws-specific change is the per-ser
 
 ```
 fakeaws/
-├── cmd/fakeaws/main.go          # entrypoint, --port, --bind, --db, --echo, --admin-token (or FAKEAWS_ADMIN_TOKEN)
+├── cmd/fakeaws/main.go          # entrypoint, --port, --bind, --db, --echo, --admin-token (or FAKEAWS_ADMIN_TOKEN), --account, --region
 ├── handlers/
 │   ├── handlers.go              # Application struct, RegisterRoutes, auth, awsproto wiring
-│   ├── admin.go                 # /mock/reset, /snapshot, /restore, /state, /images
+│   ├── admin.go                 # /mock/reset, /snapshot, /restore, /state, /images, /identity
 │   ├── awsproto/                # per-protocol marshalling helpers
 │   ├── iam.go
 │   ├── s3.go
@@ -488,7 +488,7 @@ These are the failure modes we already paid for in mockway and fakegcp; they are
 
 ## Open questions
 
-1. **Account namespacing.** AWS state is keyed by `(account_id, region)`. fakegcp punted on the project axis (one project per fakegcp instance) and infrafactory's GCP scenarios all use `fake-project`. Mirror that for fakeaws — one synthetic account ID `000000000000`, region as a column where it matters. Multi-account support is a v2 problem.
+1. **Account namespacing.** AWS state is keyed by `(account_id, region)`. fakegcp punted on the project axis (one project per fakegcp instance) and infrafactory's GCP scenarios all use `fake-project`. Mirror that for fakeaws — one account per instance, the synthetic `000000000000` unless `-account` or `POST /mock/identity` stores another, region as a column where it matters. Multi-account support is a v2 problem.
 2. **Auth: Bearer or fake-SigV4?** The Terraform AWS provider always sends a SigV4 signature. We don't validate it but we do need to *accept* it (return 200, don't choke on the headers). Real LocalStack accepts everything; fakeaws will too. But we may want a "credentials look syntactically valid" check at v1 so a misconfigured provider block fails fast instead of getting weird "resource not found" errors.
 3. ~~**ARN format.**~~ *Resolved in pass 6 — see "Resolved decisions" item 13 below. Replaced by per-service builders in `awsproto/arn.go`; the original single-format design was retracted because real AWS ARN formats vary per service (IAM omits region, S3 is bucket-scoped, Route53 is global, EC2/RDS/EKS embed region+account).*
 4. ~~**terraform-provider-aws compatibility version.**~~ *Resolved (see "Resolved decisions" item 14): pinned to exactly `5.100.0` in every example. Bumps are explicit per-PR.*

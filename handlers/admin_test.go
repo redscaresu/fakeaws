@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/redscaresu/fakeaws/handlers"
+	"github.com/redscaresu/fakeaws/handlers/awsproto"
 	"github.com/redscaresu/fakeaws/repository"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -505,4 +506,172 @@ func TestAdminMock_NoTokenIsUngated(t *testing.T) {
 		assert.Equal(t, wantStatus, status, tc.path)
 		assert.Equal(t, wantBody, body, tc.path)
 	}
+}
+
+const (
+	otherAccount = "123456789012"
+	thirdAccount = "210987654321"
+	refusedMsg   = "resource conflict: account " + otherAccount + " refused: the database is not empty and holds account 000000000000"
+)
+
+func accountID(t *testing.T, app *handlers.Application) string {
+	t.Helper()
+	id, err := app.AccountID()
+	require.NoError(t, err)
+	return id
+}
+
+func storedIdentity(t *testing.T, app *handlers.Application) repository.Identity {
+	t.Helper()
+	id, err := app.Repository().GetIdentity()
+	require.NoError(t, err)
+	return id
+}
+
+func TestContract_identity_change_refused_on_non_empty_db(t *testing.T) {
+	setOther := `{"account_id":"` + otherAccount + `","region":"eu-west-1"}`
+	for name, create := range map[string]func(*testing.T, *httptest.Server){
+		"role": func(t *testing.T, srv *httptest.Server) { createRole(t, srv, "identity-role") },
+		"vpc": func(t *testing.T, srv *httptest.Server) {
+			resp, body := ec2Call(t, srv, "us-east-1", "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+			require.Equal(t, http.StatusOK, resp.StatusCode, "CreateVpc: %s", body)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			app, srv := newTestApp(t, ":memory:")
+			create(t, srv)
+			resp, body := doPostJSON(t, srv, "/mock/identity", setOther)
+			assert.Equal(t, http.StatusConflict, resp.StatusCode, "body: %s", body)
+			assert.Equal(t, refusedMsg, adminErrorMessage(t, body))
+			assert.Equal(t, awsproto.FakeAccountID, accountID(t, app))
+		})
+	}
+
+	app, srv := newTestApp(t, ":memory:")
+	resp, body := doPostJSON(t, srv, "/mock/identity", setOther)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "empty database: %s", body)
+	assert.Equal(t, otherAccount, accountID(t, app))
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	app, srv = newTestApp(t, dbPath)
+	createRole(t, srv, "identity-role")
+	require.NoError(t, app.Close())
+	_, err := handlers.NewApplication(handlers.Options{DBPath: dbPath, AccountID: otherAccount})
+	require.Error(t, err, "boot with another account on a non-empty file database")
+	assert.Equal(t, refusedMsg, err.Error())
+}
+
+func TestContract_identity_stored_in_database(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	app, srv := newTestApp(t, dbPath)
+	want := repository.Identity{AccountID: otherAccount, Region: "eu-west-1"}
+
+	resp, body := doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+otherAccount+`","region":"eu-west-1"}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "set: %s", body)
+	resp, body = doPost(t, srv, "/mock/snapshot")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "snapshot: %s", body)
+	resp, body = doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+thirdAccount+`"}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "set again: %s", body)
+	require.Equal(t, thirdAccount, accountID(t, app))
+
+	resp, body = doPost(t, srv, "/mock/restore")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "restore: %s", body)
+	assert.Equal(t, otherAccount, accountID(t, app), "restore")
+	assert.Equal(t, want, storedIdentity(t, app), "restore")
+
+	require.NoError(t, app.Close())
+	app, srv = newTestApp(t, dbPath)
+	assert.Equal(t, want, storedIdentity(t, app), "reopened with no AccountID")
+
+	createRole(t, srv, "identity-role")
+	require.NoError(t, app.Close())
+	app, srv = newOptionsApp(t, handlers.Options{DBPath: dbPath, AccountID: otherAccount})
+	assert.Equal(t, want, storedIdentity(t, app), "reopened non-empty with the same account and no region")
+
+	resp, body = doPost(t, srv, "/mock/reset")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "reset: %s", body)
+	assert.Equal(t, awsproto.FakeAccountID, accountID(t, app), "reset")
+}
+
+func TestAdminMockIdentity_UnreadableIdentityIs500(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	_, err := app.Repository().DB().Exec(`DROP TABLE identity`)
+	require.NoError(t, err)
+
+	_, err = app.AccountID()
+	assert.Error(t, err)
+	resp, body := doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+otherAccount+`"}`)
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "POST /mock/identity: %s", body)
+	resp, body = doPostJSON(t, srv, "/mock/images", `{"ami_id":"ami-0123456789abcdef0","name":"x","region":"us-east-1","root_device_name":"/dev/xvda"}`)
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "POST /mock/images: %s", body)
+	for _, path := range []string{"/mock/state", "/mock/state/iam"} {
+		resp, body := doGet(t, srv, path)
+		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "GET %s: %s", path, body)
+	}
+}
+
+// A new table seeded at boot that does not join repository's
+// emptyExclusions makes every fresh database read as non-empty, which
+// fails this test.
+func TestAdminMockIdentity_FixturesCountAsEmpty(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	resp, body := ec2Call(t, srv, "ap-south-2", "DescribeImages", nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeImages: %s", body)
+	var n int
+	require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM ec2_amis WHERE region = 'ap-south-2'`).Scan(&n))
+	require.Positive(t, n, "DescribeImages lazily seeds the fixtures into an unseeded region")
+
+	resp, body = doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+otherAccount+`"}`)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+}
+
+// Until EC2 reads the stored account, these rows are invisible to
+// RunInstances under any account but the default.
+func TestAdminMockIdentity_SeedsGoUnderStoredAccount(t *testing.T) {
+	app, srv := newOptionsApp(t, handlers.Options{DBPath: ":memory:", AccountID: otherAccount})
+	amis := func(account string) int {
+		var n int
+		require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM ec2_amis WHERE account_id = ?`, account).Scan(&n))
+		return n
+	}
+	assert.Positive(t, amis(otherAccount), "boot fixtures under the stored account")
+	assert.Zero(t, amis(awsproto.FakeAccountID), "boot fixtures under the default")
+
+	before := amis(otherAccount)
+	seed := `{"ami_id":"ami-0123456789abcdef0","name":"x","region":"us-east-1","root_device_name":"/dev/xvda"`
+	resp, body := doPostJSON(t, srv, "/mock/images", seed+`,"account_id":"000000000000"}`)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "body: %s", body)
+	assert.Equal(t, "account_id must be "+otherAccount, adminErrorMessage(t, body))
+	resp, body = doPostJSON(t, srv, "/mock/images", seed+`}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+	assert.Equal(t, before+1, amis(otherAccount), "seeded image under the stored account")
+
+	resp, body = doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+thirdAccount+`"}`)
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "a seeded image is not empty: %s", body)
+}
+
+func TestAdminMockIdentity_InvalidBodyWritesNothing(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	for name, tc := range map[string]struct{ body, wantMessage string }{
+		"two digits":       {`{"account_id":"12"}`, "account_id must be 12 digits"},
+		"thirteen digits":  {`{"account_id":"1234567890123"}`, "account_id must be 12 digits"},
+		"not digits":       {`{"account_id":"12345678901a"}`, "account_id must be 12 digits"},
+		"no account":       {`{"region":"eu-west-1"}`, "account_id must be 12 digits"},
+		"malformed region": {`{"account_id":"` + otherAccount + `","region":"eu-west"}`, "region must look like us-east-1"},
+		"unknown field":    {`{"account_id":"` + otherAccount + `","acount":"x"}`, `invalid body: json: unknown field "acount"`},
+		"trailing data":    {`{"account_id":"` + otherAccount + `"} junk`, "invalid body: one JSON object expected"},
+		"two objects":      {`{"account_id":"` + otherAccount + `"}{}`, "invalid body: one JSON object expected"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, body := doPostJSON(t, srv, "/mock/identity", tc.body)
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "body: %s", body)
+			assert.Equal(t, tc.wantMessage, adminErrorMessage(t, body))
+			_, err := app.Repository().GetIdentity()
+			assert.ErrorIs(t, err, sql.ErrNoRows, "rejected request stored an identity")
+		})
+	}
+
+	_, guarded := newOptionsApp(t, handlers.Options{DBPath: ":memory:", AdminToken: adminToken})
+	resp, body := doPostJSON(t, guarded, "/mock/identity", `{"account_id":"`+otherAccount+`"}`)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "no bearer: %s", body)
 }

@@ -44,6 +44,11 @@ type Options struct {
 	// AdminToken, when set, gates /mock/* behind a loopback-Origin
 	// check and `Authorization: Bearer <AdminToken>`.
 	AdminToken string
+	// AccountID, when set, is stored as the account fakeaws answers as,
+	// with Region; NewApplication refuses a different account on a
+	// database that is not empty. Empty leaves the stored identity alone.
+	AccountID string
+	Region    string
 }
 
 // ListenAddr is the address to listen on.
@@ -79,15 +84,30 @@ func NewApplication(opts Options) (*Application, error) {
 		app.router.Use(echoMiddleware)
 	}
 	app.RegisterRoutes(app.router)
-	// AMI fixture set lives in every "common" region by default. This
-	// is safe to run on every boot — repository.SeedAMI is idempotent.
-	if err := app.SeedEC2AMIFixtures("000000000000", []string{
-		"us-east-1", "us-east-2", "us-west-1", "us-west-2",
-		"eu-west-1", "eu-west-2", "eu-central-1", "ap-southeast-1",
-	}); err != nil {
+	if err := app.boot(opts); err != nil {
+		_ = repo.Close()
 		return nil, err
 	}
 	return app, nil
+}
+
+// boot stores opts' identity when one is set, then seeds the AMI
+// fixture set under the stored account in every "common" region. This
+// is safe to run on every boot — repository.SeedAMI is idempotent.
+func (app *Application) boot(opts Options) error {
+	if opts.AccountID != "" {
+		if err := app.setIdentity(repository.Identity{AccountID: opts.AccountID, Region: opts.Region}); err != nil {
+			return err
+		}
+	}
+	account, err := app.AccountID()
+	if err != nil {
+		return err
+	}
+	return app.SeedEC2AMIFixtures(account, []string{
+		"us-east-1", "us-east-2", "us-west-1", "us-west-2",
+		"eu-west-1", "eu-west-2", "eu-central-1", "ap-southeast-1",
+	})
 }
 
 // Router returns the chi router for serving HTTP traffic.
