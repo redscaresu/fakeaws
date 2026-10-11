@@ -97,7 +97,7 @@ make build && ./fakeaws --port 8082 --db :memory:
 | `-echo` | `false` | Log every request method+path |
 | `-admin-token` | empty | When set, every `/mock` path needs `Authorization: Bearer <token>` (401 otherwise) and refuses a non-loopback `Origin` (403). `/healthz` and the AWS surface are not gated. The flag shows in `ps`; prefer the env var. |
 | `FAKEAWS_ADMIN_TOKEN` | unset | The admin token when `-admin-token` is not given; the flag wins. |
-| `-record-requests` | `false` | Keep an in-memory log of every AWS request (method, path, status, class), returned by `GET /mock/requests` and emptied by `POST /mock/requests/clear` or `/mock/reset`. Paths hold values (bucket, key, secret names), so fakeaws refuses to start without an admin token. `/mock/state`'s `audit` lists the same requests as service, status and class only. |
+| `-record-requests` | `false` | Keep an in-memory log of every AWS request (method, path, status, class), returned by `GET /mock/requests` and emptied by `POST /mock/requests/clear` or `/mock/reset`. Paths hold values (bucket, key, secret names), so fakeaws refuses to start without an admin token (`-admin-token` or `FAKEAWS_ADMIN_TOKEN`). `/mock/state`'s `audit` lists the same requests as service, status and class only. |
 | `-account` | unset (`000000000000`) | 12-digit account id to store in the database. Boot fails, naming both ids, when the database holds rows under another account; without the flag nothing is written. For now IAM, STS and EC2 still answer as `000000000000`; the boot AMI fixtures and `/mock/images` rows go under the stored account. |
 | `-region` | unset | Region stored with `-account` (which it needs), e.g. `eu-west-1`. Nothing reads it yet. |
 

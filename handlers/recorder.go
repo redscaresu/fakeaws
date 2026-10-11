@@ -145,9 +145,10 @@ func markClass(w http.ResponseWriter, class requestClass) {
 // recordRequests appends every request outside /mock and /healthz to
 // the log once its handler returns, so entries are in completion order.
 //
-// CRITICAL[request-log-panic-recorded]: it is installed before
-// middleware.Recoverer, so a handler that panics is recorded with the
-// 500 Recoverer writes, never as answered-from-rows.
+// CRITICAL[request-log-panic-recorded]: it runs inside
+// middleware.Recoverer, so it sees a handler panic before Recoverer
+// swallows it and records 500 unimplemented-501, whatever status the
+// handler wrote first; a panic is never answered-from-rows.
 func (app *Application) recordRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" || r.URL.Path == "/mock" || strings.HasPrefix(r.URL.Path, "/mock/") {
@@ -156,11 +157,18 @@ func (app *Application) recordRequests(next http.Handler) http.Handler {
 		}
 		path := r.URL.Path // before stripRegionRootSlash rewrites it
 		rw := &recordingWriter{ResponseWriter: w}
+		panicked := true
+		defer func() { // runs while a panic unwinds on to Recoverer
+			switch {
+			case panicked:
+				rw.status, rw.class = http.StatusInternalServerError, classUnimplemented
+			case rw.status == 0:
+				rw.status = http.StatusOK // net/http's answer when a handler writes nothing
+			}
+			app.requests.append(requestEntry{Method: r.Method, Path: path, Status: rw.status, Classification: rw.classification()})
+		}()
 		next.ServeHTTP(rw, r)
-		if rw.status == 0 {
-			rw.status = http.StatusOK // net/http's answer when a handler writes nothing
-		}
-		app.requests.append(requestEntry{Method: r.Method, Path: path, Status: rw.status, Classification: rw.classification()})
+		panicked = false
 	})
 }
 

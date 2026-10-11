@@ -28,11 +28,12 @@ type loggedRequest struct {
 	Classification string `json:"classification"`
 }
 
-// newRecordingApp is newOptionsApp with RecordRequests on and a
-// deadline on every request the server's client sends.
+// newRecordingApp is newOptionsApp with RecordRequests and the admin
+// token it needs, and a deadline on every request the server's client
+// sends.
 func newRecordingApp(t *testing.T, opts handlers.Options) (*handlers.Application, *httptest.Server) {
 	t.Helper()
-	opts.RecordRequests = true
+	opts.RecordRequests, opts.AdminToken = true, adminToken
 	app, srv := newOptionsApp(t, opts)
 	srv.Client().Timeout = requestDeadline
 	return app, srv
@@ -40,34 +41,39 @@ func newRecordingApp(t *testing.T, opts handlers.Options) (*handlers.Application
 
 func loggedRequests(t *testing.T, srv *httptest.Server) []loggedRequest {
 	t.Helper()
-	resp, body := doGet(t, srv, "/mock/requests")
-	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	status, body := doAdmin(t, srv, http.MethodGet, "/mock/requests", bearer(adminToken))
+	require.Equal(t, http.StatusOK, status, body)
 	var got struct {
 		Requests []loggedRequest `json:"requests"`
 	}
-	require.NoError(t, json.Unmarshal(body, &got), "%s", body)
+	require.NoError(t, json.Unmarshal([]byte(body), &got), body)
 	require.NotNil(t, got.Requests, "requests is [], never null: %s", body)
 	return got.Requests
 }
 
-func stateAudit(t *testing.T, srv *httptest.Server) []map[string]any {
+// stateAudit is /mock/state's audit block, read with header.
+func stateAudit(t *testing.T, srv *httptest.Server, header http.Header) []map[string]any {
 	t.Helper()
-	resp, body := doGet(t, srv, "/mock/state")
-	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	status, body := doAdmin(t, srv, http.MethodGet, "/mock/state", header)
+	require.Equal(t, http.StatusOK, status, body)
 	var state struct {
 		Audit []map[string]any `json:"audit"`
 	}
-	require.NoError(t, json.Unmarshal(body, &state), "%s", body)
+	require.NoError(t, json.Unmarshal([]byte(body), &state), body)
 	require.NotNil(t, state.Audit, "audit is [], never null: %s", body)
 	return state.Audit
 }
 
 // testRoutes adds /test routes to app's router: one that panics, one
-// that answers 503 unmarked, one that marks unimplemented-501 and
+// that writes 200 and then panics, one that answers 503 unmarked, one that marks unimplemented-501 and
 // answers 200, and one that marks unimplemented-501 then filter-refused.
 func testRoutes(app *handlers.Application) *chi.Mux {
 	mux := app.Router().(*chi.Mux)
 	mux.Get("/test/panic", func(http.ResponseWriter, *http.Request) { panic("test route") })
+	mux.Get("/test/panic-after-200", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		panic("test route after 200")
+	})
 	mux.Get("/test/503", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
 	mux.Get("/test/marked-200", func(w http.ResponseWriter, _ *http.Request) {
 		handlers.MarkClass(w, handlers.ClassUnimplemented)
@@ -104,7 +110,14 @@ func TestContract_request_log_off_by_default(t *testing.T) {
 		assert.Equal(t, wantStatus, status, "%s %s", rt.method, rt.path)
 		assert.Equal(t, wantBody, body, "%s %s", rt.method, rt.path)
 	}
-	assert.Empty(t, stateAudit(t, srv), "nothing is recorded")
+	assert.Empty(t, stateAudit(t, srv, http.Header{}), "nothing is recorded")
+}
+
+func TestContract_request_log_needs_admin_token(t *testing.T) {
+	app, err := handlers.NewApplication(handlers.Options{DBPath: ":memory:", RecordRequests: true})
+	assert.ErrorIs(t, err, handlers.ErrRecordRequestsNeedsAdminToken)
+	assert.ErrorContains(t, err, "admin token")
+	assert.Nil(t, app)
 }
 
 func TestRequestLog_CompletionOrderSkipsAdminAndHealthz(t *testing.T) {
@@ -161,8 +174,8 @@ func TestRequestLog_ClearResetSnapshotRestoreRestart(t *testing.T) {
 		require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
 	}
 	admin := func(path string) {
-		resp, body := doPost(t, srv, path)
-		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", path, body)
+		status, body := doAdmin(t, srv, http.MethodPost, path, bearer(adminToken))
+		require.Equal(t, http.StatusOK, status, "%s: %s", path, body)
 	}
 
 	getCallerIdentity()
@@ -221,8 +234,11 @@ func TestContract_request_log_panic_recorded(t *testing.T) {
 
 	resp, body := doGet(t, srv, "/test/panic")
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode, "%s", body)
+	resp, body = doGet(t, srv, "/test/panic-after-200")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "the 200 went out before the panic: %s", body)
 	assert.Equal(t, []loggedRequest{
 		{http.MethodGet, "/test/panic", http.StatusInternalServerError, "unimplemented-501"},
+		{http.MethodGet, "/test/panic-after-200", http.StatusInternalServerError, "unimplemented-501"},
 	}, loggedRequests(t, srv))
 }
 
@@ -230,9 +246,9 @@ func TestContract_state_audit_no_values(t *testing.T) {
 	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
 	providerTraffic(t, srv)
 
-	_, state := doGet(t, srv, "/mock/state")
-	assert.NotContains(t, string(state), "secret-bucket-name", "no path reaches /mock/state")
-	audit := stateAudit(t, srv)
+	_, state := doAdmin(t, srv, http.MethodGet, "/mock/state", bearer(adminToken))
+	assert.NotContains(t, state, "secret-bucket-name", "no path reaches /mock/state")
+	audit := stateAudit(t, srv, bearer(adminToken))
 	for _, e := range audit {
 		var keys []string
 		for k := range e {
@@ -287,7 +303,7 @@ func TestRequestLog_ConcurrentRequestsAllRecorded(t *testing.T) {
 }
 
 func TestRequestLog_AdminTokenGatesIt(t *testing.T) {
-	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:", AdminToken: adminToken})
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
 	providerTraffic(t, srv)
 
 	for _, rt := range []adminRoute{{http.MethodGet, "/mock/requests"}, {http.MethodPost, "/mock/requests/clear"}} {

@@ -104,9 +104,11 @@ func TestBootWithoutAccountWritesNoIdentity(t *testing.T) {
 	assert.ErrorIs(t, err, sql.ErrNoRows)
 }
 
-func TestOptionsFromFlags_RecordRequestsNeedsAToken(t *testing.T) {
-	_, err := optionsFromFlags([]string{"-record-requests"}, env(nil))
-	assert.EqualError(t, err, "-record-requests needs an admin token: -admin-token or "+adminTokenEnv)
+func TestRecordRequestsNeedsAToken(t *testing.T) {
+	opts, err := optionsFromFlags([]string{"-record-requests"}, env(nil))
+	require.NoError(t, err)
+	_, err = handlers.NewApplication(opts)
+	assert.ErrorIs(t, err, handlers.ErrRecordRequestsNeedsAdminToken, "main exits 1 on it, naming the token")
 
 	for name, tc := range map[string]struct {
 		args []string

@@ -8,6 +8,7 @@
 package handlers
 
 import (
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -52,7 +53,7 @@ type Options struct {
 	Region    string
 	// RecordRequests keeps an in-process log of every provider request,
 	// served on GET /mock/requests. The log holds request values, so
-	// cmd/fakeaws refuses it without an admin token.
+	// NewApplication refuses it without an AdminToken.
 	//
 	// CRITICAL[request-log-off-by-default]: without it nothing is
 	// recorded, /mock/state's audit is [], and /mock/requests and
@@ -70,11 +71,22 @@ func (o Options) ListenAddr() string {
 	return net.JoinHostPort(o.Bind, strconv.Itoa(o.Port))
 }
 
+// ErrRecordRequestsNeedsAdminToken is NewApplication's refusal of
+// RecordRequests without an AdminToken.
+var ErrRecordRequestsNeedsAdminToken = errors.New("recording requests needs an admin token: the log holds request values")
+
 // NewApplication boots an Application from opts.
 //
 // In S43-T4 this attaches the admin (/mock/*) routes; S43-T5/T6 add
 // IAM; S43-T7/T8 add S3; later phases add the rest.
+//
+// CRITICAL[request-log-needs-admin-token]: RecordRequests without an
+// AdminToken is ErrRecordRequestsNeedsAdminToken before the db opens, so
+// no caller can serve the log, whose paths hold values, unauthenticated.
 func NewApplication(opts Options) (*Application, error) {
+	if opts.RecordRequests && opts.AdminToken == "" {
+		return nil, ErrRecordRequestsNeedsAdminToken
+	}
 	repo, err := repository.New(opts.DBPath)
 	if err != nil {
 		return nil, err
@@ -87,11 +99,11 @@ func NewApplication(opts Options) (*Application, error) {
 		adminToken: opts.AdminToken,
 	}
 
+	app.router.Use(middleware.Recoverer)
 	if opts.RecordRequests {
 		app.requests = &requestLog{}
-		app.router.Use(app.recordRequests) // before Recoverer, to see its 500
+		app.router.Use(app.recordRequests) // inside Recoverer, to see the panic
 	}
-	app.router.Use(middleware.Recoverer)
 	app.router.Use(stripRegionRootSlash)
 	if opts.Echo {
 		app.router.Use(echoMiddleware)
