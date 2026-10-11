@@ -33,7 +33,7 @@ fakeaws serves the AWS surface and the `/mock` admin endpoints with no authentic
 - `-bind 127.0.0.1` listens on loopback only (not inside a container, where it makes the published port unreachable).
 - `-admin-token` or, better, `FAKEAWS_ADMIN_TOKEN` (a flag shows in `ps`) gates every `/mock` path: a present `Origin` that is not loopback is 403 before the token is read, so a page served from a non-loopback origin cannot drive it even with the token; then anything but `Authorization: Bearer <token>` is 401, which is what stops a page served from loopback (a dev server, say) that does not hold the token. The comparison is constant-time for a token of the right length (a wrong length is refused at once), and the token is never logged or echoed. `/healthz` and the AWS surface stay open.
 
-With `-db <file>`, the db holds every secret a run wrote (Secrets Manager values, SSM SecureStrings, IAM access keys). When fakeaws creates it, the db, its `-wal`/`-shm`, the `.snapshot` that `/mock/snapshot` writes and a db `/mock/restore` recreates are 0600 (owner only). A db that already exists keeps its mode, so `chmod 600` one (and its `-wal`/`-shm`) created by an older fakeaws.
+With `-db <file>`, the db holds every secret a run wrote (Secrets Manager values, SSM SecureStrings, IAM access keys). When fakeaws creates it, the db, its `-wal`/`-shm`, the `.snapshot` that `/mock/snapshot` writes (through a `.snapshot.tmp` it renames) and a db `/mock/restore` recreates are 0600 (owner only). A db that already exists keeps its mode, so `chmod 600` one (and its `-wal`/`-shm`) created by an older fakeaws.
 
 ## Pre-commit hook
 

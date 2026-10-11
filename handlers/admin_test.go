@@ -123,9 +123,12 @@ func TestContract_file_backed_db_owner_only(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateQueue: %s", body)
 	assertOwnerOnly(t, live...)
 
+	// Left by a snapshot killed mid-VACUUM.
+	require.NoError(t, os.WriteFile(dbPath+".snapshot.tmp", []byte("partial"), 0o644))
 	resp, body = doPost(t, srv, "/mock/snapshot")
 	require.Equal(t, http.StatusOK, resp.StatusCode, "snapshot: %s", body)
 	assertOwnerOnly(t, dbPath+".snapshot")
+	assert.NoFileExists(t, dbPath+".snapshot.tmp")
 
 	resp, body = doPost(t, srv, "/mock/restore")
 	require.Equal(t, http.StatusOK, resp.StatusCode, "restore: %s", body)
@@ -138,20 +141,27 @@ func TestContract_file_backed_db_owner_only(t *testing.T) {
 }
 
 // A failed VACUUM INTO leaves no .snapshot, so the next restore is 404
-// instead of copying an empty file over the live db.
+// instead of copying an empty file over the live db. Nor is there one
+// while VACUUM runs, so a kill then leaves none either.
 func TestAdminMockSnapshot_FailedVacuumLeavesNoSnapshot(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	srv := newTestServer(t, dbPath)
 	resp, body := sqsCall(t, srv, "CreateQueue", `{"QueueName":"survives"}`)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateQueue: %s", body)
 
+	var statDuringVacuum error
 	vacuum := repository.VacuumInto
-	repository.VacuumInto = func(*sql.DB, string) error { return errors.New("forced vacuum failure") }
+	repository.VacuumInto = func(*sql.DB, string) error {
+		_, statDuringVacuum = os.Stat(dbPath + ".snapshot")
+		return errors.New("forced vacuum failure")
+	}
 	t.Cleanup(func() { repository.VacuumInto = vacuum })
 
 	resp, body = doPost(t, srv, "/mock/snapshot")
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode, "snapshot: %s", body)
+	assert.ErrorIs(t, statDuringVacuum, os.ErrNotExist, ".snapshot exists while VACUUM runs")
 	assert.NoFileExists(t, dbPath+".snapshot")
+	assert.NoFileExists(t, dbPath+".snapshot.tmp")
 
 	resp, body = doPost(t, srv, "/mock/restore")
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "restore after a failed snapshot: %s", body)

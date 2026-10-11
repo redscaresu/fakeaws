@@ -318,7 +318,8 @@ func (r *Repository) Reset() error {
 }
 
 // Snapshot writes a deterministic baseline of the current SQLite state
-// to <dbPath>.snapshot via VACUUM INTO. Each registered cache's
+// to <dbPath>.snapshot: VACUUM INTO <dbPath>.snapshot.tmp, then a
+// rename, so Restore never reads a partial file. Each registered cache's
 // Snapshot is called too. Caller responsible for ensuring no
 // concurrent writes are happening.
 //
@@ -338,16 +339,25 @@ func (r *Repository) Snapshot() error {
 	if _, err := r.db.Exec("PRAGMA wal_checkpoint(FULL)"); err != nil {
 		return fmt.Errorf("wal_checkpoint: %w", err)
 	}
-	// VACUUM INTO would create the snapshot 0644; it accepts an empty
-	// existing target, so create that 0600 first.
-	if err := createOwnerOnly(snap); err != nil {
-		return fmt.Errorf("create snapshot: %w", err)
+	// VACUUM INTO would create its target 0644; it accepts an empty
+	// existing one, so create that 0600 first. The target is a .tmp
+	// because an empty or partial file at snap, left by an error or a
+	// kill mid-VACUUM, would pass Restore's Stat and be copied over
+	// the live db. The rename keeps the 0600.
+	tmp := snap + ".tmp"
+	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale snapshot tmp: %w", err)
 	}
-	if err := VacuumInto(r.db, snap); err != nil {
-		// An empty snapshot left behind would pass Restore's Stat and
-		// copy 0 bytes over the live db.
-		_ = os.Remove(snap)
+	if err := createOwnerOnly(tmp); err != nil {
+		return fmt.Errorf("create snapshot tmp: %w", err)
+	}
+	if err := VacuumInto(r.db, tmp); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("vacuum into: %w", err)
+	}
+	if err := os.Rename(tmp, snap); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename snapshot tmp: %w", err)
 	}
 
 	r.cachesMu.Lock()
