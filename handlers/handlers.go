@@ -9,8 +9,10 @@ package handlers
 
 import (
 	"log"
+	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -21,34 +23,59 @@ import (
 // Application is the top-level wiring struct. Holds the chi router
 // and the repository handle.
 type Application struct {
-	router *chi.Mux
-	repo   *repository.Repository
-	echo   bool
-	dbPath string
+	router     *chi.Mux
+	repo       *repository.Repository
+	echo       bool
+	dbPath     string
+	adminToken string
 }
 
-// NewApplication boots an Application. dbPath is ":memory:" for
-// in-memory SQLite or a filesystem path for persistent storage. echo
-// toggles per-request method+path logging — useful for discovering
-// unimplemented endpoints during provider integration testing.
+// Options configures an Application and the address it serves on.
+type Options struct {
+	// DBPath is ":memory:" for in-memory SQLite or a filesystem path
+	// for persistent storage.
+	DBPath string
+	// Echo toggles per-request method+path logging, useful for
+	// discovering unimplemented endpoints.
+	Echo bool
+	// Bind is the listen host; empty listens on all interfaces.
+	Bind string
+	Port int
+	// AdminToken, when set, gates /mock/* behind a loopback-Origin
+	// check and `Authorization: Bearer <AdminToken>`.
+	AdminToken string
+}
+
+// ListenAddr is the address to listen on.
+//
+// CRITICAL[listen-addr-default-all-interfaces]: an empty Bind gives
+// ":<port>", all interfaces, as fakeaws always listened, so callers that
+// reach it from another host or a published container port keep
+// working; a set Bind, IPv6 included, is joined as host:port.
+func (o Options) ListenAddr() string {
+	return net.JoinHostPort(o.Bind, strconv.Itoa(o.Port))
+}
+
+// NewApplication boots an Application from opts.
 //
 // In S43-T4 this attaches the admin (/mock/*) routes; S43-T5/T6 add
 // IAM; S43-T7/T8 add S3; later phases add the rest.
-func NewApplication(dbPath string, echo bool) (*Application, error) {
-	repo, err := repository.New(dbPath)
+func NewApplication(opts Options) (*Application, error) {
+	repo, err := repository.New(opts.DBPath)
 	if err != nil {
 		return nil, err
 	}
 	app := &Application{
-		router: chi.NewRouter(),
-		repo:   repo,
-		echo:   echo,
-		dbPath: dbPath,
+		router:     chi.NewRouter(),
+		repo:       repo,
+		echo:       opts.Echo,
+		dbPath:     opts.DBPath,
+		adminToken: opts.AdminToken,
 	}
 
 	app.router.Use(middleware.Recoverer)
 	app.router.Use(stripRegionRootSlash)
-	if echo {
+	if opts.Echo {
 		app.router.Use(echoMiddleware)
 	}
 	app.RegisterRoutes(app.router)
