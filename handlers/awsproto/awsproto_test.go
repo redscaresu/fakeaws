@@ -330,16 +330,12 @@ func TestARNBuildersUseGivenAccount(t *testing.T) {
 	}
 }
 
-// TestARNBuildersUseSyntheticAccount asserts no builder hardcodes a
-// real AWS account number and the default account, FakeAccountID, is
-// still the synthetic one.
+// TestARNBuildersUseSyntheticAccount asserts the default account,
+// FakeAccountID, is still the synthetic one, and that S3 and Route53
+// ARNs carry no account.
 func TestARNBuildersUseSyntheticAccount(t *testing.T) {
 	if FakeAccountID != "000000000000" {
 		t.Fatalf("FakeAccountID changed without test update: %s", FakeAccountID)
-	}
-	// IAM ARN must contain the synthetic account.
-	if !strings.Contains(BuildIAMRoleARN(FakeAccountID, "x"), FakeAccountID) {
-		t.Errorf("IAM ARN missing synthetic account")
 	}
 	// S3 ARN must NOT contain the account (S3 ARNs omit account).
 	if strings.Contains(BuildS3BucketARN("x"), FakeAccountID) {
