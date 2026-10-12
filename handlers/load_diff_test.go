@@ -5,21 +5,22 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-var describeVpcsKey = LoadKey{Service: "ec2", Action: "DescribeVpcs"}
+var diffVpcsKey = LoadKey{Service: "ec2", Action: "DescribeVpcs"}
 
-func mustXML(t *testing.T, body string) *Tree {
+func mustParseXML(t *testing.T, body string) *Tree {
 	t.Helper()
 	tree, err := ParseXML([]byte(body))
 	require.NoError(t, err)
 	return tree
 }
 
-func mustJSON(t *testing.T, body string) *Tree {
+func mustParseJSON(t *testing.T, body string) *Tree {
 	t.Helper()
 	tree, err := ParseJSON([]byte(body))
 	require.NoError(t, err)
@@ -28,26 +29,26 @@ func mustJSON(t *testing.T, body string) *Tree {
 
 func diffXML(t *testing.T, recorded, rendered string) ([]string, []string) {
 	t.Helper()
-	return Diff(describeVpcsKey, mustXML(t, recorded), mustXML(t, rendered))
+	return Diff(diffVpcsKey, mustParseXML(t, recorded), mustParseXML(t, rendered))
 }
 
 func diffJSON(t *testing.T, recorded, rendered string) ([]string, []string) {
 	t.Helper()
-	return Diff(LoadKey{Service: "ssm", Action: "GetParameter"}, mustJSON(t, recorded), mustJSON(t, rendered))
+	return Diff(LoadKey{Service: "ssm", Action: "GetParameter"}, mustParseJSON(t, recorded), mustParseJSON(t, rendered))
 }
 
-func vpcItem(id, isDefault string) string {
+func diffVpcItem(id, isDefault string) string {
 	return fmt.Sprintf("<item><vpcId>%s</vpcId><cidrBlock>10.0.0.0/16</cidrBlock><isDefault>%s</isDefault></item>", id, isDefault)
 }
 
-func vpcs(items ...string) string {
+func diffVpcs(items ...string) string {
 	return "<DescribeVpcsResponse><requestId>r-1</requestId><vpcSet>" + strings.Join(items, "") + "</vpcSet></DescribeVpcsResponse>"
 }
 
 func TestLoadDiffUnknownFieldIsRecordedOnly(t *testing.T) {
 	rec, ren := diffXML(t,
-		vpcs("<item><vpcId>vpc-1</vpcId><fooBar><x>1</x></fooBar></item>"),
-		vpcs("<item><vpcId>vpc-1</vpcId></item>"))
+		diffVpcs("<item><vpcId>vpc-1</vpcId><fooBar><x>1</x></fooBar></item>"),
+		diffVpcs("<item><vpcId>vpc-1</vpcId></item>"))
 	assert.Equal(t, []string{"vpcSet/item[0]/fooBar/x"}, rec)
 	assert.Empty(t, ren)
 
@@ -60,28 +61,38 @@ func TestLoadDiffUnknownFieldIsRecordedOnly(t *testing.T) {
 
 func TestLoadDiffAddedFieldIsRenderedOnly(t *testing.T) {
 	rec, ren := diffXML(t,
-		vpcs("<item><vpcId>vpc-1</vpcId></item>"),
-		vpcs("<item><vpcId>vpc-1</vpcId><dhcpOptionsId>dopt-1</dhcpOptionsId></item>"))
+		diffVpcs("<item><vpcId>vpc-1</vpcId></item>"),
+		diffVpcs("<item><vpcId>vpc-1</vpcId><dhcpOptionsId>dopt-1</dhcpOptionsId></item>"))
 	assert.Empty(t, rec)
 	assert.Equal(t, []string{"vpcSet/item[0]/dhcpOptionsId"}, ren)
 }
 
 func TestLoadDiffRootNamesMustMatch(t *testing.T) {
-	item := vpcItem("vpc-1", "false")
-	rec, ren := diffXML(t, vpcs(item), strings.ReplaceAll(vpcs(item), "DescribeVpcsResponse", "DescribeSubnetsResponse"))
+	item := diffVpcItem("vpc-1", "false")
+	rec, ren := diffXML(t, diffVpcs(item), strings.ReplaceAll(diffVpcs(item), "DescribeVpcsResponse", "DescribeSubnetsResponse"))
 	assert.Equal(t, []string{"DescribeVpcsResponse"}, rec)
 	assert.Equal(t, []string{"DescribeSubnetsResponse"}, ren)
 
-	rec, ren = Diff(describeVpcsKey, nil, mustXML(t, vpcs(item)))
+	rec, ren = Diff(diffVpcsKey, nil, mustParseXML(t, diffVpcs(item)))
 	assert.Empty(t, rec)
 	assert.Equal(t, []string{"vpcSet/item[0]"}, ren, "a nil tree is an empty body, whatever the other root is called")
 }
 
+func TestLoadDiffRootValueIsNamed(t *testing.T) {
+	rec, ren := diffXML(t, "<a>x</a>", "<a>y</a>")
+	assert.Equal(t, []string{"a"}, rec)
+	assert.Equal(t, []string{"a"}, ren)
+
+	rec, ren = diffJSON(t, `"x"`, `"y"`)
+	assert.Equal(t, []string{"."}, rec)
+	assert.Equal(t, []string{"."}, ren)
+}
+
 func TestLoadDiffSetsAreMultisets(t *testing.T) {
-	a, b, c := vpcItem("vpc-1", "false"), vpcItem("vpc-2", "true"), vpcItem("vpc-3", "false")
+	a, b, c := diffVpcItem("vpc-1", "false"), diffVpcItem("vpc-2", "true"), diffVpcItem("vpc-3", "false")
 
 	t.Run("swapped vpcSet items", func(t *testing.T) {
-		rec, ren := diffXML(t, vpcs(a, b), vpcs(b, a))
+		rec, ren := diffXML(t, diffVpcs(a, b), diffVpcs(b, a))
 		assert.Empty(t, rec)
 		assert.Empty(t, ren)
 	})
@@ -116,13 +127,13 @@ func TestLoadDiffSetsAreMultisets(t *testing.T) {
 	})
 
 	t.Run("one differing leaf names its item", func(t *testing.T) {
-		rec, ren := diffXML(t, vpcs(a, b), vpcs(a, vpcItem("vpc-2", "false")))
+		rec, ren := diffXML(t, diffVpcs(a, b), diffVpcs(a, diffVpcItem("vpc-2", "false")))
 		assert.Equal(t, []string{"vpcSet/item[1]/isDefault"}, rec)
 		assert.Equal(t, []string{"vpcSet/item[1]/isDefault"}, ren)
 	})
 
 	t.Run("each side names its own index", func(t *testing.T) {
-		rec, ren := diffXML(t, vpcs(a, b), vpcs(vpcItem("vpc-2", "false"), a))
+		rec, ren := diffXML(t, diffVpcs(a, b), diffVpcs(diffVpcItem("vpc-2", "false"), a))
 		assert.Equal(t, []string{"vpcSet/item[1]/isDefault"}, rec)
 		assert.Equal(t, []string{"vpcSet/item[0]/isDefault"}, ren)
 	})
@@ -134,14 +145,14 @@ func TestLoadDiffSetsAreMultisets(t *testing.T) {
 		// Item 0 differs from rendered item 0 on vpcId and cidrBlock, from
 		// rendered item 1 on isDefault alone, so they pair across indexes.
 		rec, ren := diffXML(t,
-			vpcs(vpc("vpc-1", "10.0.0.0/16", "false"), vpc("vpc-2", "10.1.0.0/16", "true")),
-			vpcs(vpc("vpc-2", "10.1.0.0/16", "false"), vpc("vpc-1", "10.0.0.0/16", "true")))
+			diffVpcs(vpc("vpc-1", "10.0.0.0/16", "false"), vpc("vpc-2", "10.1.0.0/16", "true")),
+			diffVpcs(vpc("vpc-2", "10.1.0.0/16", "false"), vpc("vpc-1", "10.0.0.0/16", "true")))
 		assert.Equal(t, []string{"vpcSet/item[0]/isDefault", "vpcSet/item[1]/isDefault"}, rec)
 		assert.Equal(t, []string{"vpcSet/item[0]/isDefault", "vpcSet/item[1]/isDefault"}, ren)
 	})
 
 	t.Run("a set one item short names that item only", func(t *testing.T) {
-		rec, ren := diffXML(t, vpcs(a, b, c), vpcs(c, a))
+		rec, ren := diffXML(t, diffVpcs(a, b, c), diffVpcs(c, a))
 		assert.Equal(t, []string{"vpcSet/item[1]"}, rec)
 		assert.Empty(t, ren)
 	})
@@ -173,31 +184,39 @@ func TestLoadDiffWhitespaceEmptiesAndNumbers(t *testing.T) {
     </vpcSet>
 </DescribeVpcsResponse>
 `
-		rec, ren := diffXML(t, indented, vpcs(vpcItem("vpc-1", "false")))
+		rec, ren := diffXML(t, indented, diffVpcs(diffVpcItem("vpc-1", "false")))
 		assert.Empty(t, rec)
 		assert.Empty(t, ren)
 	})
 
 	t.Run("a trailing newline is a difference", func(t *testing.T) {
 		rec, ren := diffXML(t,
-			vpcs("<item><vpcId>vpc-1</vpcId><description>web\n</description></item>"),
-			vpcs("<item><vpcId>vpc-1</vpcId><description>web</description></item>"))
+			diffVpcs("<item><vpcId>vpc-1</vpcId><description>web\n</description></item>"),
+			diffVpcs("<item><vpcId>vpc-1</vpcId><description>web</description></item>"))
 		assert.Equal(t, []string{"vpcSet/item[0]/description"}, rec)
 		assert.Equal(t, []string{"vpcSet/item[0]/description"}, ren)
 	})
 
+	t.Run("a pretty-printed empty element is absent", func(t *testing.T) {
+		rec, ren := diffXML(t,
+			diffVpcs("<item><vpcId>vpc-1</vpcId><tagSet>\n            </tagSet><description> \t\r\n</description></item>"),
+			diffVpcs("<item><vpcId>vpc-1</vpcId></item>"))
+		assert.Empty(t, rec)
+		assert.Empty(t, ren)
+	})
+
 	t.Run("an empty element is absent", func(t *testing.T) {
 		rec, ren := diffXML(t,
-			vpcs("<item><vpcId>vpc-1</vpcId><tagSet/></item>"),
-			vpcs("<item><vpcId>vpc-1</vpcId></item>"))
+			diffVpcs("<item><vpcId>vpc-1</vpcId><tagSet/></item>"),
+			diffVpcs("<item><vpcId>vpc-1</vpcId></item>"))
 		assert.Empty(t, rec)
 		assert.Empty(t, ren)
 	})
 
 	t.Run("an element holding only empty elements is absent, indentation and all", func(t *testing.T) {
 		rec, ren := diffXML(t,
-			vpcs("<item><vpcId>vpc-1</vpcId><tagSet>\n    <item>\n        <value/>\n    </item>\n</tagSet></item>"),
-			vpcs("<item><vpcId>vpc-1</vpcId></item>"))
+			diffVpcs("<item><vpcId>vpc-1</vpcId><tagSet>\n    <item>\n        <value/>\n    </item>\n</tagSet></item>"),
+			diffVpcs("<item><vpcId>vpc-1</vpcId></item>"))
 		assert.Empty(t, rec)
 		assert.Empty(t, ren)
 	})
@@ -225,8 +244,8 @@ func TestLoadDiffWhitespaceEmptiesAndNumbers(t *testing.T) {
 
 func TestLoadDiffIgnoresPagingAndRequestIDs(t *testing.T) {
 	rec, ren := diffXML(t,
-		strings.Replace(vpcs(vpcItem("vpc-1", "false")), "</vpcSet>", "</vpcSet><nextToken>tok</nextToken>", 1),
-		vpcs(vpcItem("vpc-1", "false")))
+		strings.Replace(diffVpcs(diffVpcItem("vpc-1", "false")), "</vpcSet>", "</vpcSet><nextToken>tok</nextToken>", 1),
+		diffVpcs(diffVpcItem("vpc-1", "false")))
 	assert.Empty(t, rec)
 	assert.Empty(t, ren)
 
@@ -241,10 +260,14 @@ func TestLoadDiffIgnoresPagingAndRequestIDs(t *testing.T) {
 	rec, ren = diffJSON(t, `{"Parameters":[{"Name":"/a"}]}`, `{"Parameters":[{"Name":"/a"}],"NextToken":"tok"}`)
 	assert.Empty(t, rec)
 	assert.Empty(t, ren)
+
+	rec, ren = diffXML(t, "<r><s><item><requestId>r-4</requestId></item></s></r>", "<r/>")
+	assert.Empty(t, rec, "a member holding only ignored fields is pruned before matching")
+	assert.Empty(t, ren)
 }
 
-// withIgnores replaces the registered ignore entries for one test.
-func withIgnores(t *testing.T, entries ...IgnoreEntry) {
+// withDiffIgnores replaces the registered ignore entries for one test.
+func withDiffIgnores(t *testing.T, entries ...IgnoreEntry) {
 	t.Helper()
 	saved := loadIgnores
 	loadIgnores = nil
@@ -253,13 +276,13 @@ func withIgnores(t *testing.T, entries ...IgnoreEntry) {
 }
 
 func TestLoadDiffIgnoreEntryIsScopedToItsKey(t *testing.T) {
-	withIgnores(t, IgnoreEntry{
-		Key:  describeVpcsKey,
+	withDiffIgnores(t, IgnoreEntry{
+		Key:  diffVpcsKey,
 		Path: "vpcSet/item/dhcpOptionsId",
 		Cite: "terraform-provider-aws@v5.100.0/internal/service/ec2/vpc_.go",
 	})
-	without := vpcs("<item><vpcId>vpc-1</vpcId><isDefault>false</isDefault></item>")
-	with := vpcs("<item><vpcId>vpc-1</vpcId><isDefault>true</isDefault><dhcpOptionsId>dopt-1</dhcpOptionsId></item>")
+	without := diffVpcs("<item><vpcId>vpc-1</vpcId><isDefault>false</isDefault></item>")
+	with := diffVpcs("<item><vpcId>vpc-1</vpcId><isDefault>true</isDefault><dhcpOptionsId>dopt-1</dhcpOptionsId></item>")
 
 	rec, ren := diffXML(t, without, with)
 	assert.Equal(t, []string{"vpcSet/item[0]/isDefault"}, rec, "only the entry's own path is suppressed")
@@ -269,15 +292,24 @@ func TestLoadDiffIgnoreEntryIsScopedToItsKey(t *testing.T) {
 	assert.Equal(t, []string{"vpcSet/item[0]/isDefault"}, rec, "suppressed in both directions")
 	assert.Equal(t, []string{"vpcSet/item[0]/isDefault"}, ren)
 
-	rec, ren = Diff(LoadKey{Service: "ec2", Action: "DescribeSubnets"}, mustXML(t, without), mustXML(t, with))
+	rec, ren = Diff(LoadKey{Service: "ec2", Action: "DescribeSubnets"}, mustParseXML(t, without), mustParseXML(t, with))
 	assert.Equal(t, []string{"vpcSet/item[0]/isDefault"}, rec)
 	assert.Equal(t, []string{"vpcSet/item[0]/dhcpOptionsId", "vpcSet/item[0]/isDefault"}, ren, "another key's diff keeps the path")
+
+	onlyIgnored := diffVpcs(diffVpcItem("vpc-1", "false"), "<item><dhcpOptionsId>dopt-1</dhcpOptionsId></item>")
+	rec, ren = diffXML(t, onlyIgnored, diffVpcs(diffVpcItem("vpc-1", "false")))
+	assert.Empty(t, rec, "a member holding only an ignored path is pruned before matching")
+	assert.Empty(t, ren)
+
+	rec, ren = Diff(LoadKey{Service: "ec2", Action: "DescribeSubnets"}, mustParseXML(t, onlyIgnored), mustParseXML(t, diffVpcs(diffVpcItem("vpc-1", "false"))))
+	assert.Equal(t, []string{"vpcSet/item[1]"}, rec, "another key's diff keeps it")
+	assert.Empty(t, ren)
 }
 
 var (
-	// citeRE is how an ignore entry cites the provider source file in
+	// ignoreCiteRE is how an ignore entry cites the provider source file in
 	// which its field is never read.
-	citeRE = regexp.MustCompile(`^terraform-provider-aws@v5\.100\.0/internal/[a-z0-9_]+(/[a-z0-9_]+)*\.go$`)
+	ignoreCiteRE = regexp.MustCompile(`^terraform-provider-aws@v5\.100\.0/internal/[a-z0-9_]+(/[a-z0-9_]+)*\.go$`)
 	// ignorePathRE allows element names and keys only, so a path cannot
 	// carry an index or a value.
 	ignorePathRE = regexp.MustCompile(`^@?[A-Za-z][A-Za-z0-9]*(/@?[A-Za-z][A-Za-z0-9]*)*$`)
@@ -291,7 +323,7 @@ func ignoreEntryProblems(entries []IgnoreEntry) []string {
 			problems = append(problems, fmt.Sprintf("%v %s: key needs a service and an action", e.Key, e.Path))
 		case !ignorePathRE.MatchString(e.Path):
 			problems = append(problems, fmt.Sprintf("%v: path is not an index-free path of names", e.Key))
-		case !citeRE.MatchString(e.Cite) || strings.HasSuffix(e.Cite, "_test.go"):
+		case !ignoreCiteRE.MatchString(e.Cite) || strings.HasSuffix(e.Cite, "_test.go"):
 			problems = append(problems, fmt.Sprintf("%v %s: cite %q is not a terraform-provider-aws v5.100.0 source file", e.Key, e.Path, e.Cite))
 		}
 	}
@@ -303,7 +335,7 @@ func ignoreEntryProblems(entries []IgnoreEntry) []string {
 func TestLoadDiffIgnoreList(t *testing.T) {
 	assert.Empty(t, ignoreEntryProblems(loadIgnores))
 
-	good := IgnoreEntry{Key: describeVpcsKey, Path: "vpcSet/item/dhcpOptionsId", Cite: "terraform-provider-aws@v5.100.0/internal/service/ec2/vpc_.go"}
+	good := IgnoreEntry{Key: diffVpcsKey, Path: "vpcSet/item/dhcpOptionsId", Cite: "terraform-provider-aws@v5.100.0/internal/service/ec2/vpc_.go"}
 	assert.Empty(t, ignoreEntryProblems([]IgnoreEntry{good}))
 
 	for name, mutate := range map[string]func(*IgnoreEntry){
@@ -326,8 +358,8 @@ func TestLoadDiffNeverReturnsAValue(t *testing.T) {
 	const secret = "SECRET-MARKER"
 	var got []string
 	rec, ren := diffXML(t,
-		vpcs("<item><vpcId>vpc-1</vpcId><description>"+secret+"</description></item>", vpcItem("vpc-9", secret)),
-		vpcs("<item><vpcId>vpc-1</vpcId><description>other</description></item>"))
+		diffVpcs("<item><vpcId>vpc-1</vpcId><description>"+secret+"</description></item>", diffVpcItem("vpc-9", secret)),
+		diffVpcs("<item><vpcId>vpc-1</vpcId><description>other</description></item>"))
 	assert.Equal(t, []string{"vpcSet/item[0]/description", "vpcSet/item[1]"}, rec)
 	assert.Equal(t, []string{"vpcSet/item[0]/description"}, ren)
 	got = append(append(got, rec...), ren...)
@@ -373,8 +405,8 @@ func TestLoadDiffParseRefusesMalformedBodies(t *testing.T) {
 }
 
 func TestLoadDiffSubtree(t *testing.T) {
-	body := mustXML(t, vpcs(vpcItem("vpc-1", "false"), vpcItem("vpc-2", "true"), vpcItem("vpc-3", "false")))
-	rec, ren := Diff(describeVpcsKey, body.Subtree("vpcSet/item", 1), mustXML(t, vpcs(vpcItem("vpc-2", "true"))))
+	body := mustParseXML(t, diffVpcs(diffVpcItem("vpc-1", "false"), diffVpcItem("vpc-2", "true"), diffVpcItem("vpc-3", "false")))
+	rec, ren := Diff(diffVpcsKey, body.Subtree("vpcSet/item", 1), mustParseXML(t, diffVpcs(diffVpcItem("vpc-2", "true"))))
 	assert.Empty(t, rec)
 	assert.Empty(t, ren)
 	assert.Nil(t, body.Subtree("vpcSet/item", 3))
@@ -383,36 +415,93 @@ func TestLoadDiffSubtree(t *testing.T) {
 	reservation := func(id string, instances ...string) string {
 		return "<item><reservationId>" + id + "</reservationId><instancesSet>" + strings.Join(instances, "") + "</instancesSet></item>"
 	}
-	instances := mustXML(t, "<DescribeInstancesResponse><reservationSet>"+
+	instances := mustParseXML(t, "<DescribeInstancesResponse><reservationSet>"+
 		reservation("r-1", instance("i-1"), instance("i-2"))+reservation("r-2", instance("i-3"))+
 		"</reservationSet></DescribeInstancesResponse>")
-	rec, ren = Diff(describeVpcsKey, instances.Subtree("reservationSet/item/instancesSet/item", 2),
-		mustXML(t, "<DescribeInstancesResponse><reservationSet><item><instancesSet>"+instance("i-3")+
+	rec, ren = Diff(diffVpcsKey, instances.Subtree("reservationSet/item/instancesSet/item", 2),
+		mustParseXML(t, "<DescribeInstancesResponse><reservationSet><item><instancesSet>"+instance("i-3")+
 			"</instancesSet></item></reservationSet></DescribeInstancesResponse>"))
 	assert.Empty(t, rec, "the third instance in document order, under its ancestors only")
 	assert.Empty(t, ren)
 
-	parameter := mustJSON(t, `{"Parameter":{"Name":"/app/a","Tags":[{"Key":"a"},{"Key":"b"}]}}`)
-	rec, ren = Diff(describeVpcsKey, parameter.Subtree("Parameter/Tags", 1), mustJSON(t, `{"Parameter":{"Tags":[{"Key":"b"}]}}`))
+	parameter := mustParseJSON(t, `{"Parameter":{"Name":"/app/a","Tags":[{"Key":"a"},{"Key":"b"}]}}`)
+	rec, ren = Diff(diffVpcsKey, parameter.Subtree("Parameter/Tags", 1), mustParseJSON(t, `{"Parameter":{"Tags":[{"Key":"b"}]}}`))
 	assert.Empty(t, rec, "a JSON subtree's ancestors stay JSON")
 	assert.Empty(t, ren)
 }
 
 func TestLoadDiffMergePages(t *testing.T) {
-	a, b, c := vpcItem("vpc-1", "false"), vpcItem("vpc-2", "true"), vpcItem("vpc-3", "false")
-	page1 := mustXML(t, strings.Replace(vpcs(a, b), "</vpcSet>", "</vpcSet><nextToken>tok</nextToken>", 1))
-	page2 := mustXML(t, vpcs(c))
+	a, b, c := diffVpcItem("vpc-1", "false"), diffVpcItem("vpc-2", "true"), diffVpcItem("vpc-3", "false")
+	page1 := mustParseXML(t, strings.Replace(diffVpcs(a, b), "</vpcSet>", "</vpcSet><nextToken>tok</nextToken>", 1))
+	page2 := mustParseXML(t, diffVpcs(c))
 
-	rec, ren := Diff(describeVpcsKey, MergePages(page1, page2), mustXML(t, vpcs(c, b, a)))
+	merged, err := MergePages(page1, page2)
+	require.NoError(t, err)
+	rec, ren := Diff(diffVpcsKey, merged, mustParseXML(t, diffVpcs(c, b, a)))
 	assert.Empty(t, rec)
 	assert.Empty(t, ren)
 
-	rec, ren = Diff(describeVpcsKey, page1, mustXML(t, vpcs(a, b)))
+	rec, ren = Diff(diffVpcsKey, page1, mustParseXML(t, diffVpcs(a, b)))
 	assert.Empty(t, rec, "merging leaves its pages unchanged")
 	assert.Empty(t, ren)
 
-	merged := MergePages(mustJSON(t, `{"Parameters":[{"Name":"/a"}],"NextToken":"tok"}`), mustJSON(t, `{"Parameters":[{"Name":"/b"}]}`))
-	rec, ren = Diff(describeVpcsKey, merged, mustJSON(t, `{"Parameters":[{"Name":"/b"},{"Name":"/a"}]}`))
+	merged, err = MergePages(mustParseJSON(t, `{"Parameters":[{"Name":"/a"}],"NextToken":"tok"}`), mustParseJSON(t, `{"Parameters":[{"Name":"/b"}]}`))
+	require.NoError(t, err)
+	rec, ren = Diff(diffVpcsKey, merged, mustParseJSON(t, `{"Parameters":[{"Name":"/b"},{"Name":"/a"}]}`))
 	assert.Empty(t, rec)
 	assert.Empty(t, ren)
+}
+
+func TestLoadDiffMergePagesRefusesPagesOfAnotherList(t *testing.T) {
+	vpcsPage := mustParseXML(t, diffVpcs(diffVpcItem("vpc-1", "false")))
+	subnetsPage := mustParseXML(t, "<DescribeSubnetsResponse><subnetSet><item><subnetId>subnet-1</subnetId></item></subnetSet></DescribeSubnetsResponse>")
+
+	_, err := MergePages(vpcsPage, subnetsPage)
+	require.Error(t, err)
+	assert.Equal(t, "page 1's root DescribeSubnetsResponse is not page 0's DescribeVpcsResponse", err.Error())
+
+	_, err = MergePages(vpcsPage, mustParseJSON(t, `{"Vpcs":[{"VpcId":"vpc-2"}]}`))
+	assert.Error(t, err, "a JSON page under an XML list")
+	_, err = MergePages(vpcsPage, nil)
+	assert.Error(t, err)
+	_, err = MergePages()
+	assert.Error(t, err)
+}
+
+// diffDeepSets returns a JSON and an XML body nesting depth sets, one in
+// another, around leaf.
+func diffDeepSets(depth int, leaf string) (string, string) {
+	js, xs := `"`+leaf+`"`, "<v>"+leaf+"</v>"
+	for range depth {
+		js, xs = `{"A":[`+js+`]}`, "<s><item>"+xs+"</item></s>"
+	}
+	return js, "<r>" + xs + "</r>"
+}
+
+func TestLoadDiffDeepSetsStayLinear(t *testing.T) {
+	for _, depth := range []int{8, 16, 32, 64} {
+		js, xs := diffDeepSets(depth, "x")
+		for name, tree := range map[string]*Tree{"JSON": mustParseJSON(t, js), "XML": mustParseXML(t, xs)} {
+			d := treeDiffer{forms: map[*Tree]string{}}
+			require.Less(t, len(d.form(tree)), 64*depth, "%s form at depth %d grows faster than linearly", name, depth)
+		}
+	}
+
+	start := time.Now()
+	js, xs := diffDeepSets(64, "x")
+	jsOther, xsOther := diffDeepSets(64, "y")
+	rec, ren := diffJSON(t, js, js)
+	assert.Empty(t, rec)
+	assert.Empty(t, ren)
+	rec, ren = diffXML(t, xs, xs)
+	assert.Empty(t, rec)
+	assert.Empty(t, ren)
+
+	rec, ren = diffJSON(t, js, jsOther)
+	assert.Equal(t, []string{strings.Repeat("A[0]/", 63) + "A[0]"}, rec)
+	assert.Equal(t, rec, ren)
+	rec, ren = diffXML(t, xs, xsOther)
+	assert.Equal(t, []string{strings.Repeat("s/item[0]/", 64) + "v"}, rec)
+	assert.Equal(t, rec, ren)
+	assert.Less(t, time.Since(start), time.Second, "64-level sets diff in well under a second")
 }

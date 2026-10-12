@@ -27,7 +27,7 @@ type LoadKey struct{ Service, Action string }
 // under it, in both directions. Path is index-free
 // (vpcSet/item/dhcpOptionsId) and never carries a value. Cite names the
 // terraform-provider-aws v5.100.0 source file in which the field is never
-// read, spelt as TestLoadDiffIgnoreList's citeRE checks.
+// read, spelt as TestLoadDiffIgnoreList's ignoreCiteRE checks.
 type IgnoreEntry struct {
 	Key  LoadKey
 	Path string
@@ -40,59 +40,72 @@ var loadIgnores []IgnoreEntry
 
 func registerIgnores(entries ...IgnoreEntry) { loadIgnores = append(loadIgnores, entries...) }
 
-// alwaysIgnored names fields no diff compares, at any depth: request ids
-// and paging, which differ between any two answers.
-var alwaysIgnored = map[string]bool{
+// diffAlwaysIgnored names fields no diff compares, at any depth: request
+// ids and paging, which differ between any two answers.
+var diffAlwaysIgnored = map[string]bool{
 	"requestId": true, "RequestId": true, "ResponseMetadata": true,
 	"nextToken": true, "NextToken": true, "IsTruncated": true, "Marker": true,
 }
 
-// Tree is a parsed XML element or JSON value. A node with no value and no
-// kids is never built: an empty element is absent. A set member (an XML
-// item or member, a JSON array element) is compared with its same-named
-// siblings as a multiset.
+// nodeKind says how a node's value compares: byte-exact text, and for a
+// JSON scalar its type too.
+type nodeKind byte
+
+const (
+	nodeText       nodeKind = iota // XML text; a JSON object or array, which has none
+	nodeJSONString                 // a value even when empty
+	nodeJSONNumber                 // text is diffNumber's spelling
+	nodeJSONBool
+)
+
+// Tree is a parsed XML element or JSON value. A set member (an XML item
+// or member, a JSON array element) is compared with its same-named
+// siblings as a multiset. Diff treats a node with no value and no kids
+// (an empty element, a JSON null, {} or []) as absent: see prune.
 type Tree struct {
 	name   string
 	text   string
-	kind   byte // 0 for XML; 's', 'n' or 'b' for a JSON string, number or bool
+	kind   nodeKind
 	json   bool // name is a JSON key
 	member bool
 	kids   []*Tree
 }
 
+// valued says whether t holds a value of its own, which an XML element
+// with text or any JSON scalar does.
+func (t *Tree) valued() bool { return t.text != "" || t.kind != nodeText }
+
 var (
-	// jsonMemberName is how AWS's JSON protocols spell a structure member.
-	jsonMemberName = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
-	xmlMemberName  = regexp.MustCompile(`^@?[A-Za-z][A-Za-z0-9]*$`)
+	// diffJSONMemberName is how AWS's JSON protocols spell a structure member.
+	diffJSONMemberName = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
+	diffXMLMemberName  = regexp.MustCompile(`^@?[A-Za-z][A-Za-z0-9]*$`)
 )
 
-// label is how a path shows a name, and an allowlist: a name in its
+// diffLabel is how a path shows a name, and an allowlist: a name in its
 // protocol's member spelling shows as itself, any other as {key}. A
 // map-shaped member's keys (DynamoDB attribute names, tag keys) are
 // data; one spelt like a member (a tag key Owner) still shows, and no
 // loader's JSON 1.1 response has a map member.
-func label(name string, json bool) string {
+func diffLabel(name string, isJSON bool) string {
 	switch {
 	case name == "",
-		json && jsonMemberName.MatchString(name),
-		!json && xmlMemberName.MatchString(name):
+		isJSON && diffJSONMemberName.MatchString(name),
+		!isJSON && diffXMLMemberName.MatchString(name):
 		return name
 	}
 	return "{key}"
 }
 
-// valued says whether t holds a value of its own, which an XML element
-// with text or any JSON scalar does.
-func (t *Tree) valued() bool { return t.text != "" || t.kind != 0 }
+// diffXMLSpace is XML's whitespace: text made only of it is layout.
+const diffXMLSpace = " \t\r\n"
 
 // ParseXML parses body through encoding/xml tokens, so an element no
-// struct names is kept. Comments, processing instructions and namespace
-// declarations are dropped, whitespace-only text beside child elements
-// too; an attribute becomes an @name leaf.
+// struct names is kept. Comments, processing instructions, namespace
+// declarations and whitespace-only text are dropped; any other text is
+// kept byte-exact. An attribute becomes an @name leaf.
 func ParseXML(body []byte) (*Tree, error) {
 	dec := xml.NewDecoder(bytes.NewReader(body))
 	var stack []*Tree
-	var hasElems []bool // per stack entry: whether a child element opened, kept or not
 	var root *Tree
 	for {
 		tok, err := dec.Token()
@@ -100,33 +113,29 @@ func ParseXML(body []byte) (*Tree, error) {
 			break
 		}
 		if err != nil {
-			return nil, xmlError(err)
+			return nil, diffXMLError(err)
 		}
 		switch tok := tok.(type) {
 		case xml.StartElement:
 			if root != nil {
 				return nil, errors.New("body is not XML: more than one root element")
 			}
-			if len(stack) > 0 {
-				hasElems[len(stack)-1] = true
-			}
-			stack, hasElems = append(stack, xmlElement(tok)), append(hasElems, false)
+			stack = append(stack, diffXMLElement(tok))
 		case xml.CharData:
 			if len(stack) > 0 {
 				stack[len(stack)-1].text += string(tok)
-			} else if len(bytes.TrimSpace(tok)) > 0 {
+			} else if len(bytes.Trim(tok, diffXMLSpace)) > 0 {
 				return nil, errors.New("body is not XML: text outside the root element")
 			}
 		case xml.EndElement:
-			n, elems := stack[len(stack)-1], hasElems[len(stack)-1]
-			stack, hasElems = stack[:len(stack)-1], hasElems[:len(stack)-1]
-			if elems && strings.TrimSpace(n.text) == "" {
+			n := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if strings.Trim(n.text, diffXMLSpace) == "" {
 				n.text = ""
 			}
-			switch {
-			case len(stack) == 0:
+			if len(stack) == 0 {
 				root = n
-			case n.valued() || len(n.kids) > 0:
+			} else {
 				parent := stack[len(stack)-1]
 				parent.kids = append(parent.kids, n)
 			}
@@ -138,7 +147,7 @@ func ParseXML(body []byte) (*Tree, error) {
 	return root, nil
 }
 
-func xmlElement(tok xml.StartElement) *Tree {
+func diffXMLElement(tok xml.StartElement) *Tree {
 	n := &Tree{name: tok.Name.Local, member: tok.Name.Local == "item" || tok.Name.Local == "member"}
 	for _, a := range tok.Attr {
 		if a.Name.Space == "xmlns" || (a.Name.Space == "" && a.Name.Local == "xmlns") {
@@ -149,9 +158,9 @@ func xmlElement(tok xml.StartElement) *Tree {
 	return n
 }
 
-// xmlError keeps only the line of a syntax error: the decoder's message
-// can quote the body.
-func xmlError(err error) error {
+// diffXMLError keeps only the line of a syntax error: the decoder's
+// message can quote the body.
+func diffXMLError(err error) error {
 	var se *xml.SyntaxError
 	if errors.As(err, &se) {
 		return fmt.Errorf("body is not XML: syntax error on line %d", se.Line)
@@ -160,8 +169,8 @@ func xmlError(err error) error {
 }
 
 // ParseJSON parses a JSON 1.1 body through a generic walk with UseNumber,
-// so a key no struct names is kept. A null, an empty object and an empty
-// array are absent; an array's elements are set members named by its key.
+// so a key no struct names is kept. An array's elements are set members
+// named by its key.
 func ParseJSON(body []byte) (*Tree, error) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
@@ -176,35 +185,27 @@ func ParseJSON(body []byte) (*Tree, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, errors.New("body is not JSON: more than one value")
 	}
-	if root := jsonValue("", v); root != nil {
-		return root, nil
-	}
-	return &Tree{}, nil
+	return diffJSONValue("", v), nil
 }
 
-// jsonField returns the nodes a field holds: one set member per array
+// diffJSONField returns the nodes a field holds: one set member per array
 // element, or the value itself.
-func jsonField(name string, v any) []*Tree {
+func diffJSONField(name string, v any) []*Tree {
 	arr, ok := v.([]any)
 	if !ok {
-		if n := jsonValue(name, v); n != nil {
-			return []*Tree{n}
-		}
-		return nil
+		return []*Tree{diffJSONValue(name, v)}
 	}
-	var out []*Tree
-	for _, e := range arr {
-		if n := jsonValue(name, e); n != nil {
-			n.member = true
-			out = append(out, n)
-		}
+	out := make([]*Tree, len(arr))
+	for i, e := range arr {
+		out[i] = diffJSONValue(name, e)
+		out[i].member = true
 	}
 	return out
 }
 
-// jsonValue returns v as a node named name, or nil when v is absent. An
-// array reaches it only nested in another, so its elements are unnamed.
-func jsonValue(name string, v any) *Tree {
+// diffJSONValue returns v as a node named name. An array reaches it only
+// nested in another, so its elements are unnamed.
+func diffJSONValue(name string, v any) *Tree {
 	n := &Tree{name: name, json: true}
 	switch v := v.(type) {
 	case map[string]any:
@@ -214,27 +215,24 @@ func jsonValue(name string, v any) *Tree {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			n.kids = append(n.kids, jsonField(k, v[k])...)
+			n.kids = append(n.kids, diffJSONField(k, v[k])...)
 		}
 	case []any:
-		n.kids = jsonField("", v)
+		n.kids = diffJSONField("", v)
 	case string:
-		n.text, n.kind = v, 's'
+		n.text, n.kind = v, nodeJSONString
 	case json.Number:
-		n.text, n.kind = numberValue(v), 'n'
+		n.text, n.kind = diffNumber(v), nodeJSONNumber
 	case bool:
-		n.text, n.kind = strconv.FormatBool(v), 'b'
-	}
-	if !n.valued() && len(n.kids) == 0 {
-		return nil
+		n.text, n.kind = strconv.FormatBool(v), nodeJSONBool
 	}
 	return n
 }
 
-// numberValue spells a JSON number's exact value one way, digits and a
+// diffNumber spells a JSON number's exact value one way, digits and a
 // power of ten, so 1.7E9 and 1700000000 both give 17e8. It does no
 // arithmetic, so no exponent can make it slow.
-func numberValue(num json.Number) string {
+func diffNumber(num json.Number) string {
 	s, sign := string(num), ""
 	if strings.HasPrefix(s, "-") {
 		s, sign = s[1:], "-"
@@ -290,105 +288,173 @@ func (t *Tree) Subtree(path string, index int) *Tree {
 
 // MergePages returns the union of a paged list's pages: every set member
 // of every page, and the first page's value of any other field (the
-// paging fields differ by page, and Diff ignores them).
+// paging fields differ by page, and Diff ignores them). The pages of one
+// list share a root, so no page, a nil page or a page under another root
+// is an error.
 //
 // ponytail: a list whose items are not set members (S3's and Route53's
 // flattened lists) merges into one item; add a rule when a loader pages one.
-func MergePages(pages ...*Tree) *Tree {
-	var out *Tree
-	for _, p := range pages {
-		switch {
-		case p == nil:
-		case out == nil:
-			out = clone(p)
-		default:
-			merge(out, p)
-		}
+func MergePages(pages ...*Tree) (*Tree, error) {
+	if len(pages) == 0 {
+		return nil, errors.New("no pages to merge")
 	}
-	return out
+	if slices.Contains(pages, nil) {
+		return nil, errors.New("a page to merge is nil")
+	}
+	out := diffClone(pages[0])
+	for i, p := range pages[1:] {
+		if p.name != out.name || p.json != out.json {
+			return nil, fmt.Errorf("page %d's root %s is not page 0's %s", i+1, diffRootPath(p), diffRootPath(out))
+		}
+		diffMerge(out, p)
+	}
+	return out, nil
 }
 
-// merge adds src's kids to dst, which MergePages owns.
-func merge(dst, src *Tree) {
+// diffMerge adds src's kids to dst, which MergePages owns.
+func diffMerge(dst, src *Tree) {
 	for _, k := range src.kids {
 		i := -1
 		if !k.member {
 			i = slices.IndexFunc(dst.kids, func(d *Tree) bool { return !d.member && d.name == k.name })
 		}
 		if i < 0 {
-			dst.kids = append(dst.kids, clone(k))
+			dst.kids = append(dst.kids, diffClone(k))
 			continue
 		}
-		merge(dst.kids[i], k)
+		diffMerge(dst.kids[i], k)
 	}
 }
 
-func clone(t *Tree) *Tree {
+func diffClone(t *Tree) *Tree {
 	c := *t
 	c.kids = make([]*Tree, len(t.kids))
 	for i, k := range t.kids {
-		c.kids[i] = clone(k)
+		c.kids[i] = diffClone(k)
 	}
 	return &c
+}
+
+// diffRootPath is how a path names a root: its element name, or "." for
+// JSON's unnamed root, so no path is empty.
+func diffRootPath(t *Tree) string {
+	if t.name == "" {
+		return "."
+	}
+	return diffLabel(t.name, t.json)
 }
 
 // Diff compares a recorded body with fakeaws's rendering. It returns the
 // paths only the recording holds or whose value differs, and the paths
 // only the rendering holds, each sorted; equal is both empty. A path
-// names a set member's index in its own tree (vpcSet/item[2]/isDefault),
-// and a member with no counterpart is named whole. Two differently named
-// XML roots are named and nothing under them compared. key's ignore
-// entries apply here and nowhere else. A nil tree is an empty body.
+// runs from below the root and names a set member's index in its own
+// tree (vpcSet/item[2]/isDefault); a root's own value is named by
+// diffRootPath, and a member with no counterpart is named whole. Two
+// differently named XML roots are named and nothing under them compared.
+// diffAlwaysIgnored's fields and key's ignore entries (applied here and
+// nowhere else) are pruned from both trees before anything is compared.
+// A nil tree is an empty body.
 //
-// A path is names shown through label, never a value.
+// A path is names shown through diffLabel, never a value.
 func Diff(key LoadKey, recorded, rendered *Tree) (recordedOnly, renderedOnly []string) {
-	recorded, rendered = orEmpty(recorded), orEmpty(rendered)
+	recorded, rendered = diffOrEmpty(recorded), diffOrEmpty(rendered)
 	if recorded.name != "" && rendered.name != "" && recorded.name != rendered.name {
-		return []string{label(recorded.name, recorded.json)}, []string{label(rendered.name, rendered.json)}
+		return []string{diffRootPath(recorded)}, []string{diffRootPath(rendered)}
 	}
-	d := differ{ignore: map[string]bool{}}
+	d := treeDiffer{ignore: map[string]bool{}, forms: map[*Tree]string{}}
 	for _, e := range loadIgnores {
 		if e.Key == key {
 			d.ignore[e.Path] = true
 		}
 	}
-	recordedOnly, renderedOnly = d.node(recorded, rendered, "")
+	recordedOnly, renderedOnly = d.node(d.pruneRoot(recorded), d.pruneRoot(rendered))
+	for i, p := range recordedOnly {
+		if p == "" {
+			recordedOnly[i] = diffRootPath(recorded)
+		}
+	}
+	for i, p := range renderedOnly {
+		if p == "" {
+			renderedOnly[i] = diffRootPath(rendered)
+		}
+	}
 	sort.Strings(recordedOnly)
 	sort.Strings(renderedOnly)
 	return recordedOnly, renderedOnly
 }
 
-func orEmpty(t *Tree) *Tree {
+func diffOrEmpty(t *Tree) *Tree {
 	if t == nil {
 		return &Tree{}
 	}
 	return t
 }
 
-type differ struct{ ignore map[string]bool }
+type treeDiffer struct {
+	ignore map[string]bool
+	forms  map[*Tree]string // each pruned node's form, built once
+}
 
-type groupKey struct {
+// pruneRoot is prune for a root, which stays, emptied, when nothing under
+// it is compared.
+func (d treeDiffer) pruneRoot(t *Tree) *Tree {
+	if p := d.prune(t, ""); p != nil {
+		return p
+	}
+	return &Tree{name: t.name, json: t.json}
+}
+
+// prune returns a copy of t without the fields Diff never compares and
+// without any node that holds no value and no kids, before or after
+// that, or nil when nothing is left: an empty element is absent. shape is
+// t's index-free path, which ignore entries name.
+func (d treeDiffer) prune(t *Tree, shape string) *Tree {
+	c := *t
+	c.kids = nil
+	for _, k := range t.kids {
+		kShape := diffJoin(shape, k.name)
+		if diffAlwaysIgnored[k.name] || d.ignore[kShape] {
+			continue
+		}
+		if p := d.prune(k, kShape); p != nil {
+			c.kids = append(c.kids, p)
+		}
+	}
+	if !c.valued() && len(c.kids) == 0 {
+		return nil
+	}
+	return &c
+}
+
+type diffGroupKey struct {
 	name   string
 	json   bool
 	member bool
 }
 
-// kids groups t's compared kids by name. shape is t's index-free path.
-func (d differ) kids(t *Tree, shape string) map[groupKey][]*Tree {
-	out := map[groupKey][]*Tree{}
+// diffGroups groups t's kids by name, the groups in a fixed order.
+func diffGroups(t *Tree) (map[diffGroupKey][]*Tree, []diffGroupKey) {
+	groups := map[diffGroupKey][]*Tree{}
+	var order []diffGroupKey
 	for _, k := range t.kids {
-		if alwaysIgnored[k.name] || d.ignore[join(shape, k.name)] {
-			continue
+		g := diffGroupKey{k.name, k.json, k.member}
+		if _, ok := groups[g]; !ok {
+			order = append(order, g)
 		}
-		g := groupKey{k.name, k.json, k.member}
-		out[g] = append(out[g], k)
+		groups[g] = append(groups[g], k)
 	}
-	return out
+	sort.Slice(order, func(i, j int) bool {
+		if order[i].name != order[j].name {
+			return order[i].name < order[j].name
+		}
+		return !order[i].member && order[j].member
+	})
+	return groups, order
 }
 
-// node compares a recorded node with a rendered one at index-free path
-// shape, returning paths relative to the two.
-func (d differ) node(a, b *Tree, shape string) (rec, ren []string) {
+// node compares a recorded node with a rendered one, returning paths
+// relative to the two, "" for the nodes' own values.
+func (d treeDiffer) node(a, b *Tree) (rec, ren []string) {
 	if a.text != b.text || a.kind != b.kind {
 		if a.valued() {
 			rec = append(rec, "")
@@ -397,18 +463,19 @@ func (d differ) node(a, b *Tree, shape string) (rec, ren []string) {
 			ren = append(ren, "")
 		}
 	}
-	as, bs := d.kids(a, shape), d.kids(b, shape)
-	for g := range bs {
+	as, order := diffGroups(a)
+	bs, bOrder := diffGroups(b)
+	for _, g := range bOrder {
 		if _, ok := as[g]; !ok {
-			as[g] = nil
+			order = append(order, g)
 		}
 	}
-	for g, ak := range as {
+	for _, g := range order {
 		var r, n []string
 		if g.member {
-			r, n = d.members(label(g.name, g.json), ak, bs[g], join(shape, g.name))
+			r, n = d.members(diffLabel(g.name, g.json), as[g], bs[g])
 		} else {
-			r, n = d.fields(label(g.name, g.json), ak, bs[g], join(shape, g.name))
+			r, n = d.fields(diffLabel(g.name, g.json), as[g], bs[g])
 		}
 		rec, ren = append(rec, r...), append(ren, n...)
 	}
@@ -417,7 +484,7 @@ func (d differ) node(a, b *Tree, shape string) (rec, ren []string) {
 
 // fields pairs same-named kids that are not set members by position,
 // naming the index only when a name repeats.
-func (d differ) fields(name string, as, bs []*Tree, shape string) (rec, ren []string) {
+func (d treeDiffer) fields(name string, as, bs []*Tree) (rec, ren []string) {
 	for i := range max(len(as), len(bs)) {
 		seg := name
 		if len(as) > 1 || len(bs) > 1 {
@@ -430,8 +497,8 @@ func (d differ) fields(name string, as, bs []*Tree, shape string) (rec, ren []st
 		if i < len(bs) {
 			b = bs[i]
 		}
-		r, n := d.node(a, b, shape)
-		rec, ren = append(rec, under(seg, r)...), append(ren, under(seg, n)...)
+		r, n := d.node(a, b)
+		rec, ren = append(rec, diffUnder(seg, r)...), append(ren, diffUnder(seg, n)...)
 	}
 	return rec, ren
 }
@@ -443,16 +510,16 @@ func (d differ) fields(name string, as, bs []*Tree, shape string) (rec, ren []st
 //
 // ponytail: O(n·m) node diffs over the members no equal one pairs; fine
 // for one account's read, index members by id if loads reach thousands.
-func (d differ) members(name string, as, bs []*Tree, shape string) (rec, ren []string) {
+func (d treeDiffer) members(name string, as, bs []*Tree) (rec, ren []string) {
 	seg := func(i int) string { return fmt.Sprintf("%s[%d]", name, i) }
 	usedA, usedB := make([]bool, len(as)), make([]bool, len(bs))
 	byForm := map[string][]int{}
 	for j, b := range bs {
-		f := d.form(b, shape)
+		f := d.form(b)
 		byForm[f] = append(byForm[f], j)
 	}
 	for i, a := range as {
-		f := d.form(a, shape)
+		f := d.form(a)
 		if js := byForm[f]; len(js) > 0 {
 			usedA[i], usedB[js[0]], byForm[f] = true, true, js[1:]
 		}
@@ -465,7 +532,7 @@ func (d differ) members(name string, as, bs []*Tree, shape string) (rec, ren []s
 	for i, a := range as {
 		for j, b := range bs {
 			if !usedA[i] && !usedB[j] {
-				r, n := d.node(a, b, shape)
+				r, n := d.node(a, b)
 				pairs = append(pairs, pair{i, j, r, n})
 			}
 		}
@@ -478,7 +545,7 @@ func (d differ) members(name string, as, bs []*Tree, shape string) (rec, ren []s
 			continue
 		}
 		usedA[p.i], usedB[p.j] = true, true
-		rec, ren = append(rec, under(seg(p.i), p.rec)...), append(ren, under(seg(p.j), p.ren)...)
+		rec, ren = append(rec, diffUnder(seg(p.i), p.rec)...), append(ren, diffUnder(seg(p.j), p.ren)...)
 	}
 	for i, used := range usedA {
 		if !used {
@@ -493,34 +560,49 @@ func (d differ) members(name string, as, bs []*Tree, shape string) (rec, ren []s
 	return rec, ren
 }
 
-// form spells t under the rules node compares by, so two members have
-// the same form exactly when node finds no difference between them.
-func (d differ) form(t *Tree, shape string) string {
-	parts := []string{string(t.kind) + strconv.Quote(t.text)}
-	for g, ks := range d.kids(t, shape) {
-		forms := make([]string, len(ks))
-		for i, k := range ks {
-			forms[i] = d.form(k, join(shape, g.name))
+// form spells a pruned node by the rules node compares by, so two nodes
+// have the same form exactly when node finds no difference between them.
+// Every part is length-prefixed, never quoted, so a child's form nests in
+// its parent's as it is and a form grows linearly with depth. Each node's
+// form is built once.
+func (d treeDiffer) form(t *Tree) string {
+	if f, ok := d.forms[t]; ok {
+		return f
+	}
+	var b strings.Builder
+	part := func(s string) { b.WriteString(strconv.Itoa(len(s)) + ":" + s) }
+	b.WriteByte(byte(t.kind))
+	part(t.text)
+	groups, order := diffGroups(t)
+	for _, g := range order {
+		forms := make([]string, len(groups[g]))
+		for i, k := range groups[g] {
+			forms[i] = d.form(k)
 		}
 		if g.member {
 			sort.Strings(forms)
 		}
-		parts = append(parts, fmt.Sprintf("%q %t %q", g.name, g.member, forms))
+		part(g.name)
+		b.WriteString(strconv.FormatBool(g.member) + strconv.Itoa(len(forms)) + ":")
+		for _, f := range forms {
+			part(f)
+		}
 	}
-	sort.Strings(parts[1:])
-	return strings.Join(parts, ",")
+	f := b.String()
+	d.forms[t] = f
+	return f
 }
 
-// under prefixes each path relative to seg with seg.
-func under(seg string, rels []string) []string {
+// diffUnder prefixes each path relative to seg with seg.
+func diffUnder(seg string, rels []string) []string {
 	out := make([]string, len(rels))
 	for i, r := range rels {
-		out[i] = join(seg, r)
+		out[i] = diffJoin(seg, r)
 	}
 	return out
 }
 
-func join(parent, child string) string {
+func diffJoin(parent, child string) string {
 	switch {
 	case parent == "":
 		return child
