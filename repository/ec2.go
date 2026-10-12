@@ -134,6 +134,18 @@ var ec2NetworkMigrations = []string{
 		created_at           TEXT NOT NULL,
 		PRIMARY KEY (account_id, allocation_id)
 	)`,
+	`CREATE TABLE IF NOT EXISTS availability_zones (
+		account_id           TEXT NOT NULL,
+		region               TEXT NOT NULL,
+		zone_name            TEXT NOT NULL,
+		zone_id              TEXT NOT NULL,
+		state                TEXT NOT NULL,
+		opt_in_status        TEXT NOT NULL,
+		zone_type            TEXT NOT NULL,
+		group_name           TEXT NOT NULL,
+		network_border_group TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, zone_name)
+	)`,
 }
 
 func init() {
@@ -147,6 +159,7 @@ func init() {
 		"ec2_security_groups",
 		"ec2_subnets",
 		"ec2_vpcs",
+		"availability_zones",
 	})
 }
 
@@ -1133,6 +1146,51 @@ func (r *Repository) ListEIPs(account, region string) ([]*EC2EIP, error) {
 			return nil, err
 		}
 		out = append(out, &eip)
+	}
+	return out, rows.Err()
+}
+
+// ----- Availability zones -----
+
+// AvailabilityZone is one zone of an account's region, as fakeaws-
+// loader records it from DescribeAvailabilityZones. The table is
+// account data, so isEmpty counts its rows.
+type AvailabilityZone struct {
+	Region             string
+	ZoneName           string
+	ZoneID             string
+	State              string
+	OptInStatus        string
+	ZoneType           string
+	GroupName          string
+	NetworkBorderGroup string
+}
+
+// PutAvailabilityZone stores z under account, replacing the row for
+// the same region and zone name. fakeaws-loader is its caller.
+func (r *Repository) PutAvailabilityZone(account string, z AvailabilityZone) error {
+	_, err := r.db.Exec(`INSERT OR REPLACE INTO availability_zones
+		(account_id, region, zone_name, zone_id, state, opt_in_status, zone_type, group_name, network_border_group)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		account, z.Region, z.ZoneName, z.ZoneID, z.State, z.OptInStatus, z.ZoneType, z.GroupName, z.NetworkBorderGroup)
+	return err
+}
+
+// ListAvailabilityZones returns account's zones in region by zone name.
+func (r *Repository) ListAvailabilityZones(account, region string) ([]AvailabilityZone, error) {
+	rows, err := r.db.Query(`SELECT region, zone_name, zone_id, state, opt_in_status, zone_type, group_name, network_border_group
+		FROM availability_zones WHERE account_id = ? AND region = ? ORDER BY zone_name`, account, region)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AvailabilityZone
+	for rows.Next() {
+		var z AvailabilityZone
+		if err := rows.Scan(&z.Region, &z.ZoneName, &z.ZoneID, &z.State, &z.OptInStatus, &z.ZoneType, &z.GroupName, &z.NetworkBorderGroup); err != nil {
+			return nil, err
+		}
+		out = append(out, z)
 	}
 	return out, rows.Err()
 }

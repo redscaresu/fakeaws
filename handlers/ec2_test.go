@@ -1940,16 +1940,16 @@ func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "an unmodelled filter is refused, not ignored")
 }
 
-// ec2DescribeArms are the Describe names in handleEC2's case arms at
-// fakeaws 1993583, ec2DescribeExempt the three among them that take no
-// Filter in the AWS API.
+// ec2DescribeArms are the Describe names in handleEC2's case arms,
+// ec2DescribeExempt the three among them that take no Filter in the
+// AWS API.
 var (
 	ec2DescribeArms = []string{
 		"DescribeVpcs", "DescribeVpcAttribute", "DescribeSubnets", "DescribeNetworkInterfaces",
 		"DescribeInternetGateways", "DescribeRouteTables", "DescribeAddresses", "DescribeAddressesAttribute",
 		"DescribeInstances", "DescribeKeyPairs", "DescribeImages", "DescribeVolumes", "DescribeNatGateways",
 		"DescribeSnapshots", "DescribeLaunchTemplates", "DescribeInstanceTypes", "DescribeTags",
-		"DescribeInstanceAttribute", "DescribeSecurityGroups",
+		"DescribeInstanceAttribute", "DescribeSecurityGroups", "DescribeAvailabilityZones",
 	}
 	ec2DescribeExempt = []string{"DescribeVpcAttribute", "DescribeInstanceAttribute", "DescribeAddressesAttribute"}
 )
@@ -2875,4 +2875,197 @@ func TestEC2_DescribeKeyPairsFilters(t *testing.T) {
 		assert.Equal(t, "InvalidKeyPair.NotFound", extractEC2Tag(body, "Code"), param)
 		assert.Contains(t, extractEC2Tag(body, "Message"), key, param)
 	}
+}
+
+// zoneXML is one availabilityZoneInfo item.
+type zoneXML struct {
+	Name   string `xml:"zoneName"`
+	ID     string `xml:"zoneId"`
+	State  string `xml:"zoneState"`
+	Region string `xml:"regionName"`
+	OptIn  string `xml:"optInStatus"`
+	Type   string `xml:"zoneType"`
+	Group  string `xml:"groupName"`
+	Border string `xml:"networkBorderGroup"`
+}
+
+func describeZones(t *testing.T, srv *httptest.Server, region string, params url.Values) []zoneXML {
+	t.Helper()
+	resp, body := ec2Call(t, srv, region, "DescribeAvailabilityZones", params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s %v: %s", region, params, body)
+	var out struct {
+		Zones []zoneXML `xml:"availabilityZoneInfo>item"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	return out.Zones
+}
+
+func zoneNames(zones []zoneXML) []string {
+	out := []string{}
+	for _, z := range zones {
+		out = append(out, z.Name)
+	}
+	return out
+}
+
+func zoneFilter(name, value string) url.Values {
+	return url.Values{"Filter.1.Name": {name}, "Filter.1.Value.1": {value}}
+}
+
+// subnetZoneID creates a subnet in zone of tagRegion and returns the
+// availabilityZoneId DescribeSubnets answers for it, the same as
+// CreateSubnet's.
+func subnetZoneID(t *testing.T, srv *httptest.Server, zone string) string {
+	t.Helper()
+	params := url.Values{"VpcId": {tagVPC(t, srv)}, "CidrBlock": {"10.0.1.0/24"}, "AvailabilityZone": {zone}}
+	resp, created := ec2Call(t, srv, tagRegion, "CreateSubnet", params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateSubnet: %s", created)
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeSubnets", url.Values{"SubnetId.1": {extractEC2Tag(created, "subnetId")}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeSubnets: %s", body)
+	id := extractEC2Tag(body, "availabilityZoneId")
+	assert.Equal(t, id, extractEC2Tag(created, "availabilityZoneId"), "CreateSubnet and DescribeSubnets")
+	return id
+}
+
+// fixedZone is the zone an unloaded database answers for name.
+func fixedZone(name, region string) zoneXML {
+	return zoneXML{name, name + "-az1", "available", region, "opt-in-not-required", "availability-zone", region, region}
+}
+
+// An unloaded database answers <region>a-c, and a subnet in one of
+// them reports that zone's id.
+//
+// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func TestEC2_DescribeAvailabilityZones(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	zones := describeZones(t, srv, "us-east-1", nil)
+	assert.Equal(t, []zoneXML{
+		fixedZone("us-east-1a", "us-east-1"), fixedZone("us-east-1b", "us-east-1"), fixedZone("us-east-1c", "us-east-1"),
+	}, zones)
+	assert.Equal(t, []string{"eu-west-2a", "eu-west-2b", "eu-west-2c"}, zoneNames(describeZones(t, srv, "eu-west-2", nil)))
+	require.NotEmpty(t, zones)
+	assert.Equal(t, zones[0].ID, subnetZoneID(t, srv, "us-east-1a"), "a subnet in us-east-1a")
+
+	for _, c := range []struct {
+		params url.Values
+		want   []string
+	}{
+		{zoneFilter("state", "available"), []string{"us-east-1a", "us-east-1b", "us-east-1c"}},
+		{zoneFilter("state", "impaired"), []string{}},
+		{zoneFilter("zone-name", "us-east-1b"), []string{"us-east-1b"}},
+		{zoneFilter("zone-id", "us-east-1c-az1"), []string{"us-east-1c"}},
+		{zoneFilter("region-name", "eu-west-2"), []string{}},
+		{url.Values{"ZoneName.1": {"us-east-1a"}, "ZoneName.2": {"us-east-1c"}}, []string{"us-east-1a", "us-east-1c"}},
+		{url.Values{"ZoneId.1": {"us-east-1b-az1"}}, []string{"us-east-1b"}},
+	} {
+		assert.Equal(t, c.want, zoneNames(describeZones(t, srv, "us-east-1", c.params)), "%v", c.params)
+	}
+
+	for param, value := range map[string]string{"ZoneName.1": "us-east-1z", "ZoneId.1": "use1-az99"} {
+		resp, body := ec2Call(t, srv, "us-east-1", "DescribeAvailabilityZones", url.Values{param: {value}})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s: %s", param, body)
+		assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"), param)
+		assert.Contains(t, extractEC2Tag(body, "Message"), value, param)
+	}
+}
+
+// storedZone is an AZ row as fakeaws-loader writes one; its group name
+// is one the fixed set never answers.
+func storedZone(name, id, optIn string) repository.AvailabilityZone {
+	return repository.AvailabilityZone{
+		Region: "us-east-1", ZoneName: name, ZoneID: id, State: "available", OptInStatus: optIn,
+		ZoneType: "availability-zone", GroupName: "us-east-1-zg-1", NetworkBorderGroup: "us-east-1",
+	}
+}
+
+func putZones(t *testing.T, app *handlers.Application, zones ...repository.AvailabilityZone) {
+	t.Helper()
+	for _, z := range zones {
+		require.NoError(t, app.Repository().PutAvailabilityZone(awsproto.FakeAccountID, z))
+	}
+}
+
+func TestContract_ec2_az_loaded_never_fixed_set(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	markLoaded(t, dbPath, true)
+	app, srv := newRecordingApp(t, handlers.Options{DBPath: dbPath})
+	putZones(t, app, storedZone("us-east-1a", "use1-az6", "opt-in-not-required"), storedZone("us-east-1d", "use1-az4", "opt-in-not-required"))
+
+	assert.Equal(t, []zoneXML{
+		{"us-east-1a", "use1-az6", "available", "us-east-1", "opt-in-not-required", "availability-zone", "us-east-1-zg-1", "us-east-1"},
+		{"us-east-1d", "use1-az4", "available", "us-east-1", "opt-in-not-required", "availability-zone", "us-east-1-zg-1", "us-east-1"},
+	}, describeZones(t, srv, "us-east-1", nil), "the stored rows, never the fixed set")
+	assert.Equal(t, "answered-from-rows", lastClass(t, srv))
+	assert.Equal(t, "use1-az6", subnetZoneID(t, srv, "us-east-1a"), "a subnet in a stored zone")
+	assert.Empty(t, subnetZoneID(t, srv, "us-east-1b"), "a subnet in a zone with no row: never us-east-1b-az1")
+
+	assert.Empty(t, describeZones(t, srv, "eu-west-2", nil), "no rows for eu-west-2")
+	assert.Equal(t, "empty-collection", lastClass(t, srv), "eu-west-2")
+	assert.Empty(t, describeZones(t, srv, "eu-west-2", url.Values{"ZoneName.1": {"eu-west-2a"}}), "no rows cannot refuse a zone")
+	assert.Equal(t, "empty-collection", lastClass(t, srv), "eu-west-2 ZoneName.1")
+
+	_, err := app.Repository().DB().Exec(`ALTER TABLE identity DROP COLUMN loaded`)
+	require.NoError(t, err)
+	resp, body := ec2Call(t, srv, "us-east-1", "DescribeAvailabilityZones", nil)
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "an unreadable loaded flag: %s", body)
+	assert.NotContains(t, string(body), "<zoneName>", "no fixed zone")
+}
+
+// A loaded row whose opt-in-status is not-opted-in is answered only
+// with AllAvailabilityZones=true, as in AWS.
+func TestEC2_DescribeAvailabilityZonesAllAvailabilityZones(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	markLoaded(t, dbPath, true)
+	app, srv := newTestApp(t, dbPath)
+	putZones(t, app, storedZone("us-east-1a", "use1-az6", "opt-in-not-required"), storedZone("us-east-1-bos-1a", "use1-bos1-az1", "not-opted-in"))
+
+	assert.Equal(t, []string{"us-east-1a"}, zoneNames(describeZones(t, srv, "us-east-1", nil)), "absent")
+	assert.Equal(t, []string{"us-east-1a"}, zoneNames(describeZones(t, srv, "us-east-1", url.Values{"AllAvailabilityZones": {"false"}})), "false")
+	assert.Equal(t, []string{"us-east-1-bos-1a", "us-east-1a"},
+		zoneNames(describeZones(t, srv, "us-east-1", url.Values{"AllAvailabilityZones": {"true"}})), "true")
+
+	resp, body := ec2Call(t, srv, "us-east-1", "DescribeAvailabilityZones", url.Values{"AllAvailabilityZones": {"True"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"))
+}
+
+// CreateSubnet places a subnet by AvailabilityZoneId when it is one of
+// the region's zone ids (ec2Zones), and refuses any other id, or one
+// that disagrees with AvailabilityZone, rather than ignore it.
+func TestEC2_CreateSubnetAvailabilityZoneId(t *testing.T) {
+	createIn := func(srv *httptest.Server, params url.Values) (*http.Response, []byte) {
+		params.Set("VpcId", tagVPC(t, srv))
+		params.Set("CidrBlock", "10.0.1.0/24")
+		return ec2Call(t, srv, tagRegion, "CreateSubnet", params)
+	}
+	srv := newTestServer(t, ":memory:")
+	for _, params := range []url.Values{
+		{"AvailabilityZoneId": {"us-east-1b-az1"}},
+		{"AvailabilityZoneId": {"us-east-1b-az1"}, "AvailabilityZone": {"us-east-1b"}},
+	} {
+		resp, body := createIn(srv, params)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%v: %s", params, body)
+		assert.Equal(t, "us-east-1b", extractEC2Tag(body, "availabilityZone"), "%v", params)
+		assert.Equal(t, "us-east-1b-az1", extractEC2Tag(body, "availabilityZoneId"), "%v", params)
+	}
+	for _, params := range []url.Values{
+		{"AvailabilityZoneId": {"use1-az1"}},
+		{"AvailabilityZoneId": {""}},
+		{"AvailabilityZoneId": {"us-east-1b-az1"}, "AvailabilityZone": {"us-east-1a"}},
+	} {
+		resp, body := createIn(srv, params)
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%v: %s", params, body)
+		assert.Equal(t, "CreateSubnet: not modelled by fakeaws: AvailabilityZoneId", extractEC2Tag(body, "Message"), "%v", params)
+	}
+	_, body := ec2Call(t, srv, tagRegion, "DescribeSubnets", nil)
+	assert.Equal(t, 2, strings.Count(string(body), "<subnetId>"), "a refusal creates nothing: %s", body)
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	markLoaded(t, dbPath, true)
+	app, loaded := newTestApp(t, dbPath)
+	putZones(t, app, storedZone("us-east-1d", "use1-az4", "opt-in-not-required"))
+	resp, body := createIn(loaded, url.Values{"AvailabilityZoneId": {"use1-az4"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "loaded: %s", body)
+	assert.Equal(t, "us-east-1d", extractEC2Tag(body, "availabilityZone"), "loaded")
+	assert.Equal(t, "use1-az4", extractEC2Tag(body, "availabilityZoneId"), "loaded")
 }

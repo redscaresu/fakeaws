@@ -45,9 +45,10 @@ const (
 	classFilterRefused requestClass = "filter-refused"
 
 	// CRITICAL[request-log-empty-collection]: only ec2DescribeNone, the
-	// Describe of a resource fakeaws never creates, marks
-	// empty-collection. Other always-empty answers, and an empty answer
-	// read from rows, stay answered-from-rows.
+	// Describe of a resource fakeaws never creates, and
+	// DescribeAvailabilityZones on a loaded database with no zone rows
+	// for the region mark empty-collection. Other always-empty answers,
+	// and an empty answer read from rows, stay answered-from-rows.
 	classEmptyCollection requestClass = "empty-collection"
 )
 

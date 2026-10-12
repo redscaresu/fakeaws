@@ -1648,3 +1648,13 @@ func TestRegressionDescribeImagesNameFilter(t *testing.T) {
 	assert.ElementsMatch(t, []string{"ami-0ubuntu2004", "ami-0ubuntu2204"},
 		describeImageIDs(t, srv, byName("099720109477", "ubuntu/images/*")))
 }
+
+// TestRegressionDescribeAvailabilityZonesAnswered: DescribeAvailabilityZones
+// fell to handleEC2's default arm and answered 404, so no config with
+// data.aws_availability_zones could plan. It answers the region's zones,
+// and state=available, the data source's default filter, selects them.
+func TestRegressionDescribeAvailabilityZonesAnswered(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	assert.Equal(t, []string{"eu-west-2a", "eu-west-2b", "eu-west-2c"},
+		zoneNames(describeZones(t, srv, "eu-west-2", zoneFilter("state", "available"))))
+}
