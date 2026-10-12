@@ -2011,6 +2011,38 @@ func TestContract_ami_fixtures_not_seeded_when_loaded(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "RunInstances %s: %s", loadedAMI, body)
 }
 
+// The loader writes the public al2023 parameter as a row (PutParameter
+// refuses aws-prefixed names). GetParameter reads it under the same
+// account-less ARN as the unloaded answer; it is not listed or deletable.
+func TestAMIFixtures_LoadedAL2023ParameterRow(t *testing.T) {
+	const loadedAMI = "ami-0123456789abcdef0"
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	markLoaded(t, dbPath, true)
+	app, srv := newTestApp(t, dbPath)
+	_, err := app.Repository().PutSSMParameter(awsproto.FakeAccountID, &repository.SSMParameterPut{
+		Name: al2023Parameter, Type: "String", Value: loadedAMI, Region: "us-east-1", Now: "2026-10-12T00:00:00Z",
+	}, false)
+	require.NoError(t, err)
+
+	resp, body := ssmCall(t, srv, "GetParameter", fmt.Sprintf(`{"Name":%q}`, al2023Parameter))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GetParameter: %s", body)
+	var got struct{ Parameter struct{ ARN, Value string } }
+	require.NoError(t, json.Unmarshal(body, &got))
+	assert.Equal(t, loadedAMI, got.Parameter.Value)
+	assert.Equal(t, "arn:aws:ssm:us-east-1::parameter"+al2023Parameter, got.Parameter.ARN)
+
+	resp, body = ssmCall(t, srv, "DescribeParameters", `{}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeParameters: %s", body)
+	assert.NotContains(t, string(body), al2023Parameter, "DescribeParameters lists the public parameter")
+
+	resp, body = ssmCall(t, srv, "DeleteParameter", fmt.Sprintf(`{"Name":%q}`, al2023Parameter))
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "DeleteParameter: %s", body)
+	assert.Contains(t, string(body), "ParameterNotFound")
+	status, value, body := ssmGetValue(t, srv, al2023Parameter)
+	assert.Equal(t, http.StatusOK, status, "GetParameter after DeleteParameter: %s", body)
+	assert.Equal(t, loadedAMI, value, "DeleteParameter left the loader's row")
+}
+
 // Marking a database loaded deletes nothing: removing the fixtures
 // seeded before is fakeaws-loader's job, in its replace transaction.
 func TestAMIFixtures_MarkedLoadedLaterKeepsSeededFixtures(t *testing.T) {
@@ -2034,9 +2066,11 @@ func TestAMIFixtures_LoadedFlagLifecycle(t *testing.T) {
 
 	resp, body := doPost(t, srv, "/mock/snapshot")
 	require.Equal(t, http.StatusOK, resp.StatusCode, "snapshot: %s", body)
+	require.NoError(t, app.Repository().SetLoaded(false, awsproto.FakeAccountID))
+	require.False(t, appLoaded(t, app))
 	resp, body = doPost(t, srv, "/mock/restore")
 	require.Equal(t, http.StatusOK, resp.StatusCode, "restore: %s", body)
-	assert.True(t, appLoaded(t, app), "restore keeps the flag")
+	assert.True(t, appLoaded(t, app), "restore brings back the snapshot's flag")
 
 	require.NoError(t, app.Close())
 	app, srv = newTestApp(t, dbPath)

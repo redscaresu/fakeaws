@@ -23,8 +23,9 @@ import (
 
 // al2023ParameterName is the read-only AWS public parameter naming the
 // latest Amazon Linux 2023 AMI. It resolves to AL2023AMIID in every
-// region and is never stored, so it is not listed or deletable. On a
-// loaded database it is the loader's row, if any, like any other.
+// region and is never stored. On a loaded database GetParameter reads
+// the loader's row (ParameterNotFound when there is none), still under
+// the public, account-less ARN. Either way it is not listed or deletable.
 const al2023ParameterName = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 
 var ssmParameterTypes = []string{"String", "StringList", "SecureString"}
@@ -175,9 +176,13 @@ func (app *Application) ssmGetParameter(w http.ResponseWriter, account, region s
 		ssmNotFound(w, in.Name, err)
 		return
 	}
+	arnAccount := account
+	if p.Name == al2023ParameterName {
+		arnAccount = "" // public: no account in the ARN, as when unloaded
+	}
 	// SecureString values come back as stored, WithDecryption or not.
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameter": map[string]any{
-		"ARN":  awsproto.BuildSSMParameterARN(region, account, p.Name),
+		"ARN":  awsproto.BuildSSMParameterARN(region, arnAccount, p.Name),
 		"Name": p.Name, "Type": p.Type, "DataType": p.DataType,
 		"Value": p.Value, "Version": p.Version,
 		"LastModifiedDate": secretEpoch(p.LastModified),
@@ -218,6 +223,9 @@ func (app *Application) ssmDescribeParameters(w http.ResponseWriter, account, re
 	}
 	out := []map[string]any{}
 	for _, p := range params {
+		if p.Name == al2023ParameterName {
+			continue // a loaded public parameter is not the account's
+		}
 		if slices.ContainsFunc(in.ParameterFilters, func(f filter) bool { return !slices.Contains(f.Values, p.Name) }) {
 			continue
 		}
@@ -246,6 +254,11 @@ func ssmParameterMetadata(account, region string, p repository.SSMParameter) map
 func (app *Application) ssmDeleteParameter(w http.ResponseWriter, account, region string, body []byte) {
 	var in struct{ Name string }
 	if !ssmDecode(w, body, &in) {
+		return
+	}
+	if in.Name == al2023ParameterName {
+		// Never deletable: a loaded row stays, answered as when unloaded.
+		ssmNotFound(w, in.Name, models.ErrNotFound)
 		return
 	}
 	if err := app.repo.DeleteSSMParameter(account, region, in.Name); err != nil {
