@@ -212,6 +212,10 @@ var stateBreaks = []stateBreak{
 		}},
 
 	{read: "ListSSMParameters", service: "ssm", breakSQL: `DROP TABLE ssm_parameters`},
+
+	{read: "ListKMSKeys", service: "kms", breakSQL: `DROP TABLE kms_keys`},
+	{read: "ListKMSKeys", name: "kms key data JSON", service: "kms", breakSQL: `UPDATE kms_keys SET data = 'not json'`,
+		seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) { kmsCreateKey(t, srv, "fc") }},
 }
 
 // TestAdminMockState_UnreadableTableIs500: every read behind a /mock/state
@@ -833,6 +837,7 @@ func TestContract_identity_change_refused_on_non_empty_db(t *testing.T) {
 			resp, body := ec2Call(t, srv, "us-east-1", "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
 			require.Equal(t, http.StatusOK, resp.StatusCode, "CreateVpc: %s", body)
 		},
+		"kms key": func(t *testing.T, srv *httptest.Server) { mustOK(t)(kmsCall(t, srv, "us-east-1", "CreateKey", `{}`)) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			app, srv := newTestApp(t, ":memory:")
@@ -1176,24 +1181,6 @@ func TestMockReset_RacesCreate(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, queues, "iteration %d: a queue was created under the reset account", i)
 	}
-}
-
-// TestKMS_KeyKeepsItsAccount: a key made before an identity change
-// keeps its account in DescribeKey and in its policy's root principal.
-func TestKMS_KeyKeepsItsAccount(t *testing.T) {
-	_, srv := newTestApp(t, ":memory:")
-	const region = "us-east-1"
-	var key struct{ KeyMetadata struct{ KeyId string } }
-	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, region, "CreateKey", `{}`)), &key))
-	mustOK(t)(doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+otherAccount+`"}`))
-
-	keyID := `{"KeyId":"` + key.KeyMetadata.KeyId + `"}`
-	var described struct{ KeyMetadata struct{ AWSAccountId string } }
-	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, region, "DescribeKey", keyID)), &described))
-	assert.Equal(t, awsproto.FakeAccountID, described.KeyMetadata.AWSAccountId)
-	var policy struct{ Policy string }
-	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, region, "GetKeyPolicy", keyID)), &policy))
-	assert.Contains(t, policy.Policy, `"Principal":{"AWS":"arn:aws:iam::`+awsproto.FakeAccountID+`:root"}`)
 }
 
 type postResult struct {
