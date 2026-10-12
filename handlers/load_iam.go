@@ -8,8 +8,9 @@ package handlers
 //   - role-policy: GetRolePolicy's inline policy, id "<role>/<policy>"
 //     (an IAM name holds no '/'), its document stored URL-decoded.
 //   - role-policy-name: a ListRolePolicies name, id as role-policy's. It
-//     writes nothing: it references the role-policy GetRolePolicy loads,
-//     so a name no GetRolePolicy answered is refused naming both.
+//     writes no row, so loaded never counts it: it references the
+//     role-policy GetRolePolicy loads, so a name no GetRolePolicy answered
+//     is refused naming both.
 //   - role-policy-attachment: an attached policy, id "<role>/<ARN>". A
 //     customer-managed ARN is an unread policy reference (GetPolicy is
 //     never read) and seeds no policy row.
@@ -40,6 +41,14 @@ func init() {
 	registerLoader(iamListLoader("ListInstanceProfilesForRole", "iam_instance_profiles", loadListInstanceProfilesForRole, renderListInstanceProfilesForRole))
 	registerIgnores(IgnoreEntry{Key: LoadKey{"iam", "GetRole"}, Path: "GetRoleResult/Role/RoleLastUsed",
 		Cite: "terraform-provider-aws@v5.100.0/internal/service/iam/role.go"})
+	// fakeaws answers a document in its own encoding (urlEscapeIfNotEmpty),
+	// which need not be the one IAM recorded.
+	registerEncoded(
+		EncodedEntry{Key: LoadKey{"iam", "GetRole"}, Path: "GetRoleResult/Role/AssumeRolePolicyDocument"},
+		EncodedEntry{Key: LoadKey{"iam", "GetRolePolicy"}, Path: "GetRolePolicyResult/PolicyDocument"},
+		EncodedEntry{Key: LoadKey{"iam", "ListInstanceProfilesForRole"},
+			Path: "ListInstanceProfilesForRoleResult/InstanceProfiles/member/Roles/member/AssumeRolePolicyDocument"},
+	)
 }
 
 // iamListLoader is a loader of an IAM list, paged by Marker while
@@ -57,8 +66,11 @@ func loadGetRole(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 		return nil, err
 	}
 	r := body.Role
-	if r.RoleName == "" {
-		return nil, loadRefusal("GetRoleResult/Role holds no RoleName")
+	// A role is keyed by its name, and its tags by its ARN.
+	for field, v := range map[string]string{"RoleName": r.RoleName, "Arn": r.Arn} {
+		if v == "" {
+			return nil, loadRefusal("GetRoleResult/Role holds no " + field)
+		}
 	}
 	doc, err := url.QueryUnescape(r.AssumeRolePolicyDocument)
 	if err != nil {
@@ -136,8 +148,7 @@ func loadListRolePolicies(_ *loadEnvelope, ex *loadExchange) ([]loadItem, error)
 	for i, name := range body.Names {
 		id := role + "/" + name
 		items[i] = loadItem{loadRef: loadRef{"role-policy-name", id}, Path: "ListRolePoliciesResult/PolicyNames/member", Index: i,
-			Refs:  []loadReference{{loadRef: loadRef{"role-policy", id}}},
-			write: func(*repository.LoadTx) error { return nil }}
+			Refs: []loadReference{{loadRef: loadRef{"role-policy", id}}}}
 	}
 	return items, nil
 }
@@ -203,6 +214,9 @@ func loadListInstanceProfilesForRole(env *loadEnvelope, ex *loadExchange) ([]loa
 	}
 	items := make([]loadItem, len(body.Profiles))
 	for i, p := range body.Profiles {
+		if p.InstanceProfileName == "" {
+			return nil, loadRefusal("ListInstanceProfilesForRoleResult/InstanceProfiles/member holds no InstanceProfileName")
+		}
 		profile := &repository.IAMInstanceProfile{Name: p.InstanceProfileName, Path: p.Path, ARN: p.Arn, ID: p.InstanceProfileId, CreatedAt: p.CreateDate}
 		write := func(tx *repository.LoadTx) error { return tx.LoadInstanceProfile(env.Account, profile, "") }
 		// A profile holds one role; the diff refuses any other its Roles holds.

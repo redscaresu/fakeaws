@@ -1342,17 +1342,26 @@ func (app *Application) iamListRolePolicies(w http.ResponseWriter, account strin
 // calls name one kind of taggable entity.
 type iamTaggedKind struct {
 	table  repository.TaggedTable
-	param  string                            // the request param naming the entity
-	arn    func(account, name string) string // param value → the entity's ARN
-	entity func(kind, id string) iamEntity   // for the error message: iamNamed or iamByARN
+	param  string                          // the request param naming the entity: a policy's ARN, else its name
+	entity func(kind, id string) iamEntity // for the error message: iamNamed or iamByARN
 	kind   string
 }
 
 var iamTaggedKinds = map[string]iamTaggedKind{
-	"Role":            {repository.TagsIAMRole, "RoleName", awsproto.BuildIAMRoleARN, iamNamed, "role"},
-	"User":            {repository.TagsIAMUser, "UserName", awsproto.BuildIAMUserARN, iamNamed, "user"},
-	"Policy":          {repository.TagsIAMPolicy, "PolicyArn", func(_, arn string) string { return arn }, iamByARN, "policy"},
-	"InstanceProfile": {repository.TagsIAMProfile, "InstanceProfileName", awsproto.BuildIAMInstanceProfileARN, iamNamed, "instance profile"},
+	"Role":            {repository.TagsIAMRole, "RoleName", iamNamed, "role"},
+	"User":            {repository.TagsIAMUser, "UserName", iamNamed, "user"},
+	"Policy":          {repository.TagsIAMPolicy, "PolicyArn", iamByARN, "policy"},
+	"InstanceProfile": {repository.TagsIAMProfile, "InstanceProfileName", iamNamed, "instance profile"},
+}
+
+// iamTaggedARN is the ARN the entity id names is stored under: a
+// policy's id is its ARN; any other kind's is its name, whose row holds
+// its ARN, path included for a loaded one, so it is read, never built.
+func (app *Application) iamTaggedARN(account string, kind iamTaggedKind, id string) (string, error) {
+	if kind.table == repository.TagsIAMPolicy {
+		return id, nil
+	}
+	return app.repo.ARNByName(account, kind.table, id)
 }
 
 func iamTags(tags map[string]string) []iamTagXML {
@@ -1366,7 +1375,12 @@ func iamWriteTagError(w http.ResponseWriter, kind iamTaggedKind, id string, err 
 
 func (app *Application) iamListTags(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest, kind iamTaggedKind) {
 	id := req.Params.Get(kind.param)
-	tags, err := app.repo.ResourceTags(account, kind.table, kind.arn(account, id))
+	arn, err := app.iamTaggedARN(account, kind, id)
+	if err != nil {
+		iamWriteTagError(w, kind, id, err)
+		return
+	}
+	tags, err := app.repo.ResourceTags(account, kind.table, arn)
 	if err != nil {
 		iamWriteTagError(w, kind, id, err)
 		return
@@ -1376,7 +1390,11 @@ func (app *Application) iamListTags(w http.ResponseWriter, account string, req a
 
 func (app *Application) iamTag(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest, kind iamTaggedKind) {
 	id := req.Params.Get(kind.param)
-	if err := app.repo.TagResource(account, kind.table, kind.arn(account, id), queryTags(req.Params, "Tags.member.")); err != nil {
+	arn, err := app.iamTaggedARN(account, kind, id)
+	if err == nil {
+		err = app.repo.TagResource(account, kind.table, arn, queryTags(req.Params, "Tags.member."))
+	}
+	if err != nil {
 		iamWriteTagError(w, kind, id, err)
 		return
 	}
@@ -1385,7 +1403,11 @@ func (app *Application) iamTag(w http.ResponseWriter, account string, req awspro
 
 func (app *Application) iamUntag(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest, kind iamTaggedKind) {
 	id := req.Params.Get(kind.param)
-	if err := app.repo.UntagResource(account, kind.table, kind.arn(account, id), queryListValues(req.Params, "TagKeys.member.")); err != nil {
+	arn, err := app.iamTaggedARN(account, kind, id)
+	if err == nil {
+		err = app.repo.UntagResource(account, kind.table, arn, queryListValues(req.Params, "TagKeys.member."))
+	}
+	if err != nil {
 		iamWriteTagError(w, kind, id, err)
 		return
 	}
