@@ -2786,7 +2786,12 @@ func TestEC2_DescribeKeyPairsFilters(t *testing.T) {
 	}
 
 	// UNVERIFIED(aws-code): InvalidKeyPair.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
-	resp, body = ec2Call(t, srv, tagRegion, "DescribeKeyPairs", url.Values{"KeyPairId.1": {"key-0000000000000000"}})
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
-	assert.Equal(t, "InvalidKeyPair.NotFound", extractEC2Tag(body, "Code"))
+	// The provider's aws_key_pair read takes only this code as gone, by
+	// KeyName.N as well as KeyPairId.N.
+	for param, key := range map[string]string{"KeyPairId.1": "key-0000000000000000", "KeyName.1": "missing"} {
+		resp, body = ec2Call(t, srv, tagRegion, "DescribeKeyPairs", url.Values{param: {key}})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s: %s", param, body)
+		assert.Equal(t, "InvalidKeyPair.NotFound", extractEC2Tag(body, "Code"), param)
+		assert.Contains(t, extractEC2Tag(body, "Message"), key, param)
+	}
 }

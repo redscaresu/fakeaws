@@ -2891,7 +2891,8 @@ var keyPairFilters = ec2FilterTable[ec2KeyPairXML]{
 
 // ec2DescribeKeyPairs answers the region's key pairs narrowed by
 // KeyName.N, terraform-provider-aws's read path, KeyPairId.N and
-// keyPairFilters. An unknown KeyName.N or KeyPairId.N fails the call.
+// keyPairFilters. An unknown KeyName.N or KeyPairId.N fails the call
+// with writeKeyPairNotFound.
 func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	filters, ok := keyPairFilters.read(w, req, "KeyName.N", "KeyPairId.N")
 	if !ok {
@@ -2905,16 +2906,14 @@ func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, regi
 	names := queryListValues(req.Params, "KeyName.")
 	for _, name := range names {
 		if !slices.ContainsFunc(kps, func(kp *repository.EC2KeyPair) bool { return kp.Name == name }) {
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, models.ErrNotFound)
+			writeKeyPairNotFound(w, "The key pair '%s' does not exist", name)
 			return
 		}
 	}
 	ids := queryListValues(req.Params, "KeyPairId.")
 	for _, id := range ids {
 		if !slices.ContainsFunc(kps, func(kp *repository.EC2KeyPair) bool { return kp.ID == id }) {
-			// UNVERIFIED(aws-code): InvalidKeyPair.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
-			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
-				"InvalidKeyPair.NotFound", fmt.Sprintf("The key pair ID '%s' does not exist", id))
+			writeKeyPairNotFound(w, "The key pair ID '%s' does not exist", id)
 			return
 		}
 	}
@@ -2931,6 +2930,15 @@ func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, regi
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeKeyPairs", &out)
+}
+
+// writeKeyPairNotFound answers an unknown KeyName.N or KeyPairId.N
+// with 400 InvalidKeyPair.NotFound, which the provider's aws_key_pair
+// read takes as gone; format names the key.
+// UNVERIFIED(aws-code): InvalidKeyPair.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func writeKeyPairNotFound(w http.ResponseWriter, format, key string) {
+	awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+		"InvalidKeyPair.NotFound", fmt.Sprintf(format, key))
 }
 
 // ec2DeleteKeyPair deletes by KeyName or, as EC2 also accepts, by the
