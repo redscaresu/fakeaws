@@ -2,7 +2,12 @@ package repository
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -222,33 +227,40 @@ func TestInstanceProfileWithRoleBlocksRoleDelete(t *testing.T) {
 
 // ----- Users + Access Keys (CASCADE) -----
 
-func TestUserAccessKeyCascade(t *testing.T) {
+// TestDeleteUserRefusedWhileHeld: IAM refuses DeleteUser while an
+// access key, an inline policy or a managed-policy attachment remains;
+// each alone blocks it and stays.
+func TestDeleteUserRefusedWhileHeld(t *testing.T) {
 	r := setupRepo(t)
-	user := &IAMUser{Name: "alice", Path: "/", ARN: "arn", CreatedAt: "t"}
-	if err := r.CreateUser(testAccount, user); err != nil {
-		t.Fatal(err)
-	}
+	policy := &IAMPolicy{Name: "p", Path: "/", ARN: "arn:aws:iam::000000000000:policy/p", CreatedAt: "t"}
+	require.NoError(t, r.CreatePolicy(testAccount, policy))
+	for name, c := range map[string]struct{ hold, release func(user string) error }{
+		"access key": {
+			func(u string) error {
+				return r.CreateAccessKey(testAccount, &IAMAccessKey{ID: "AKIA" + u, UserName: u, Secret: "s", Status: "Active", CreatedAt: "t"})
+			},
+			func(u string) error { return r.DeleteAccessKey(testAccount, u, "AKIA"+u) },
+		},
+		"inline policy": {
+			func(u string) error { return r.PutUserPolicy(testAccount, u, "inline", "{}") },
+			func(u string) error { return r.DeleteUserPolicy(testAccount, u, "inline") },
+		},
+		"managed policy": {
+			func(u string) error { return r.AttachUserPolicy(testAccount, u, policy.ARN) },
+			func(u string) error { return r.DetachUserPolicy(testAccount, u, policy.ARN) },
+		},
+	} {
+		user := strings.ReplaceAll(name, " ", "-")
+		require.NoError(t, r.CreateUser(testAccount, &IAMUser{Name: user, Path: "/", ARN: "arn:" + user, CreatedAt: "t"}), name)
+		require.NoError(t, c.hold(user), name)
 
-	key := &IAMAccessKey{ID: "AKIA0", UserName: "alice", Secret: "secret", Status: "Active", CreatedAt: "t"}
-	if err := r.CreateAccessKey(testAccount, key); err != nil {
-		t.Fatalf("CreateAccessKey: %v", err)
-	}
+		assert.ErrorIs(t, r.DeleteUser(testAccount, user), models.ErrInUse, name)
+		_, err := r.GetUser(testAccount, user)
+		assert.NoError(t, err, "%s: user kept", name)
 
-	keys, err := r.ListAccessKeys(testAccount, "alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(keys) != 1 {
-		t.Errorf("ListAccessKeys: got %d want 1", len(keys))
-	}
-
-	// CASCADE: deleting the user wipes the key.
-	if err := r.DeleteUser(testAccount, "alice"); err != nil {
-		t.Fatalf("DeleteUser: %v", err)
-	}
-	keys, _ = r.ListAccessKeys(testAccount, "alice")
-	if len(keys) != 0 {
-		t.Errorf("CASCADE: ListAccessKeys after DeleteUser: got %d want 0", len(keys))
+		require.NoError(t, c.release(user), "%s: the hold stayed", name)
+		assert.NoError(t, r.DeleteUser(testAccount, user), name)
+		assert.ErrorIs(t, r.DeleteUser(testAccount, user), models.ErrNotFound, "%s: a second delete", name)
 	}
 }
 
@@ -301,4 +313,58 @@ func TestDeleteRoleRefusedWhileInlinePolicy(t *testing.T) {
 
 	require.NoError(t, r.DeleteRolePolicy(testAccount, "r", "p"))
 	assert.NoError(t, r.DeleteRole(testAccount, "r"))
+}
+
+// TestDeletePolicyRacingAttachLeavesNoDanglingAttachment: DeletePolicy
+// and Attach{Role,User}Policy each check and write in one statement, so
+// however they interleave either the policy stays or nothing is
+// attached to it.
+func TestDeletePolicyRacingAttachLeavesNoDanglingAttachment(t *testing.T) {
+	r := setupRepo(t)
+	const holders, rounds = 4, 200
+	for i := range holders {
+		require.NoError(t, r.CreateRole(testAccount, &IAMRole{Name: fmt.Sprintf("r%d", i), Path: "/", ARN: fmt.Sprintf("arn:r%d", i), CreatedAt: "t"}))
+		require.NoError(t, r.CreateUser(testAccount, &IAMUser{Name: fmt.Sprintf("u%d", i), Path: "/", ARN: fmt.Sprintf("arn:u%d", i), CreatedAt: "t"}))
+	}
+	for round := range rounds {
+		name := fmt.Sprintf("p%d", round)
+		arn := "arn:aws:iam::000000000000:policy/" + name
+		require.NoError(t, r.CreatePolicy(testAccount, &IAMPolicy{Name: name, Path: "/", ARN: arn, CreatedAt: "t"}))
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		run := func(f func() error, allowed ...error) {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if err := f(); err != nil && !slices.ContainsFunc(allowed, func(a error) bool { return errors.Is(err, a) }) {
+					t.Errorf("round %d: unexpected error %v", round, err)
+				}
+			}()
+		}
+		for i := range holders {
+			run(func() error { return r.AttachRolePolicy(testAccount, fmt.Sprintf("r%d", i), arn) }, models.ErrNotFound)
+			run(func() error { return r.AttachUserPolicy(testAccount, fmt.Sprintf("u%d", i), arn) }, models.ErrNotFound)
+		}
+		run(func() error {
+			// Stagger the delete across the attaches, so in some rounds it
+			// lands between an attach's check and its insert.
+			for range round % 8 {
+				runtime.Gosched()
+			}
+			return r.DeletePolicy(testAccount, name)
+		}, models.ErrInUse)
+		close(start)
+		wg.Wait()
+
+		var attached int
+		require.NoError(t, r.db.QueryRow(`SELECT
+			(SELECT COUNT(*) FROM role_policy_attachments WHERE policy_arn = ?) +
+			(SELECT COUNT(*) FROM user_policy_attachments WHERE policy_arn = ?)`, arn, arn).Scan(&attached))
+		if _, err := r.GetPolicy(testAccount, name); errors.Is(err, models.ErrNotFound) {
+			assert.Zero(t, attached, "round %d: attachments to the deleted policy", round)
+		} else {
+			require.NoError(t, err)
+		}
+	}
 }

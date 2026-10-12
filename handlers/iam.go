@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -36,13 +37,13 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Malformed request — treat as a bad-request error in the
 		// Query-RPC shape so the SDK surfaces a useful message.
-		iamWriteError(w, fmt.Errorf("%w: %v", errIAMValidation, err), "")
+		iamWriteError(w, iamValidationError("The request could not be parsed."), iamEntity{})
 		return
 	}
 
 	account, err := app.AccountID()
 	if err != nil {
-		iamWriteError(w, fmt.Errorf("read account id: %w", err), "")
+		iamWriteError(w, fmt.Errorf("read account id: %w", err), iamEntity{})
 		return
 	}
 
@@ -208,7 +209,7 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		markClass(w, classNotModelled404)
-		iamWriteError(w, fmt.Errorf("unsupported IAM action %q: %w", req.Action, errIAMNotModelled), "")
+		iamWriteError(w, errIAMNotModelled, iamEntity{"action", req.Action})
 	}
 }
 
@@ -357,7 +358,7 @@ func roleToXML(r *repository.IAMRole) iamRoleXML {
 func (app *Application) iamCreateRole(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("RoleName")
 	if name == "" {
-		iamWriteError(w, fmt.Errorf("RoleName is required: %w", errIAMValidation), "")
+		iamWriteError(w, iamValidationError("RoleName is required."), iamEntity{})
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -373,14 +374,14 @@ func (app *Application) iamCreateRole(w http.ResponseWriter, account string, req
 		fmt.Sscanf(mds, "%d", &role.MaxSessionDuration)
 	}
 	if err := app.repo.CreateRole(account, role); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("role", name))
 		return
 	}
 	tags := queryTags(req.Params, "Tags.member.")
 	if err := app.tagCreated(account, repository.TagsIAMRole, role.ARN, tags, func() error {
 		return app.repo.DeleteRole(account, name)
 	}); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("role", name))
 		return
 	}
 	r := roleToXML(role)
@@ -392,12 +393,12 @@ func (app *Application) iamGetRole(w http.ResponseWriter, account string, req aw
 	name := req.Params.Get("RoleName")
 	role, err := app.repo.GetRole(account, name)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("role", name))
 		return
 	}
 	tags, err := app.repo.ResourceTags(account, repository.TagsIAMRole, role.ARN)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("role", name))
 		return
 	}
 	r := roleToXML(role)
@@ -408,7 +409,7 @@ func (app *Application) iamGetRole(w http.ResponseWriter, account string, req aw
 func (app *Application) iamListRoles(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	roles, err := app.repo.ListRoles(account)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamEntity{})
 		return
 	}
 	out := iamListRolesResult{Roles: make([]iamRoleXML, 0, len(roles))}
@@ -422,7 +423,7 @@ func (app *Application) iamUpdateRole(w http.ResponseWriter, account string, req
 	name := req.Params.Get("RoleName")
 	role, err := app.repo.GetRole(account, name)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("role", name))
 		return
 	}
 	if v := req.Params.Get("Description"); v != "" {
@@ -432,7 +433,7 @@ func (app *Application) iamUpdateRole(w http.ResponseWriter, account string, req
 		fmt.Sscanf(v, "%d", &role.MaxSessionDuration)
 	}
 	if err := app.repo.UpdateRole(account, role); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("role", name))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "UpdateRole", nil)
@@ -446,11 +447,7 @@ func (app *Application) iamUpdateRole(w http.ResponseWriter, account string, req
 func (app *Application) iamDeleteRole(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("RoleName")
 	if err := app.repo.DeleteRole(account, name); err != nil {
-		msg := ""
-		if errors.Is(err, models.ErrInUse) {
-			msg = "Cannot delete entity, must detach all policies and remove the role from its instance profiles first: role " + name
-		}
-		iamWriteError(w, err, msg)
+		iamWriteError(w, err, iamNamed("role", name))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteRole", nil)
@@ -483,7 +480,7 @@ func policyToXML(p *repository.IAMPolicy) iamPolicyXML {
 func (app *Application) iamCreatePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("PolicyName")
 	if name == "" {
-		iamWriteError(w, fmt.Errorf("PolicyName is required: %w", errIAMValidation), "")
+		iamWriteError(w, iamValidationError("PolicyName is required."), iamEntity{})
 		return
 	}
 	policy := &repository.IAMPolicy{
@@ -495,14 +492,14 @@ func (app *Application) iamCreatePolicy(w http.ResponseWriter, account string, r
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreatePolicy(account, policy); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("policy", name))
 		return
 	}
 	tags := queryTags(req.Params, "Tags.member.")
 	if err := app.tagCreated(account, repository.TagsIAMPolicy, policy.ARN, tags, func() error {
 		return app.repo.DeletePolicy(account, name)
 	}); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("policy", name))
 		return
 	}
 	p := policyToXML(policy)
@@ -520,12 +517,12 @@ func (app *Application) iamGetPolicy(w http.ResponseWriter, account string, req 
 	}
 	policy, err := app.repo.GetPolicy(account, name)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("policy", name))
 		return
 	}
 	tags, err := app.repo.ResourceTags(account, repository.TagsIAMPolicy, policy.ARN)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("policy", name))
 		return
 	}
 	p := policyToXML(policy)
@@ -549,7 +546,7 @@ func (app *Application) iamGetPolicyVersion(w http.ResponseWriter, account strin
 	}
 	policy, err := app.repo.GetPolicy(account, name)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("policy", name))
 		return
 	}
 	// The document is stored decoded; IAM sends it URL-encoded and the
@@ -577,7 +574,7 @@ func (app *Application) iamListPolicyVersions(w http.ResponseWriter, account str
 	}
 	policy, err := app.repo.GetPolicy(account, name)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("policy", name))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "ListPolicyVersions", &iamListPolicyVersionsResult{
@@ -608,7 +605,7 @@ type iamListPolicyVersionsResult struct {
 func (app *Application) iamListPolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	policies, err := app.repo.ListPolicies(account)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamEntity{})
 		return
 	}
 	out := iamListPoliciesResult{Policies: make([]iamPolicyXML, 0, len(policies))}
@@ -626,7 +623,7 @@ func (app *Application) iamDeletePolicy(w http.ResponseWriter, account string, r
 		}
 	}
 	if err := app.repo.DeletePolicy(account, name); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("policy", name))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeletePolicy", nil)
@@ -667,7 +664,7 @@ func instanceProfileToXML(p *repository.IAMInstanceProfile, attached *repository
 func (app *Application) iamCreateInstanceProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("InstanceProfileName")
 	if name == "" {
-		iamWriteError(w, fmt.Errorf("InstanceProfileName is required: %w", errIAMValidation), "")
+		iamWriteError(w, iamValidationError("InstanceProfileName is required."), iamEntity{})
 		return
 	}
 	p := &repository.IAMInstanceProfile{
@@ -677,14 +674,14 @@ func (app *Application) iamCreateInstanceProfile(w http.ResponseWriter, account 
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateInstanceProfile(account, p); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("instance profile", name))
 		return
 	}
 	tags := queryTags(req.Params, "Tags.member.")
 	if err := app.tagCreated(account, repository.TagsIAMProfile, p.ARN, tags, func() error {
 		return app.repo.DeleteInstanceProfile(account, name)
 	}); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("instance profile", name))
 		return
 	}
 	out := instanceProfileToXML(p, nil)
@@ -695,7 +692,7 @@ func (app *Application) iamCreateInstanceProfile(w http.ResponseWriter, account 
 func (app *Application) iamGetInstanceProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	p, err := app.repo.GetInstanceProfile(account, req.Params.Get("InstanceProfileName"))
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("instance profile", req.Params.Get("InstanceProfileName")))
 		return
 	}
 	var attached *repository.IAMRole
@@ -705,7 +702,7 @@ func (app *Application) iamGetInstanceProfile(w http.ResponseWriter, account str
 	// aws_iam_instance_profile reads its tags from here.
 	tags, err := app.repo.ResourceTags(account, repository.TagsIAMProfile, p.ARN)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("instance profile", req.Params.Get("InstanceProfileName")))
 		return
 	}
 	out := instanceProfileToXML(p, attached)
@@ -716,7 +713,7 @@ func (app *Application) iamGetInstanceProfile(w http.ResponseWriter, account str
 func (app *Application) iamListInstanceProfiles(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	profs, err := app.repo.ListInstanceProfiles(account)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamEntity{})
 		return
 	}
 	out := iamListInstanceProfilesResult{InstanceProfiles: make([]iamInstanceProfileXML, 0, len(profs))}
@@ -732,27 +729,32 @@ func (app *Application) iamListInstanceProfiles(w http.ResponseWriter, account s
 
 func (app *Application) iamDeleteInstanceProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DeleteInstanceProfile(account, req.Params.Get("InstanceProfileName")); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("instance profile", req.Params.Get("InstanceProfileName")))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteInstanceProfile", nil)
 }
 
+// iamAddRoleToInstanceProfile answers LimitExceeded for a profile that
+// already holds a role: IAM allows one role per instance profile.
 func (app *Application) iamAddRoleToInstanceProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.AddRoleToInstanceProfile(account,
-		req.Params.Get("InstanceProfileName"),
-		req.Params.Get("RoleName")); err != nil {
-		iamWriteError(w, err, "")
+	profile, role := req.Params.Get("InstanceProfileName"), req.Params.Get("RoleName")
+	if err := app.repo.AddRoleToInstanceProfile(account, profile, role); err != nil {
+		if errors.Is(err, models.ErrConflict) {
+			err = errIAMLimitExceeded
+		}
+		_, perr := app.repo.GetInstanceProfile(account, profile)
+		iamWriteError(w, err, iamChildEntity(perr, iamNamed("instance profile", profile), iamNamed("role", role)))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "AddRoleToInstanceProfile", nil)
 }
 
 func (app *Application) iamRemoveRoleFromInstanceProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.RemoveRoleFromInstanceProfile(account,
-		req.Params.Get("InstanceProfileName"),
-		req.Params.Get("RoleName")); err != nil {
-		iamWriteError(w, err, "")
+	profile, role := req.Params.Get("InstanceProfileName"), req.Params.Get("RoleName")
+	if err := app.repo.RemoveRoleFromInstanceProfile(account, profile, role); err != nil {
+		_, perr := app.repo.GetInstanceProfile(account, profile)
+		iamWriteError(w, err, iamChildEntity(perr, iamNamed("instance profile", profile), iamNamed("role", role)))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "RemoveRoleFromInstanceProfile", nil)
@@ -783,7 +785,7 @@ func userToXML(u *repository.IAMUser) iamUserXML {
 func (app *Application) iamCreateUser(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("UserName")
 	if name == "" {
-		iamWriteError(w, fmt.Errorf("UserName is required: %w", errIAMValidation), "")
+		iamWriteError(w, iamValidationError("UserName is required."), iamEntity{})
 		return
 	}
 	u := &repository.IAMUser{
@@ -793,14 +795,14 @@ func (app *Application) iamCreateUser(w http.ResponseWriter, account string, req
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateUser(account, u); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("user", name))
 		return
 	}
 	tags := queryTags(req.Params, "Tags.member.")
 	if err := app.tagCreated(account, repository.TagsIAMUser, u.ARN, tags, func() error {
 		return app.repo.DeleteUser(account, name)
 	}); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("user", name))
 		return
 	}
 	out := userToXML(u)
@@ -811,12 +813,12 @@ func (app *Application) iamCreateUser(w http.ResponseWriter, account string, req
 func (app *Application) iamGetUser(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	u, err := app.repo.GetUser(account, req.Params.Get("UserName"))
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("user", req.Params.Get("UserName")))
 		return
 	}
 	tags, err := app.repo.ResourceTags(account, repository.TagsIAMUser, u.ARN)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("user", req.Params.Get("UserName")))
 		return
 	}
 	out := userToXML(u)
@@ -827,7 +829,7 @@ func (app *Application) iamGetUser(w http.ResponseWriter, account string, req aw
 func (app *Application) iamListUsers(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	users, err := app.repo.ListUsers(account)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamEntity{})
 		return
 	}
 	out := iamListUsersResult{Users: make([]iamUserXML, 0, len(users))}
@@ -839,7 +841,7 @@ func (app *Application) iamListUsers(w http.ResponseWriter, account string, req 
 
 func (app *Application) iamDeleteUser(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DeleteUser(account, req.Params.Get("UserName")); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("user", req.Params.Get("UserName")))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteUser", nil)
@@ -930,7 +932,7 @@ type iamListVirtualMFADevicesResult struct {
 // The provider's destroy idempotency check keys off NoSuchEntity
 // exactly, which iamWriteError answers for models.ErrNotFound.
 func (app *Application) iamDeleteLoginProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	iamWriteError(w, models.ErrNotFound, "The specified login profile does not exist.")
+	iamWriteError(w, models.ErrNotFound, iamNamed("login profile for user", req.Params.Get("UserName")))
 }
 
 // iamListUserPolicies returns the inline-policy names attached to a
@@ -939,7 +941,7 @@ func (app *Application) iamListUserPolicies(w http.ResponseWriter, account strin
 	user := req.Params.Get("UserName")
 	names, err := app.repo.ListUserPolicies(account, user)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("user", user))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "ListUserPolicies", &iamListUserPoliciesResult{PolicyNames: names})
@@ -952,7 +954,7 @@ func (app *Application) iamListAttachedUserPolicies(w http.ResponseWriter, accou
 	user := req.Params.Get("UserName")
 	arns, err := app.repo.ListAttachedUserPolicies(account, user)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("user", user))
 		return
 	}
 	members := make([]iamAttachedPolicy, 0, len(arns))
@@ -1007,7 +1009,7 @@ func (app *Application) iamCreateAccessKey(w http.ResponseWriter, account string
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateAccessKey(account, k); err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("user", user))
 		return
 	}
 	out := iamAccessKeyXML{
@@ -1021,7 +1023,7 @@ func (app *Application) iamListAccessKeys(w http.ResponseWriter, account string,
 	user := req.Params.Get("UserName")
 	keys, err := app.repo.ListAccessKeys(account, user)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("user", user))
 		return
 	}
 	out := iamListAccessKeysResult{AccessKeyMetadata: make([]iamAccessKeyMetadataXML, 0, len(keys))}
@@ -1034,9 +1036,10 @@ func (app *Application) iamListAccessKeys(w http.ResponseWriter, account string,
 }
 
 func (app *Application) iamDeleteAccessKey(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteAccessKey(account,
-		req.Params.Get("UserName"), req.Params.Get("AccessKeyId")); err != nil {
-		iamWriteError(w, err, "")
+	user, id := req.Params.Get("UserName"), req.Params.Get("AccessKeyId")
+	if err := app.repo.DeleteAccessKey(account, user, id); err != nil {
+		_, perr := app.repo.GetUser(account, user)
+		iamWriteError(w, err, iamChildEntity(perr, iamNamed("user", user), iamEntity{"access key", "id " + id}))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteAccessKey", nil)
@@ -1057,7 +1060,8 @@ func (app *Application) iamAttachRolePolicy(w http.ResponseWriter, account strin
 		_ = app.repo.SeedManagedPolicy(account, policyARN)
 	}
 	if err := app.repo.AttachRolePolicy(account, roleName, policyARN); err != nil {
-		iamWriteError(w, err, "")
+		_, perr := app.repo.GetRole(account, roleName)
+		iamWriteError(w, err, iamChildEntity(perr, iamNamed("role", roleName), iamByARN("policy", policyARN)))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "AttachRolePolicy", nil)
@@ -1074,7 +1078,8 @@ func (app *Application) iamAttachUserPolicy(w http.ResponseWriter, account strin
 		_ = app.repo.SeedManagedPolicy(account, policyARN)
 	}
 	if err := app.repo.AttachUserPolicy(account, user, policyARN); err != nil {
-		iamWriteError(w, err, "")
+		_, perr := app.repo.GetUser(account, user)
+		iamWriteError(w, err, iamChildEntity(perr, iamNamed("user", user), iamByARN("policy", policyARN)))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "AttachUserPolicy", nil)
@@ -1085,7 +1090,8 @@ func (app *Application) iamDetachUserPolicy(w http.ResponseWriter, account strin
 	user := req.Params.Get("UserName")
 	policyARN := req.Params.Get("PolicyArn")
 	if err := app.repo.DetachUserPolicy(account, user, policyARN); err != nil {
-		iamWriteError(w, err, "")
+		_, perr := app.repo.GetUser(account, user)
+		iamWriteError(w, err, iamChildEntity(perr, iamNamed("user", user), iamByARN("policy", policyARN)))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DetachUserPolicy", nil)
@@ -1099,7 +1105,8 @@ func (app *Application) iamPutUserPolicy(w http.ResponseWriter, account string, 
 	name := req.Params.Get("PolicyName")
 	doc := req.Params.Get("PolicyDocument")
 	if err := app.repo.PutUserPolicy(account, user, name, doc); err != nil {
-		iamWriteError(w, err, "")
+		_, perr := app.repo.GetUser(account, user)
+		iamWriteError(w, err, iamChildEntity(perr, iamNamed("user", user), iamNamed("user policy", name)))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "PutUserPolicy", nil)
@@ -1111,7 +1118,8 @@ func (app *Application) iamDeleteUserPolicy(w http.ResponseWriter, account strin
 	user := req.Params.Get("UserName")
 	name := req.Params.Get("PolicyName")
 	if err := app.repo.DeleteUserPolicy(account, user, name); err != nil {
-		iamWriteError(w, err, "")
+		_, perr := app.repo.GetUser(account, user)
+		iamWriteError(w, err, iamChildEntity(perr, iamNamed("user", user), iamNamed("user policy", name)))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteUserPolicy", nil)
@@ -1129,7 +1137,8 @@ func (app *Application) iamGetUserPolicy(w http.ResponseWriter, account string, 
 	name := req.Params.Get("PolicyName")
 	doc, err := app.repo.GetUserPolicy(account, user, name)
 	if err != nil {
-		iamWriteError(w, err, "")
+		_, perr := app.repo.GetUser(account, user)
+		iamWriteError(w, err, iamChildEntity(perr, iamNamed("user", user), iamNamed("user policy", name)))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "GetUserPolicy", &iamGetUserPolicyResult{
@@ -1198,29 +1207,19 @@ type iamGetRolePolicyResult struct {
 	PolicyDocument string `xml:"PolicyDocument"`
 }
 
-// iamWriteRolePolicyError writes an inline role policy call's failure:
-// NoSuchEntity as IAM does, naming the role when the role is missing,
-// else the policy.
+// iamWriteRolePolicyError writes an inline role policy call's failure,
+// naming the role when the role is missing, else the policy.
 func (app *Application) iamWriteRolePolicyError(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest, err error) {
-	if !errors.Is(err, models.ErrNotFound) {
-		iamWriteError(w, err, "")
-		return
-	}
 	role := req.Params.Get("RoleName")
-	msg := "The role policy with name " + req.Params.Get("PolicyName") + " cannot be found."
-	if _, err := app.repo.GetRole(account, role); errors.Is(err, models.ErrNotFound) {
-		msg = "The role with name " + role + " cannot be found."
-	} else if err != nil {
-		iamWriteError(w, err, "")
-		return
-	}
-	iamWriteError(w, err, msg)
+	_, perr := app.repo.GetRole(account, role)
+	iamWriteError(w, err, iamChildEntity(perr, iamNamed("role", role), iamNamed("role policy", req.Params.Get("PolicyName"))))
 }
 
 func (app *Application) iamDetachRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DetachRolePolicy(account,
-		req.Params.Get("RoleName"), req.Params.Get("PolicyArn")); err != nil {
-		iamWriteError(w, err, "")
+	role, policyARN := req.Params.Get("RoleName"), req.Params.Get("PolicyArn")
+	if err := app.repo.DetachRolePolicy(account, role, policyARN); err != nil {
+		_, perr := app.repo.GetRole(account, role)
+		iamWriteError(w, err, iamChildEntity(perr, iamNamed("role", role), iamByARN("policy", policyARN)))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DetachRolePolicy", nil)
@@ -1229,7 +1228,7 @@ func (app *Application) iamDetachRolePolicy(w http.ResponseWriter, account strin
 func (app *Application) iamListAttachedRolePolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	arns, err := app.repo.ListAttachedRolePolicies(account, req.Params.Get("RoleName"))
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("role", req.Params.Get("RoleName")))
 		return
 	}
 	members := make([]iamAttachedPolicy, 0, len(arns))
@@ -1298,7 +1297,7 @@ func (app *Application) iamListRolePolicies(w http.ResponseWriter, account strin
 	}
 	names, err := app.repo.ListRolePolicies(account, name)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("role", name))
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "ListRolePolicies", &iamListRolePoliciesResult{PolicyNames: names})
@@ -1310,28 +1309,24 @@ type iamTaggedKind struct {
 	table  repository.TaggedTable
 	param  string                            // the request param naming the entity
 	arn    func(account, name string) string // param value → the entity's ARN
-	entity string                            // for the NoSuchEntity message
+	entity func(kind, id string) iamEntity   // for the error message: iamNamed or iamByARN
+	kind   string
 }
 
 var iamTaggedKinds = map[string]iamTaggedKind{
-	"Role":            {repository.TagsIAMRole, "RoleName", awsproto.BuildIAMRoleARN, "role with name"},
-	"User":            {repository.TagsIAMUser, "UserName", awsproto.BuildIAMUserARN, "user with name"},
-	"Policy":          {repository.TagsIAMPolicy, "PolicyArn", func(_, arn string) string { return arn }, "policy"},
-	"InstanceProfile": {repository.TagsIAMProfile, "InstanceProfileName", awsproto.BuildIAMInstanceProfileARN, "instance profile"},
+	"Role":            {repository.TagsIAMRole, "RoleName", awsproto.BuildIAMRoleARN, iamNamed, "role"},
+	"User":            {repository.TagsIAMUser, "UserName", awsproto.BuildIAMUserARN, iamNamed, "user"},
+	"Policy":          {repository.TagsIAMPolicy, "PolicyArn", func(_, arn string) string { return arn }, iamByARN, "policy"},
+	"InstanceProfile": {repository.TagsIAMProfile, "InstanceProfileName", awsproto.BuildIAMInstanceProfileARN, iamNamed, "instance profile"},
 }
 
 func iamTags(tags map[string]string) []iamTagXML {
 	return tagList(tags, func(k, v string) iamTagXML { return iamTagXML{Key: k, Value: v} })
 }
 
-// iamWriteTagError writes a tag call's failure, NoSuchEntity for a
-// missing entity as IAM does.
+// iamWriteTagError writes a tag call's failure, naming the entity.
 func iamWriteTagError(w http.ResponseWriter, kind iamTaggedKind, id string, err error) {
-	msg := ""
-	if errors.Is(err, models.ErrNotFound) {
-		msg = fmt.Sprintf("The %s %s cannot be found.", kind.entity, id)
-	}
-	iamWriteError(w, err, msg)
+	iamWriteError(w, err, kind.entity(kind.kind, id))
 }
 
 func (app *Application) iamListTags(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest, kind iamTaggedKind) {
@@ -1371,12 +1366,12 @@ func (app *Application) iamListInstanceProfilesForRole(w http.ResponseWriter, ac
 	name := req.Params.Get("RoleName")
 	role, err := app.repo.GetRole(account, name)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("role", name))
 		return
 	}
 	profs, err := app.repo.ListInstanceProfilesForRole(account, name)
 	if err != nil {
-		iamWriteError(w, err, "")
+		iamWriteError(w, err, iamNamed("role", name))
 		return
 	}
 	out := iamListInstanceProfilesForRoleResult{InstanceProfiles: make([]iamInstanceProfileXML, 0, len(profs))}
@@ -1409,43 +1404,70 @@ type iamListInstanceProfilesForRoleResult struct {
 // ----- helpers -----
 
 var (
-	// errIAMValidation is a request IAM refuses as malformed or missing
-	// a required parameter.
-	errIAMValidation = errors.New("validation error")
 	// errIAMNotModelled is an IAM action fakeaws does not model.
 	errIAMNotModelled = errors.New("IAM action not modelled")
+	// errIAMLimitExceeded is a second role for an instance profile.
+	errIAMLimitExceeded = errors.New("instance profile already holds a role")
 )
+
+// iamValidationError is a request IAM refuses as malformed or missing
+// a required parameter; its text is the message the client sees.
+type iamValidationError string
+
+func (e iamValidationError) Error() string { return string(e) }
+
+// iamEntity is what an IAM error message names: a kind ("role") and how
+// the call identified it ("name app", "ARN arn:aws:iam::..."). The
+// zero value names no entity.
+type iamEntity struct{ kind, ident string }
+
+func iamNamed(kind, name string) iamEntity { return iamEntity{kind, "name " + name} }
+func iamByARN(kind, arn string) iamEntity  { return iamEntity{kind, "ARN " + arn} }
+
+// iamChildEntity names parent when its lookup (parentErr) found it
+// missing, else child: IAM names whichever of the two is missing.
+func iamChildEntity(parentErr error, parent, child iamEntity) iamEntity {
+	if errors.Is(parentErr, models.ErrNotFound) {
+		return parent
+	}
+	return child
+}
 
 // iamWriteError is the one place IAM writes an error code: IAM's own
 // code for each domain sentinel, as terraform-provider-aws matches it
 // (NoSuchEntity is "gone" to every destroy and refresh; DeleteRole is
-// retried on DeleteConflict). msg, when set, replaces err's text. An
-// unmodelled action keeps the 404 ResourceNotFoundException every
-// service's default arm answers, so the provider never reads it as an
-// entity being gone; any other failure is the shared 500.
-func iamWriteError(w http.ResponseWriter, err error, msg string) {
-	if msg == "" {
-		msg = err.Error()
+// retried on DeleteConflict), with an IAM-shaped message naming e.
+// err's text never reaches the wire: a failure with no IAM code is a
+// 500 with a fixed message, and err is logged. An unmodelled action
+// keeps the 404 ResourceNotFoundException every service's default arm
+// answers, so the provider never reads it as an entity being gone.
+func iamWriteError(w http.ResponseWriter, err error, e iamEntity) {
+	named := "the entity"
+	if e.kind != "" {
+		named = "the " + e.kind + " with " + e.ident
 	}
-	var status int
-	var code string
+	var invalid iamValidationError
+	status, code, msg := http.StatusInternalServerError, "InternalFailure", "An internal error occurred."
 	switch {
+	case errors.As(err, &invalid):
+		status, code, msg = http.StatusBadRequest, "ValidationError", string(invalid)
 	case errors.Is(err, errIAMNotModelled):
-		status, code = http.StatusNotFound, "ResourceNotFoundException"
-	case errors.Is(err, errIAMValidation):
-		status, code = http.StatusBadRequest, "ValidationError"
+		status, code, msg = http.StatusNotFound, "ResourceNotFoundException", "IAM "+e.kind+" "+e.ident+" is not modelled by fakeaws."
+	case errors.Is(err, errIAMLimitExceeded):
+		status, code, msg = http.StatusConflict, "LimitExceeded", "Cannot exceed quota for InstanceSessionsPerInstanceProfile: 1"
 	case errors.Is(err, models.ErrNotFound):
-		status, code = http.StatusNotFound, "NoSuchEntity"
+		status, code, msg = http.StatusNotFound, "NoSuchEntity", upperFirst(named)+" cannot be found."
 	case errors.Is(err, models.ErrInUse):
-		status, code = http.StatusConflict, "DeleteConflict"
+		status, code, msg = http.StatusConflict, "DeleteConflict", "Cannot delete entity, must first remove everything attached to "+named+"."
 	case errors.Is(err, models.ErrConflict):
-		status, code = http.StatusConflict, "EntityAlreadyExists"
+		status, code, msg = http.StatusConflict, "EntityAlreadyExists", upperFirst(strings.TrimPrefix(named, "the "))+" already exists."
 	default:
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
-		return
+		log.Printf("IAM: %v", err)
 	}
 	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, status, code, msg)
 }
+
+func upperFirst(s string) string { return strings.ToUpper(s[:1]) + s[1:] }
 
 func pathOrSlash(p string) string {
 	if p == "" {

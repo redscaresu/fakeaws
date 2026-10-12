@@ -254,28 +254,6 @@ func TestIAM_AddRoleToInstanceProfileMissingProfile(t *testing.T) {
 
 // ----- Users + AccessKeys -----
 
-func TestIAM_UserCRUDPlusAccessKeyCascade(t *testing.T) {
-	srv := newTestServer(t, ":memory:")
-	resp, body := iamCall(t, srv, "CreateUser", url.Values{"UserName": {"alice"}})
-	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateUser body=%s", body)
-
-	resp, body = iamCall(t, srv, "CreateAccessKey", url.Values{"UserName": {"alice"}})
-	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateAccessKey body=%s", body)
-	assert.Contains(t, string(body), "<AccessKey>", "CreateAccessKey body: %s", body)
-
-	resp, body = iamCall(t, srv, "ListAccessKeys", url.Values{"UserName": {"alice"}})
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "ListAccessKeys")
-	assert.Contains(t, string(body), "<AccessKeyId>", "ListAccessKeys missing keys: %s", body)
-
-	// CASCADE: deleting user wipes keys.
-	resp, _ = iamCall(t, srv, "DeleteUser", url.Values{"UserName": {"alice"}})
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteUser")
-	resp, body = iamCall(t, srv, "ListAccessKeys", url.Values{"UserName": {"alice"}})
-	// Empty list is acceptable (200 with no <member>) — the user is gone.
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "ListAccessKeys after delete")
-	assert.NotContains(t, string(body), "<AccessKeyId>", "after CASCADE delete, ListAccessKeys should be empty: %s", body)
-}
-
 func TestIAM_CreateAccessKeyForMissingUserIs404(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, body := iamCall(t, srv, "CreateAccessKey", url.Values{"UserName": {"ghost"}})
@@ -754,6 +732,7 @@ func TestIAM_UnreadableIdentityIs500(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "body=%s", body)
 	assert.Contains(t, string(body), "<Code>InternalFailure</Code>")
+	assert.Contains(t, string(body), "<Message>An internal error occurred.</Message>", "a 500 never carries the error's text")
 	var n int
 	require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM iam_roles`).Scan(&n))
 	assert.Zero(t, n, "role rows written")
