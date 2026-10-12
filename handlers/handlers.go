@@ -193,10 +193,12 @@ func (app *Application) RegisterRoutes(r chi.Router) {
 	r.MethodNotAllowed(unimplementedHandler)
 }
 
-// unimplementedHandler returns 501 and logs the request. Per
-// concepts.md § "Anti-patterns explicitly forbidden" — no silent 200s.
+// unimplementedHandler is the router's NotFound and MethodNotAllowed: it
+// marks the request unrouted, returns 501 and logs it. Per concepts.md
+// § "Anti-patterns explicitly forbidden" — no silent 200s.
 // Callers see exactly what's missing.
 func unimplementedHandler(w http.ResponseWriter, r *http.Request) {
+	markUnrouted(w)
 	writeUnimplemented(w, r.Method+" "+r.URL.Path)
 }
 

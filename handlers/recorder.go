@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -87,7 +88,8 @@ var serviceProtocols = map[string]string{
 // params.query. A body that does not parse, a query body that repeats
 // a key or a json body that is not an object records null params. A
 // path no landed service owns records an empty service, protocol and
-// action.
+// action, and a request chi routes to no handler (its NotFound or
+// MethodNotAllowed) an empty action.
 type readSetEntry struct {
 	Service  string `json:"service"`
 	Protocol string `json:"protocol"`
@@ -188,7 +190,10 @@ func routePattern(r *http.Request) string {
 // CRITICAL[state-audit-no-values]: an audit entry carries exactly
 // service, protocol, action, status and class, never a path, params or
 // values: infrafactory writes /mock/state into run artifacts. service
-// is a LandedServices id, or empty for any other path.
+// is a LandedServices id, or empty for any other path. A query or json
+// action is client text, so the audit carries it only in an operation
+// name's shape (operationName), else empty; a rest action is the
+// method and the route chi matched, never the path.
 type auditEntry struct {
 	Service  string       `json:"service"`
 	Protocol string       `json:"protocol"`
@@ -227,6 +232,9 @@ func (l *requestLog) list() []requestEntry {
 	return append([]requestEntry{}, l.entries...)
 }
 
+// operationName is the shape of an AWS operation name.
+var operationName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,127}$`)
+
 // audit is the log as /mock/state's audit block.
 func (l *requestLog) audit() []auditEntry {
 	out := []auditEntry{}
@@ -234,7 +242,11 @@ func (l *requestLog) audit() []auditEntry {
 		return out
 	}
 	for _, e := range l.list() {
-		out = append(out, auditEntry{Service: e.Service, Protocol: e.Protocol, Action: e.Action, Status: e.Status, Class: e.Classification})
+		action := e.Action
+		if e.Protocol != protocolREST && !operationName.MatchString(action) {
+			action = ""
+		}
+		out = append(out, auditEntry{Service: e.Service, Protocol: e.Protocol, Action: action, Status: e.Status, Class: e.Classification})
 	}
 	return out
 }
@@ -248,12 +260,13 @@ func serviceOf(path string) string {
 	return ""
 }
 
-// recordingWriter catches the status a handler writes and the class it
-// marks.
+// recordingWriter catches the status a handler writes, the class it
+// marks and whether the router found no handler.
 type recordingWriter struct {
 	http.ResponseWriter
-	status int
-	class  requestClass
+	status   int
+	class    requestClass
+	unrouted bool
 }
 
 func (w *recordingWriter) WriteHeader(status int) {
@@ -298,6 +311,14 @@ func markClass(w http.ResponseWriter, class requestClass) {
 	}
 }
 
+// markUnrouted says chi routed w's request to no handler. It is a no-op
+// when fakeaws is not recording.
+func markUnrouted(w http.ResponseWriter) {
+	if rw, ok := w.(*recordingWriter); ok {
+		rw.unrouted = true
+	}
+}
+
 // recordRequests appends every request outside /mock and /healthz to
 // the log once its handler returns, so entries are in completion order
 // and a rest entry's route is the one chi matched.
@@ -323,7 +344,10 @@ func (app *Application) recordRequests(next http.Handler) http.Handler {
 			case rw.status == 0:
 				rw.status = http.StatusOK // net/http's answer when a handler writes nothing
 			}
-			if rs.Protocol == protocolREST {
+			switch {
+			case rw.unrouted:
+				rs.Action = ""
+			case rs.Protocol == protocolREST:
 				rs.Action = r.Method + " " + routePattern(r)
 			}
 			app.requests.append(requestEntry{Method: r.Method, Path: path, Status: rw.status, Classification: rw.classification(), readSetEntry: rs})

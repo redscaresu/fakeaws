@@ -262,9 +262,18 @@ func TestContract_request_log_panic_recorded(t *testing.T) {
 func TestContract_state_audit_no_values(t *testing.T) {
 	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
 	providerTraffic(t, srv)
+	const queryAction, jsonOp = "secret-value/with spaces", "secret value"
+	resp, body := ec2Call(t, srv, "us-east-1", queryAction, nil)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode, "%s", body)
+	resp, body = ssmCall(t, srv, jsonOp, `{}`)
+	require.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
 
+	_, requests := doAdmin(t, srv, http.MethodGet, "/mock/requests", bearer(adminToken))
 	_, state := doAdmin(t, srv, http.MethodGet, "/mock/state", bearer(adminToken))
-	assert.NotContains(t, state, "secret-bucket-name", "no path reaches /mock/state")
+	for _, v := range []string{"secret-bucket-name", queryAction, jsonOp} {
+		assert.Contains(t, requests, v, "the request log keeps it")
+		assert.NotContains(t, state, v, "it never reaches /mock/state")
+	}
 	audit := stateAudit(t, srv, bearer(adminToken))
 	for _, e := range audit {
 		var keys []string
@@ -277,6 +286,8 @@ func TestContract_state_audit_no_values(t *testing.T) {
 		{"service": "sts", "protocol": "query", "action": "GetCallerIdentity", "status": float64(http.StatusOK), "class": "answered-from-rows"},
 		{"service": "sts", "protocol": "query", "action": "AssumeRole", "status": float64(http.StatusNotImplemented), "class": "unimplemented-501"},
 		{"service": "", "protocol": "", "action": "", "status": float64(http.StatusNotImplemented), "class": "unimplemented-501"},
+		{"service": "ec2", "protocol": "query", "action": "", "status": float64(http.StatusNotFound), "class": "not-modelled-404"},
+		{"service": "ssm", "protocol": "json", "action": "", "status": float64(http.StatusNotImplemented), "class": "unimplemented-501"},
 	}, audit)
 }
 
@@ -491,6 +502,15 @@ func TestContract_request_log_read_set_entry(t *testing.T) {
 		{"DynamoDB DescribeTable", func() (*http.Response, []byte) {
 			return ddbCall(t, srv, region, "DescribeTable", `{"TableName":"app"}`)
 		}, readSet{"dynamodb", "json", "DescribeTable", map[string]any{"TableName": "app"}, http.StatusNotFound}},
+		{"KMS DescribeKey", func() (*http.Response, []byte) {
+			return kmsCall(t, srv, region, "DescribeKey", `{"KeyId":"alias/app"}`)
+		}, readSet{"kms", "json", "DescribeKey", map[string]any{"KeyId": "alias/app"}, http.StatusNotFound}},
+		{"Secrets Manager DescribeSecret", func() (*http.Response, []byte) {
+			return smCall(t, srv, "DescribeSecret", `{"SecretId":"app/db"}`)
+		}, readSet{"secretsmanager", "json", "DescribeSecret", map[string]any{"SecretId": "app/db"}, http.StatusNotFound}},
+		{"SQS GetQueueUrl", func() (*http.Response, []byte) {
+			return sqsCall(t, srv, "GetQueueUrl", `{"QueueName":"app"}`)
+		}, readSet{"sqs", "json", "GetQueueUrl", map[string]any{"QueueName": "app"}, http.StatusNotFound}},
 		{"a repeated query key", func() (*http.Response, []byte) {
 			return ec2Call(t, srv, region, "DescribeVpcs", url.Values{"VpcId.1": {"vpc-a", "vpc-b"}})
 		}, readSet{"ec2", "query", "DescribeVpcs", nil, http.StatusBadRequest}},
@@ -500,6 +520,15 @@ func TestContract_request_log_read_set_entry(t *testing.T) {
 		{"a path no service owns", func() (*http.Response, []byte) {
 			return doGet(t, srv, "/nowhere")
 		}, readSet{"", "", "", nil, http.StatusNotImplemented}},
+		{"an unrouted EKS path", func() (*http.Response, []byte) {
+			return eksRequest(t, srv, http.MethodGet, "/eks/region/us-east-1/nope", "")
+		}, readSet{"eks", "rest", "", map[string]any{"path": "/eks/region/us-east-1/nope", "query": ""}, http.StatusNotImplemented}},
+		{"an unrouted S3 path", func() (*http.Response, []byte) {
+			return s3Do(t, srv, http.MethodPut, "/s3/b/dir/key.txt?acl", "", "")
+		}, readSet{"s3", "rest", "", map[string]any{"path": "/s3/b/dir/key.txt", "query": "acl"}, http.StatusNotImplemented}},
+		{"a method no S3 route takes", func() (*http.Response, []byte) {
+			return s3Do(t, srv, http.MethodPatch, "/s3/b", "", "")
+		}, readSet{"s3", "rest", "", map[string]any{"path": "/s3/b", "query": ""}, http.StatusNotImplemented}},
 	} {
 		resp, body := c.call()
 		assert.Equal(t, c.want.Status, resp.StatusCode, "%s: %s", c.name, body)
