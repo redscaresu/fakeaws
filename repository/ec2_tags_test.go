@@ -42,7 +42,7 @@ func TestTagsPutDeleteList(t *testing.T) {
 
 func TestTagsGoWithTheirResource(t *testing.T) {
 	r := setupRepo(t)
-	require.NoError(t, r.CreateVPC(testAccount, &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
+	require.NoError(t, createVPC(r, &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
 	require.NoError(t, r.CreateSubnet(testAccount, &EC2Subnet{ID: "subnet-1", VPCID: "vpc-1", CidrBlock: "10.0.1.0/24", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
 	require.NoError(t, r.CreateInternetGateway(testAccount, &EC2InternetGateway{ID: "igw-1", Region: testRegion, ARN: "arn", CreatedAt: "t"}))
 	for _, id := range []string{"vpc-1", "subnet-1", "igw-1"} {

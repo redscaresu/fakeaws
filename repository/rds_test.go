@@ -13,7 +13,7 @@ import (
 func setupVPCWith2Subnets(t *testing.T, r *Repository) (vpcID string, subnetIDs []string) {
 	t.Helper()
 	v := &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}
-	if err := r.CreateVPC(testAccount, v); err != nil {
+	if err := createVPC(r, v); err != nil {
 		t.Fatalf("seed VPC: %v", err)
 	}
 	for _, sub := range []*EC2Subnet{
@@ -34,7 +34,7 @@ func TestRDSSubnetGroup_SubnetsMustShareVPC(t *testing.T) {
 
 	// Add a second VPC + a subnet in it.
 	v2 := &EC2VPC{ID: "vpc-2", CidrBlock: "10.1.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}
-	r.CreateVPC(testAccount, v2)
+	createVPC(r, v2)
 	r.CreateSubnet(testAccount, &EC2Subnet{ID: "subnet-other", VPCID: "vpc-2", CidrBlock: "10.1.1.0/24", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"})
 
 	// Mixing vpc-1 and vpc-2 subnets must reject.

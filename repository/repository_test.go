@@ -63,7 +63,7 @@ func TestRepositoryAdminLifecycle(t *testing.T) {
 	// Restore must NOT resurrect the seeded row because Reset cleared
 	// the snapshot baseline (concepts.md "Standing patterns" — the
 	// pass-18 cache-baseline lifecycle invariant).
-	err = r.Restore()
+	err = r.Restore(nil)
 	if !errors.Is(err, models.ErrNotFound) {
 		t.Errorf("Restore after Reset should return ErrNotFound, got %v", err)
 	}
@@ -205,7 +205,7 @@ type countingCache struct {
 	restores  int
 }
 
-func (c *countingCache) Name() string                  { return c.name }
-func (c *countingCache) Reset() error                  { c.resets++; return nil }
-func (c *countingCache) Snapshot(_ string) error       { c.snapshots++; return nil }
-func (c *countingCache) Restore(_ string) error        { c.restores++; return nil }
+func (c *countingCache) Name() string            { return c.name }
+func (c *countingCache) Reset() error            { c.resets++; return nil }
+func (c *countingCache) Snapshot(_ string) error { c.snapshots++; return nil }
+func (c *countingCache) Restore(_ string) error  { c.restores++; return nil }

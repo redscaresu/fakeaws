@@ -32,7 +32,7 @@ func TestLoadedFlagLifecycle(t *testing.T) {
 	require.NoError(t, r.Snapshot())
 	require.NoError(t, r.SetLoaded(false, "000000000000"))
 	assert.False(t, loaded(t, r))
-	require.NoError(t, r.Restore())
+	require.NoError(t, r.Restore(nil))
 	assert.True(t, loaded(t, r), "restore")
 
 	require.NoError(t, r.Close())

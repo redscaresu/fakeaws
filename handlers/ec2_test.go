@@ -1096,13 +1096,17 @@ func TestEC2_TerminateInstancesDeletesENI(t *testing.T) {
 	assert.Equal(t, inst.PrivateIpAddress, state.Instances[0].PrivateIP, "state private_ip after terminate")
 }
 
+// keyMaterial is PublicKeyMaterial as the SDK sends a key's text: a
+// blob, base64-encoded on the Query wire.
+func keyMaterial(text string) string { return base64.StdEncoding.EncodeToString([]byte(text)) }
+
 func TestEC2_KeyPairImportDescribeDelete(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	const region = "us-east-1"
 
 	resp, body := ec2Call(t, srv, region, "ImportKeyPair", url.Values{
 		"KeyName":           {"deploy"},
-		"PublicKeyMaterial": {"ssh-rsa AAAAB3NzaC1yc2E"},
+		"PublicKeyMaterial": {keyMaterial("ssh-rsa AAAAB3NzaC1yc2E")},
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "ImportKeyPair: %s", body)
 	assert.Contains(t, string(body), "<keyName>deploy</keyName>", "ImportKeyPair: %s", body)
@@ -1122,7 +1126,7 @@ func TestEC2_DeleteKeyPairByID(t *testing.T) {
 
 	resp, body := ec2Call(t, srv, region, "ImportKeyPair", url.Values{
 		"KeyName":           {"deploy"},
-		"PublicKeyMaterial": {"ssh-rsa AAAAB3NzaC1yc2E"},
+		"PublicKeyMaterial": {keyMaterial("ssh-rsa AAAAB3NzaC1yc2E")},
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "ImportKeyPair: %s", body)
 	id := extractEC2Tag(body, "keyPairId")
@@ -1532,7 +1536,7 @@ func describedTags(t *testing.T, srv *httptest.Server, k taggedKind, id string) 
 // ownerId. Its tag calls name it by KeyPairId, not by name.
 var keyPairKind = taggedKind{"key-pair", func(t *testing.T, srv *httptest.Server, tags ...string) string {
 	return createOK(t, srv, "ImportKeyPair", "keyPairId", withTagSpec(url.Values{
-		"KeyName": {"tagged"}, "PublicKeyMaterial": {"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterial"},
+		"KeyName": {"tagged"}, "PublicKeyMaterial": {keyMaterial("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterial")},
 	}, 1, "key-pair", tags...))
 }, func(string) (string, url.Values) { return "DescribeKeyPairs", url.Values{"KeyName.1": {"tagged"}} }}
 
@@ -1763,9 +1767,13 @@ func TestRegressionSweepDescribeSecurityGroupsListsEveryGroup(t *testing.T) {
 
 	out, err := c.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{MaxResults: aws.Int32(1000)})
 	require.NoError(t, err)
-	require.Len(t, out.SecurityGroups, 1)
-	assert.Equal(t, aws.ToString(sg.GroupId), aws.ToString(out.SecurityGroups[0].GroupId))
-	assert.Equal(t, "web", aws.ToString(out.SecurityGroups[0].GroupName))
+	names := map[string]string{}
+	for _, g := range out.SecurityGroups {
+		names[aws.ToString(g.GroupName)] = aws.ToString(g.GroupId)
+	}
+	assert.Len(t, out.SecurityGroups, 2, "web and the VPC's default group")
+	assert.Equal(t, aws.ToString(sg.GroupId), names["web"])
+	assert.NotEmpty(t, names["default"])
 
 	out, err = c.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{Filters: sweepFilter})
 	require.NoError(t, err)
@@ -2063,7 +2071,7 @@ func TestEC2_DescribeRefusesUnreadParams(t *testing.T) {
 		action, param, name string
 	}{
 		{"DescribeImages", "ExecutableBy.1", "ExecutableBy.N"},
-		{"DescribeKeyPairs", "IncludePublicKey", "IncludePublicKey"},
+		{"DescribeKeyPairs", "DryRun", "DryRun"},
 		{"DescribeAddresses", "PublicIp.x", "PublicIp.x"},
 		{"DescribeSubnets", "SubnetId.x", "SubnetId.x"},
 	} {
@@ -2493,6 +2501,8 @@ type describedIDs struct {
 	NetworkInterfaces []string `xml:"networkInterfaceSet>item>networkInterfaceId"`
 	Addresses         []string `xml:"addressesSet>item>allocationId"`
 	KeyPairs          []string `xml:"keySet>item>keyPairId"`
+	Images            []string `xml:"imagesSet>item>imageId"`
+	InstanceTypes     []string `xml:"instanceTypeSet>item>instanceType"`
 }
 
 func describeIDs(t *testing.T, srv *httptest.Server, action string, params url.Values) describedIDs {
@@ -2629,11 +2639,30 @@ func TestEC2_DescribeRouteTablesLookupFilters(t *testing.T) {
 	}
 }
 
+// vpcGroups maps each security group name in vpc to its id.
+func vpcGroups(t *testing.T, srv *httptest.Server, vpc string) map[string]string {
+	t.Helper()
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeSecurityGroups", ec2FilterParams("vpc-id", vpc))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeSecurityGroups: %s", body)
+	var out struct {
+		Groups []struct {
+			ID   string `xml:"groupId"`
+			Name string `xml:"groupName"`
+		} `xml:"securityGroupInfo>item"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	groups := map[string]string{}
+	for _, g := range out.Groups {
+		groups[g.Name] = g.ID
+	}
+	return groups
+}
+
 // TestEC2_DescribeSecurityGroupsFilters: a group name is unique only
 // within a VPC, so group-name is read with vpc-id; infrafactory's
 // absent-name lookup sends group-name with tag-key and wants an empty
-// set, not a 501. aws_default_security_group's group-name=default is
-// refused: every AWS VPC has that group and the rows have none.
+// set, not a 501. aws_default_security_group's group-name=default
+// answers the VPC's default group, which CreateVpc made.
 func TestEC2_DescribeSecurityGroupsFilters(t *testing.T) {
 	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
 	a, b := tagVPC(t, srv), tagVPC(t, srv)
@@ -2644,6 +2673,9 @@ func TestEC2_DescribeSecurityGroupsFilters(t *testing.T) {
 	}
 	webA := sg(a, "web in a", "infrafactory-run-id", "run-1")
 	webB := sg(b, "web in b", "Name", "b")
+	defA, defB := vpcGroups(t, srv, a)["default"], vpcGroups(t, srv, b)["default"]
+	require.NotEmpty(t, defA)
+	require.NotEmpty(t, defB)
 
 	for _, tc := range []struct {
 		kv   []string
@@ -2658,6 +2690,9 @@ func TestEC2_DescribeSecurityGroupsFilters(t *testing.T) {
 		{[]string{"description", "web in *"}, []string{webA, webB}},
 		{[]string{"owner-id", "000000000000", "group-name", "web"}, []string{webA, webB}},
 		{[]string{"group-name", "w?b", "vpc-id", b}, []string{webB}},
+		{[]string{"group-name", "default", "vpc-id", a}, []string{defA}},
+		{[]string{"group-name", "def*"}, []string{defA, defB}},
+		{[]string{"group-name", "*", "vpc-id", a}, []string{defA, webA}},
 	} {
 		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeSecurityGroups", ec2FilterParams(tc.kv...)).SecurityGroups, "%v", tc.kv)
 	}
@@ -2666,18 +2701,149 @@ func TestEC2_DescribeSecurityGroupsFilters(t *testing.T) {
 		params url.Values
 		want   string
 	}{
-		{ec2FilterParams("group-name", "default", "vpc-id", a), "group-name"},
-		{ec2FilterParams("group-name", "def*"), "group-name"},
-		{ec2FilterParams("group-name", "*", "vpc-id", a), "group-name"},
-		{url.Values{"Filter.1.Name": {"group-name"}, "Filter.1.Value.1": {"web"}, "Filter.1.Value.2": {"default"}}, "group-name"},
 		{ec2FilterParams("ip-permission.from-port", "22", "egress.ip-permission.cidr", "0.0.0.0/0", "group-name", "default"),
-			"egress.ip-permission.cidr, group-name, ip-permission.from-port"},
+			"egress.ip-permission.cidr, ip-permission.from-port"},
 	} {
 		resp, body := ec2Call(t, srv, tagRegion, "DescribeSecurityGroups", tc.params)
 		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%v: %s", tc.params, body)
 		assert.Equal(t, "DescribeSecurityGroups: not modelled by fakeaws: "+tc.want, extractEC2Tag(body, "Message"), "%v", tc.params)
 		assert.Equal(t, "filter-refused", lastClass(t, srv), "%v", tc.params)
 	}
+}
+
+// TestContract_ec2_vpc_default_security_group: CreateVpc makes the
+// VPC's default group with it, group-name=default with vpc-id selects
+// it, and it stays until DeleteVpc: CreateSecurityGroup cannot take
+// its name, DeleteSecurityGroup cannot delete it. A failed group insert
+// stores no VPC either.
+//
+// UNVERIFIED(aws-code): InvalidGroup.Reserved and CannotDelete from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func TestContract_ec2_vpc_default_security_group(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	vpc := tagVPC(t, srv)
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeSecurityGroups", ec2FilterParams("group-name", "default", "vpc-id", vpc))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	var out struct {
+		Groups []struct {
+			ID          string     `xml:"groupId"`
+			Name        string     `xml:"groupName"`
+			Description string     `xml:"groupDescription"`
+			VpcID       string     `xml:"vpcId"`
+			OwnerID     string     `xml:"ownerId"`
+			Ingress     []struct{} `xml:"ipPermissions>item"`
+			Egress      []struct{} `xml:"ipPermissionsEgress>item"`
+		} `xml:"securityGroupInfo>item"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	require.Len(t, out.Groups, 1, "%s", body)
+	def := out.Groups[0]
+	assert.Equal(t, "default", def.Name)
+	assert.Equal(t, "default VPC security group", def.Description)
+	assert.Equal(t, vpc, def.VpcID)
+	assert.Equal(t, awsproto.FakeAccountID, def.OwnerID)
+	assert.Empty(t, def.Ingress, "no rules")
+	assert.Empty(t, def.Egress, "no rules")
+	other := vpcGroups(t, srv, tagVPC(t, srv))["default"]
+	assert.NotEmpty(t, other, "another VPC has its own")
+	assert.NotEqual(t, def.ID, other, "another VPC has its own")
+
+	resp, body = ec2Call(t, srv, tagRegion, "CreateSecurityGroup", url.Values{
+		"GroupName": {"default"}, "GroupDescription": {"d"}, "VpcId": {vpc},
+	})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "CreateSecurityGroup default: %s", body)
+	assert.Equal(t, "InvalidGroup.Reserved", extractEC2Tag(body, "Code"))
+	resp, body = ec2Call(t, srv, tagRegion, "DeleteSecurityGroup", url.Values{"GroupId": {def.ID}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "DeleteSecurityGroup default: %s", body)
+	assert.Equal(t, "CannotDelete", extractEC2Tag(body, "Code"))
+	assert.Equal(t, map[string]string{"default": def.ID}, vpcGroups(t, srv, vpc), "the VPC keeps exactly its default group")
+
+	mustOK(t)(ec2Call(t, srv, tagRegion, "DeleteVpc", url.Values{"VpcId": {vpc}}))
+	resp, body = ec2Call(t, srv, tagRegion, "DescribeSecurityGroups", url.Values{"GroupId.1": {def.ID}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "gone with its VPC: %s", body)
+	assert.Equal(t, "InvalidGroup.NotFound", extractEC2Tag(body, "Code"))
+
+	_, err := app.Repository().DB().Exec(`DROP TABLE ec2_security_groups`)
+	require.NoError(t, err)
+	resp, body = ec2Call(t, srv, tagRegion, "CreateVpc", url.Values{"CidrBlock": {"10.9.0.0/16"}})
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "no table for the default group: %s", body)
+	assert.NotContains(t, string(mustOK(t)(ec2Call(t, srv, tagRegion, "DescribeVpcs", nil))), "10.9.0.0/16", "no VPC without its default group")
+}
+
+// bareVPC stores a VPC without its default group, as fakeaws stored
+// every VPC before CreateVpc made the group.
+func bareVPC(t *testing.T, repo *repository.Repository, id string) {
+	t.Helper()
+	require.NoError(t, repo.CreateVPCWithDefaultGroup(awsproto.FakeAccountID, &repository.EC2VPC{
+		ID: id, CidrBlock: "10.0.0.0/16", Region: tagRegion, ARN: "arn", State: "available", CreatedAt: "t",
+	}, &repository.EC2SecurityGroup{ID: "sg-" + id, VPCID: id, GroupName: repository.DefaultGroupName, Region: tagRegion, ARN: "arn", CreatedAt: "t"}))
+	_, err := repo.DB().Exec(`DELETE FROM ec2_security_groups WHERE vpc_id = ?`, id)
+	require.NoError(t, err)
+}
+
+// defaultGroups lists vpc's groups named default.
+func defaultGroups(t *testing.T, srv *httptest.Server, vpc string) []string {
+	t.Helper()
+	return describeIDs(t, srv, "DescribeSecurityGroups", ec2FilterParams("group-name", "default", "vpc-id", vpc)).SecurityGroups
+}
+
+// TestEC2_DefaultGroupBackfilled: a VPC stored without its default
+// group gets it at boot and when /mock/restore brings it back, so
+// group-name=default never answers it with nothing. A loaded database
+// answers its rows.
+func TestEC2_DefaultGroupBackfilled(t *testing.T) {
+	openBare := func(dbPath, id string) {
+		t.Helper()
+		repo, err := repository.New(dbPath)
+		require.NoError(t, err)
+		bareVPC(t, repo, id)
+		require.NoError(t, repo.Close())
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	openBare(dbPath, "vpc-old")
+	app, srv := newTestApp(t, dbPath)
+	assert.Len(t, defaultGroups(t, srv, "vpc-old"), 1, "boot")
+
+	bareVPC(t, app.Repository(), "vpc-snap")
+	require.Empty(t, defaultGroups(t, srv, "vpc-snap"), "stored bare after boot")
+	mustOK(t)(doPost(t, srv, "/mock/snapshot"))
+	mustOK(t)(doPost(t, srv, "/mock/restore"))
+	assert.Len(t, defaultGroups(t, srv, "vpc-snap"), 1, "restore")
+	assert.Len(t, defaultGroups(t, srv, "vpc-old"), 1, "never a second")
+
+	loadedPath := filepath.Join(t.TempDir(), "loaded.db")
+	openBare(loadedPath, "vpc-loaded")
+	markLoaded(t, loadedPath, true)
+	_, srv = newTestApp(t, loadedPath)
+	assert.Empty(t, defaultGroups(t, srv, "vpc-loaded"), "a loaded database answers its rows")
+}
+
+// TestEC2_RestoreBackfillFailureKeepsLiveState: /mock/restore backfills
+// the snapshot's copy before it goes live, so a backfill that fails
+// answers 500 with the live state as it was, never the snapshot's state
+// half backfilled. The snapshot carries a trigger that refuses every
+// group insert; the live db does not.
+func TestEC2_RestoreBackfillFailureKeepsLiveState(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	app, srv := newTestApp(t, dbPath)
+	db := app.Repository().DB()
+	bareVPC(t, app.Repository(), "vpc-bare")
+	_, err := db.Exec(`CREATE TRIGGER refuse_groups BEFORE INSERT ON ec2_security_groups BEGIN SELECT RAISE(ABORT, 'refused'); END`)
+	require.NoError(t, err)
+	mustOK(t)(doPost(t, srv, "/mock/snapshot"))
+	_, err = db.Exec(`DROP TRIGGER refuse_groups`)
+	require.NoError(t, err)
+	live := tagVPC(t, srv)
+
+	resp, body := doPost(t, srv, "/mock/restore")
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "%s", body)
+	assert.Contains(t, describeIDs(t, srv, "DescribeVpcs", nil).Vpcs, live, "the live state stays")
+	assert.Len(t, defaultGroups(t, srv, live), 1)
+	assert.Empty(t, defaultGroups(t, srv, "vpc-bare"), "nothing backfilled into the live state")
+	assert.NoFileExists(t, dbPath+".restore", "the staged copy is removed")
+	_, err = db.Exec(`INSERT INTO ec2_security_groups (account_id, region, id, vpc_id, group_name, description, arn, data, created_at)
+		VALUES (?, ?, 'sg-probe', ?, 'probe', 'd', 'arn', '{}', 't')`, awsproto.FakeAccountID, tagRegion, live)
+	assert.NoError(t, err, "the live db has no trigger: it was never swapped for the snapshot's copy")
 }
 
 // UNVERIFIED(aws-code): VPCIdNotSpecified from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
@@ -2754,11 +2920,12 @@ func TestEC2_DescribeInstancesFilters(t *testing.T) {
 		want []string
 	}{
 		{nil, []string{a, gone, b}},
-		{[]string{"vpc-id", vpcA}, []string{a, gone}},
+		{[]string{"vpc-id", vpcA}, []string{a}},
+		{[]string{"subnet-id", netA.subnet}, []string{a}},
 		{[]string{"vpc-id", vpcB}, []string{b}},
 		{[]string{"instance-state-name", "running"}, []string{a, b}},
 		{[]string{"instance-id", b}, []string{b}},
-		{[]string{"instance-type", "t3.micro", "vpc-id", vpcA}, []string{a, gone}},
+		{[]string{"instance-type", "t3.micro", "vpc-id", vpcA}, []string{a}},
 		{[]string{"image-id", "ami-0abcd1234", "subnet-id", netB.subnet}, []string{b}},
 		{[]string{"private-ip-address", ipA.PrivateIpAddress}, []string{a}},
 		{[]string{"ip-address", "*"}, []string{b}},
@@ -2844,7 +3011,7 @@ func TestEC2_DescribeKeyPairsFilters(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	importKey := func(name string, tags ...string) string {
 		return createOK(t, srv, "ImportKeyPair", "keyPairId", withTagSpec(url.Values{
-			"KeyName": {name}, "PublicKeyMaterial": {"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + name},
+			"KeyName": {name}, "PublicKeyMaterial": {keyMaterial("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + name)},
 		}, 1, "key-pair", tags...))
 	}
 	a, b := importKey("a", "Name", "a"), importKey("b", "Name", "b")

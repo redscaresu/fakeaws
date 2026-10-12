@@ -247,13 +247,83 @@ type EC2EIP struct {
 
 // ----- VPC -----
 
-func (r *Repository) CreateVPC(account string, v *EC2VPC) error {
+// execer is the Exec *sql.DB and *sql.Tx share, so one insert serves a
+// lone write and a transaction's.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// DefaultGroupName is the security group every VPC has. AWS reserves
+// it: no other group may take the name, and it cannot be deleted.
+const DefaultGroupName = "default"
+
+// CreateVPCWithDefaultGroup stores v and sg, its security group named
+// DefaultGroupName, in one transaction: EC2's CreateVpc makes both, so
+// no read sees the VPC without its default group.
+func (r *Repository) CreateVPCWithDefaultGroup(account string, v *EC2VPC, sg *EC2SecurityGroup) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	body, _ := json.Marshal(v)
-	_, err := r.db.Exec(
+	if _, err := tx.Exec(
 		`INSERT INTO ec2_vpcs (account_id, region, id, cidr_block, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		account, v.Region, v.ID, v.CidrBlock, v.ARN, string(body), v.CreatedAt,
-	)
-	return mapInsertError(err)
+	); err != nil {
+		return mapInsertError(err)
+	}
+	if err := insertSecurityGroup(tx, account, sg); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// BackfillDefaultGroups gives each VPC that has no group named
+// DefaultGroupName the one newGroup makes, unless the database is
+// loaded, whose rows are answered as they are. A VPC stored before
+// CreateVpc made its default group (a file database, a snapshot) would
+// otherwise answer group-name=default with nothing. The loaded read,
+// the list and the inserts share one transaction, so a failure adds
+// no group.
+func (r *Repository) BackfillDefaultGroups(newGroup func(account, region, vpcID string) *EC2SecurityGroup) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	loaded, err := readLoaded(tx)
+	if err != nil {
+		return fmt.Errorf("read loaded flag: %w", err)
+	}
+	if loaded {
+		return nil
+	}
+	rows, err := tx.Query(`SELECT v.account_id, v.region, v.id FROM ec2_vpcs v
+		WHERE NOT EXISTS (SELECT 1 FROM ec2_security_groups g
+		                  WHERE g.account_id = v.account_id AND g.vpc_id = v.id AND g.group_name = ?)`, DefaultGroupName)
+	if err != nil {
+		return err
+	}
+	var bare [][3]string
+	for rows.Next() {
+		var v [3]string
+		if err := rows.Scan(&v[0], &v[1], &v[2]); err != nil {
+			rows.Close()
+			return err
+		}
+		bare = append(bare, v)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, v := range bare {
+		if err := insertSecurityGroup(tx, v[0], newGroup(v[0], v[1], v[2])); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // GetVPC looks up a VPC by id, optionally scoped to a region. Pass
@@ -786,8 +856,12 @@ func (r *Repository) CreateSecurityGroup(account string, sg *EC2SecurityGroup) e
 	if _, err := r.GetVPC(account, sg.Region, sg.VPCID); err != nil {
 		return err
 	}
+	return insertSecurityGroup(r.db, account, sg)
+}
+
+func insertSecurityGroup(ex execer, account string, sg *EC2SecurityGroup) error {
 	body, _ := json.Marshal(sg)
-	_, err := r.db.Exec(
+	_, err := ex.Exec(
 		`INSERT INTO ec2_security_groups (account_id, region, id, vpc_id, group_name, description, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		account, sg.Region, sg.ID, sg.VPCID, sg.GroupName, sg.Description, sg.ARN, string(body), sg.CreatedAt,
 	)
@@ -923,21 +997,8 @@ func (r *Repository) CreateEIP(account string, eip *EC2EIP) error {
 		return err
 	}
 	defer tx.Rollback()
-	rows, err := tx.Query(`SELECT public_ip FROM ec2_eips WHERE account_id = ? AND region = ?`, account, eip.Region)
+	held, err := stringSet(tx, `SELECT public_ip FROM ec2_eips WHERE account_id = ? AND region = ?`, account, eip.Region)
 	if err != nil {
-		return err
-	}
-	held := map[string]bool{}
-	for rows.Next() {
-		var ip string
-		if err := rows.Scan(&ip); err != nil {
-			rows.Close()
-			return err
-		}
-		held[ip] = true
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	if eip.PublicIP, err = freeIP(eip.PublicIP, held); err != nil {
@@ -1031,7 +1092,8 @@ func (r *Repository) AssociateEIP(account string, eip *EC2EIP, eni *EC2NetworkIn
 }
 
 // DisassociateEIP saves eip, its association cleared, and eni's public
-// IP in one transaction. eni may be nil.
+// IP in one transaction, claimPublicIP moving a public IP eni gets back
+// past one another ENI holds. eni may be nil.
 func (r *Repository) DisassociateEIP(account string, eip *EC2EIP, eni *EC2NetworkInterface) error {
 	tx, err := r.db.Begin()
 	if err != nil {
@@ -1051,6 +1113,9 @@ func (r *Repository) DisassociateEIP(account string, eip *EC2EIP, eni *EC2Networ
 		return models.ErrNotFound
 	}
 	if eni != nil {
+		if err := claimPublicIP(tx, account, eni); err != nil {
+			return err
+		}
 		if err := updateENITx(tx, account, eni); err != nil {
 			return err
 		}

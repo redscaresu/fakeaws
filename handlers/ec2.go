@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -263,6 +264,23 @@ type ec2CreateVpcResult struct {
 	Vpc ec2VpcXML `xml:"vpc"`
 }
 
+// ec2CreateVpc stores the VPC and its default security group.
+//
+// CRITICAL[ec2-vpc-default-security-group]: CreateVpc stores the VPC
+// and its security group named default, description "default VPC
+// security group", in one transaction, so DescribeSecurityGroups
+// group-name=default with vpc-id answers exactly that group, as
+// terraform-provider-aws's default_security_group_id and
+// aws_default_security_group read it. CreateSecurityGroup refuses the
+// name with 400 InvalidGroup.Reserved and DeleteSecurityGroup refuses
+// the group with 400 CannotDelete, so the VPC keeps it until DeleteVpc.
+// A database that is not loaded gets one for each VPC stored without
+// it (repository.BackfillDefaultGroups) at boot and in /mock/restore's
+// copy of the snapshot before it goes live; a loaded database answers
+// its rows. The group has no rules: AWS's allows all traffic from itself and all
+// egress, but fakeaws gives a created group no default egress either.
+//
+// UNVERIFIED(aws-code): InvalidGroup.Reserved and CannotDelete from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	cidr := req.Params.Get("CidrBlock")
 	if cidr == "" {
@@ -275,7 +293,7 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 	}
 	id := "vpc-" + ec2RandID()
 	v := newEC2VPC(account, region, id, cidr)
-	err := app.repo.CreateVPC(account, v)
+	err := app.repo.CreateVPCWithDefaultGroup(account, v, newDefaultGroup(account, region, id))
 	if err == nil {
 		err = app.tagNew(account, region, onResource(specs["vpc"], id, "vpc"),
 			func() error { return app.repo.DeleteVPC(account, region, id) })
@@ -326,7 +344,7 @@ func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region s
 		return
 	}
 	var vpcs []*repository.EC2VPC
-	ids := queryListValues(req.Params, "VpcId.")
+	ids := queryIDs(req.Params, "VpcId.")
 	var err error
 	if len(ids) == 0 {
 		vpcs, err = app.repo.ListVPCs(account, region)
@@ -592,10 +610,14 @@ var subnetFilters = ec2FilterTable[ec2SubnetXML]{
 	tagID: func(s ec2SubnetXML) string { return s.SubnetId },
 }
 
+// ec2SubnetNotFound is EC2's code for a subnet id it does not have.
+const ec2SubnetNotFound = "InvalidSubnetID.NotFound"
+
 // ec2DescribeSubnets answers SubnetId.N, the direct-by-id lookup the
 // provider's Read sends to find exactly the subnet it created (a wrong
 // match count loops its wait until "couldn't find resource"), and
-// subnetFilters.
+// subnetFilters. An unknown SubnetId.N is 400 InvalidSubnetID.NotFound
+// naming it, which the provider's delete wait reads as gone.
 func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	filters, ok := subnetFilters.read(w, req, "SubnetId.N")
 	if !ok {
@@ -606,6 +628,13 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
+	}
+	for _, id := range ids {
+		if !slices.ContainsFunc(subnets, func(s *repository.EC2Subnet) bool { return s.ID == id }) {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				ec2SubnetNotFound, fmt.Sprintf("The subnet ID '%s' does not exist", id))
+			return
+		}
 	}
 	_, zoneID, err := app.ec2Zones(account, region)
 	if err != nil {
@@ -691,6 +720,21 @@ func newEC2Subnet(account, region, id, vpcID, cidr, az string) *repository.EC2Su
 		ARN:    awsproto.BuildEC2SubnetARN(region, account, id),
 		State:  "available", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
+}
+
+func newEC2SecurityGroup(account, region, vpcID, name, desc string) *repository.EC2SecurityGroup {
+	id := "sg-" + ec2RandID()
+	return &repository.EC2SecurityGroup{
+		ID: id, VPCID: vpcID, GroupName: name, Description: desc,
+		Region:    region,
+		ARN:       awsproto.BuildEC2SecurityGroupARN(region, account, id),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+// newDefaultGroup is vpcID's security group named default.
+func newDefaultGroup(account, region, vpcID string) *repository.EC2SecurityGroup {
+	return newEC2SecurityGroup(account, region, vpcID, repository.DefaultGroupName, "default VPC security group")
 }
 
 func ec2VpcToXML(account string, v *repository.EC2VPC) ec2VpcXML {
@@ -832,7 +876,7 @@ func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, accou
 		return
 	}
 	var igws []*repository.EC2InternetGateway
-	ids := queryListValues(req.Params, "InternetGatewayId.")
+	ids := queryIDs(req.Params, "InternetGatewayId.")
 	var err error
 	if len(ids) == 0 {
 		igws, err = app.repo.ListInternetGateways(account, region)
@@ -1044,11 +1088,15 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 	if !ok {
 		return
 	}
-	wanted := queryListValues(req.Params, "RouteTableId.")
+	wanted := queryIDs(req.Params, "RouteTableId.")
 	// Pre-load all routes once and key by route_table_id so the
 	// per-RT lookup below is O(1). ListRoutes returns the union for
 	// the account; we filter by RT id at populate time.
-	allRoutes, _ := app.repo.ListRoutes(account)
+	allRoutes, err := app.repo.ListRoutes(account)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
 	routesByRT := make(map[string][]ec2RouteXML, len(allRoutes))
 	for _, rt := range allRoutes {
 		routesByRT[rt.RouteTableID] = append(routesByRT[rt.RouteTableID], ec2RouteXML{
@@ -1063,7 +1111,11 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 	}
 	// Same trick for associations — populate <associationSet> so the
 	// CreateAssociation wait-loop terminates.
-	allAssocs, _ := app.repo.ListRouteTableAssociations(account)
+	allAssocs, err := app.repo.ListRouteTableAssociations(account)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
 	assocsByRT := make(map[string][]ec2RouteTableAssociationXML, len(allAssocs))
 	for _, a := range allAssocs {
 		x := ec2RouteTableAssociationXML{
@@ -1207,18 +1259,26 @@ type ec2DescribeAddressesResult struct {
 	AddressSet []ec2AddressXML `xml:"addressesSet>item"`
 }
 
-// ec2DerivePublicIP synthesises a deterministic-looking public IP from
-// the allocation id so DescribeAddresses returns something stable.
-// Using the documentation/test-net 203.0.113.0/24 (TEST-NET-3, RFC 5737)
-// per concepts.md "Standing patterns" item 8 — never expose a real
-// routable IP. Two ids can derive one IP; for an address, CreateEIP
-// steps past an IP already held in the region.
-func ec2DerivePublicIP(allocID string) string {
+// ec2EIPNet and ec2AutoIPNet are the /24s Elastic IPs and the public
+// IPs a launch auto-assigns are drawn from: RFC 5737 test nets
+// (TEST-NET-3 and TEST-NET-1), per concepts.md "Standing patterns" item
+// 8, never a real routable IP. They are apart, so an auto-assigned IP
+// is never an address's.
+const (
+	ec2EIPNet    = "203.0.113."
+	ec2AutoIPNet = "192.0.2."
+)
+
+// ec2DerivePublicIP synthesises a deterministic-looking public IP in
+// net from id (an allocation id or an ENI id). Two ids can derive one
+// IP; repository.CreateEIP and claimPublicIP step past an IP already
+// held in the region.
+func ec2DerivePublicIP(net, id string) string {
 	sum := 0
-	for _, b := range []byte(allocID) {
+	for _, b := range []byte(id) {
 		sum = (sum*31 + int(b)) & 0xff
 	}
-	return fmt.Sprintf("203.0.113.%d", sum)
+	return net + strconv.Itoa(sum)
 }
 
 func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -1238,7 +1298,7 @@ func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, regio
 	allocID := "eipalloc-" + ec2RandID()
 	eip := &repository.EC2EIP{
 		AllocationID: allocID, Domain: domain,
-		PublicIP:  ec2DerivePublicIP(allocID),
+		PublicIP:  ec2DerivePublicIP(ec2EIPNet, allocID),
 		Region:    region,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -1260,7 +1320,7 @@ func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, regio
 // InvalidAllocationID.NotFound for a missing one as EC2 does, and
 // reports false.
 func (app *Application) ec2FindAddresses(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) ([]*repository.EC2EIP, bool) {
-	ids := queryListValues(req.Params, "AllocationId.")
+	ids := queryIDs(req.Params, "AllocationId.")
 	if len(ids) == 0 {
 		eips, err := app.repo.ListEIPs(account, region)
 		if err != nil {
@@ -1481,7 +1541,8 @@ func (app *Application) associationTarget(w http.ResponseWriter, account, region
 }
 
 // ec2DisassociateAddress clears the association AssociationId names,
-// and the ENI gets back the public IP its launch gave it, if any. An
+// and an ENI whose launch auto-assigned a public IP gets one again,
+// derived as at launch and held by no other ENI in the region. An
 // unknown association is InvalidAssociationID.NotFound, which the
 // provider reads as already detached.
 func (app *Application) ec2DisassociateAddress(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -1505,7 +1566,7 @@ func (app *Application) ec2DisassociateAddress(w http.ResponseWriter, account, r
 	}
 	eni.PublicIP = ""
 	if eni.AutoPublicIP {
-		eni.PublicIP = ec2DerivePublicIP(eni.ID)
+		eni.PublicIP = ec2DerivePublicIP(ec2AutoIPNet, eni.ID)
 	}
 	eip.AssociationID, eip.InstanceID, eip.NetworkInterfaceID, eip.PrivateIP = "", "", "", ""
 	if err := app.repo.DisassociateEIP(account, eip, eni); err != nil {
@@ -1698,21 +1759,20 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 		ec2Refuse(w, req.Action, "no GroupName, GroupDescription or VpcId") // AWS puts a group without VpcId in the default VPC
 		return
 	}
+	if groupName == repository.DefaultGroupName {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidGroup.Reserved",
+			fmt.Sprintf("The name '%s' is reserved, and cannot be used to create a new security group.", repository.DefaultGroupName))
+		return
+	}
 	specs, refused := refuseTagSpecifications(w, req.Params, "security-group")
 	if refused {
 		return
 	}
-	id := "sg-" + ec2RandID()
-	sg := &repository.EC2SecurityGroup{
-		ID: id, VPCID: vpcID, GroupName: groupName, Description: desc,
-		Region:    region,
-		ARN:       awsproto.BuildEC2SecurityGroupARN(region, account, id),
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-	}
+	sg := newEC2SecurityGroup(account, region, vpcID, groupName, desc)
 	err := app.repo.CreateSecurityGroup(account, sg)
 	if err == nil {
-		err = app.tagNew(account, region, onResource(specs["security-group"], id, "security-group"),
-			func() error { return app.repo.DeleteSecurityGroup(account, region, id) })
+		err = app.tagNew(account, region, onResource(specs["security-group"], sg.ID, "security-group"),
+			func() error { return app.repo.DeleteSecurityGroup(account, region, sg.ID) })
 	}
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
@@ -1726,7 +1786,7 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 // every group in the region. It writes the error itself and reports
 // false.
 func (app *Application) ec2FindSecurityGroups(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) ([]*repository.EC2SecurityGroup, bool) {
-	ids := queryListValues(req.Params, "GroupId.")
+	ids := queryIDs(req.Params, "GroupId.")
 	if len(ids) == 0 {
 		sgs, err := app.repo.ListSecurityGroups(account, region)
 		if err != nil {
@@ -1765,9 +1825,7 @@ func (app *Application) ec2FindSecurityGroups(w http.ResponseWriter, account, re
 
 // sgFilters are the DescribeSecurityGroups filters fakeaws models: the
 // AWS names whose value a group answers and the tag filters. The
-// ip-permission.* and egress.ip-permission.* names stay refused, as
-// does a group-name that matches default: every AWS VPC has a group
-// named default, and fakeaws's rows have none to answer with.
+// ip-permission.* and egress.ip-permission.* names stay refused.
 var sgFilters = ec2FilterTable[ec2SecurityGroupXML]{
 	values: map[string]func(ec2SecurityGroupXML) []string{
 		"group-id":    func(g ec2SecurityGroupXML) []string { return []string{g.GroupId} },
@@ -1776,8 +1834,7 @@ var sgFilters = ec2FilterTable[ec2SecurityGroupXML]{
 		"description": func(g ec2SecurityGroupXML) []string { return []string{g.GroupDesc} },
 		"owner-id":    func(g ec2SecurityGroupXML) []string { return []string{g.OwnerId} },
 	},
-	tagID:   func(g ec2SecurityGroupXML) string { return g.GroupId },
-	rowless: map[string]string{"group-name": "default"},
+	tagID: func(g ec2SecurityGroupXML) string { return g.GroupId },
 }
 
 // ec2DescribeSecurityGroups answers the provider's GroupId.N lookup
@@ -1855,6 +1912,16 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, r
 	if id == "" {
 		// AWS also accepts GroupName for non-VPC SGs; v1 supports GroupId only.
 		ec2Refuse(w, req.Action, "no GroupId")
+		return
+	}
+	sg, err := app.repo.GetSecurityGroup(account, region, id)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	if sg.GroupName == repository.DefaultGroupName {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "CannotDelete",
+			fmt.Sprintf("the specified group: %q name: %q cannot be deleted by a user", id, repository.DefaultGroupName))
 		return
 	}
 	if err := app.repo.DeleteSecurityGroup(account, region, id); err != nil {
@@ -2139,7 +2206,8 @@ type ec2InstanceXML struct {
 	InstanceId          string                   `xml:"instanceId"`
 	ImageId             string                   `xml:"imageId"`
 	InstanceType        string                   `xml:"instanceType"`
-	SubnetId            string                   `xml:"subnetId"`
+	KeyName             string                   `xml:"keyName,omitempty"`
+	SubnetId            string                   `xml:"subnetId,omitempty"`
 	PrivateIpAddress    string                   `xml:"privateIpAddress,omitempty"`
 	IpAddress           string                   `xml:"ipAddress,omitempty"`
 	SourceDestCheck     *bool                    `xml:"sourceDestCheck,omitempty"`
@@ -2251,7 +2319,7 @@ func ec2InstanceToXML(account string, inst *repository.EC2Instance, eni *reposit
 		InstanceId:    inst.ID,
 		ImageId:       inst.AMIID,
 		InstanceType:  inst.InstanceType,
-		SubnetId:      inst.SubnetID,
+		KeyName:       inst.KeyName,
 		EbsOptimized:  inst.EBSOptimized,
 		InstanceState: ec2InstanceStateForName(inst.State),
 	}
@@ -2265,6 +2333,7 @@ func ec2InstanceToXML(account string, inst *repository.EC2Instance, eni *reposit
 		return x
 	}
 	eniXML := ec2ENIToXML(account, eni)
+	x.SubnetId = eni.SubnetID
 	x.PrivateIpAddress = eni.PrivateIP
 	x.IpAddress = eni.PublicIP
 	x.SourceDestCheck = &eniXML.SourceDestCheck
@@ -2316,6 +2385,18 @@ func queryListValues(p url.Values, prefix string) []string {
 	out := []string{}
 	for _, n := range ns {
 		out = append(out, p[prefix+n]...)
+	}
+	return out
+}
+
+// queryIDs is queryListValues with each value once, in first-seen
+// order: a Describe answers an id named twice once, as AWS does.
+func queryIDs(p url.Values, prefix string) []string {
+	var out []string
+	for _, v := range queryListValues(p, prefix) {
+		if !slices.Contains(out, v) {
+			out = append(out, v)
+		}
 	}
 	return out
 }
@@ -2443,9 +2524,21 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
+	keyName := req.Params.Get("KeyName")
+	if keyName != "" {
+		_, err := app.repo.GetKeyPair(account, region, keyName)
+		if errors.Is(err, models.ErrNotFound) {
+			writeKeyPairNotFound(w, "The key pair '%s' does not exist", keyName)
+			return
+		}
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return
+		}
+	}
 	id := "i-" + ec2RandID()
 	inst := &repository.EC2Instance{
-		ID: id, SubnetID: nw.subnetID, AMIID: imageID, InstanceType: instanceType,
+		ID: id, SubnetID: nw.subnetID, AMIID: imageID, InstanceType: instanceType, KeyName: keyName,
 		IAMInstanceProfileName: req.Params.Get("IamInstanceProfile.Name"),
 		UserData:               req.Params.Get("UserData"),
 		State:                  "running",
@@ -2459,7 +2552,7 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		SecurityGroupIDs: nw.sgIDs, PrivateIP: nw.privateIP, SourceDestCheck: true,
 	}
 	if nw.associatePublicIP == "true" || (nw.associatePublicIP == "" && subnet.MapPublicIPOnLaunch) {
-		eni.PublicIP, eni.AutoPublicIP = ec2DerivePublicIP(eni.ID), true
+		eni.PublicIP, eni.AutoPublicIP = ec2DerivePublicIP(ec2AutoIPNet, eni.ID), true
 	}
 	err = app.repo.CreateInstance(account, inst, eni)
 	if err == nil {
@@ -2480,16 +2573,17 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 }
 
 // ec2InstanceRow is what DescribeInstances filters: the instance as
-// answered, plus what the answer does not show, the subnet's VPC and
-// zone and the owning account.
+// answered, plus what the answer does not show, the primary ENI's VPC,
+// the launch subnet's zone and the owning account.
 type ec2InstanceRow struct {
 	x                    ec2InstanceXML
 	vpcID, zone, ownerID string
 }
 
 // instanceFilters are the DescribeInstances filters fakeaws models;
-// private-ip-address and ip-address come from the primary ENI, so a
-// terminated instance matches neither.
+// subnet-id, vpc-id, private-ip-address and ip-address come from the
+// primary ENI, so a terminated instance, which has none, matches none
+// of them, as in AWS. availability-zone is the launch subnet's.
 var instanceFilters = ec2FilterTable[ec2InstanceRow]{
 	values: map[string]func(ec2InstanceRow) []string{
 		"instance-id":         func(r ec2InstanceRow) []string { return []string{r.x.InstanceId} },
@@ -2513,7 +2607,7 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 	if !ok {
 		return
 	}
-	instances, ok := app.ec2FindInstances(w, account, region, parseInstanceIDs(req))
+	instances, ok := app.ec2FindInstances(w, account, region, queryIDs(req.Params, "InstanceId."))
 	if !ok {
 		return
 	}
@@ -2535,10 +2629,14 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 		ReservationSet: make([]ec2ReservationXML, 0, len(instances)),
 	}
 	for _, inst := range instances {
-		row := ec2InstanceRow{x: ec2InstanceToXML(account, inst, enis[inst.ID]), ownerID: account}
+		eni := enis[inst.ID]
+		row := ec2InstanceRow{x: ec2InstanceToXML(account, inst, eni), ownerID: account}
 		row.x.TagSet = tags[inst.ID]
+		if eni != nil {
+			row.vpcID = eni.VPCID
+		}
 		if i := slices.IndexFunc(subnets, func(s *repository.EC2Subnet) bool { return s.ID == inst.SubnetID }); i >= 0 {
-			row.vpcID, row.zone = subnets[i].VPCID, subnets[i].AvailabilityZone
+			row.zone = subnets[i].AvailabilityZone
 		}
 		if !instanceFilters.matches(row, filters, tags) {
 			continue
@@ -2866,6 +2964,7 @@ type ec2KeyPairXML struct {
 	KeyPairId      string              `xml:"keyPairId,omitempty"`
 	KeyName        string              `xml:"keyName"`
 	KeyFingerprint string              `xml:"keyFingerprint"`
+	PublicKey      string              `xml:"publicKey,omitempty"`
 	TagSet         []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
 }
 
@@ -2891,14 +2990,28 @@ func ec2KeyFingerprint(publicKey string) string {
 	return strings.Join(parts, ":")
 }
 
+// ec2ImportKeyPair stores the key text: PublicKeyMaterial is a blob,
+// which the SDK sends base64-encoded on the Query wire, so the row holds
+// what aws_key_pair's public_key said and DescribeKeyPairs'
+// IncludePublicKey answers it as is. Material that is not base64 is
+// 400 InvalidKeyPair.Format.
+//
+// UNVERIFIED(aws-code): InvalidKeyPair.Format from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("KeyName")
-	publicKey := req.Params.Get("PublicKeyMaterial")
-	if name == "" || publicKey == "" {
+	material := req.Params.Get("PublicKeyMaterial")
+	if name == "" || material == "" {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("KeyName and PublicKeyMaterial required: %w", models.ErrConflict))
 		return
 	}
+	decoded, err := base64.StdEncoding.DecodeString(material)
+	if err != nil {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidKeyPair.Format",
+			"Key is not in valid OpenSSH public key format: PublicKeyMaterial is not base64-encoded")
+		return
+	}
+	publicKey := string(decoded)
 	specs, refused := refuseTagSpecifications(w, req.Params, "key-pair")
 	if refused {
 		return
@@ -2909,7 +3022,7 @@ func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region 
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	tags := onResource(specs["key-pair"], kp.ID, "key-pair")
-	err := app.repo.CreateKeyPair(account, kp)
+	err = app.repo.CreateKeyPair(account, kp)
 	if err == nil {
 		err = app.tagNew(account, region, tags,
 			func() error { return app.repo.DeleteKeyPair(account, region, name) })
@@ -2937,11 +3050,12 @@ var keyPairFilters = ec2FilterTable[ec2KeyPairXML]{
 
 // ec2DescribeKeyPairs answers the region's key pairs narrowed by
 // KeyName.N, terraform-provider-aws's read path, KeyPairId.N and
-// keyPairFilters. An unknown KeyName.N or KeyPairId.N fails the call
-// with writeKeyPairNotFound.
+// keyPairFilters, each with its publicKey when IncludePublicKey=true,
+// as data.aws_key_pair's include_public_key asks. An unknown KeyName.N
+// or KeyPairId.N fails the call with writeKeyPairNotFound.
 func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	filters, ok := keyPairFilters.read(w, req, "KeyName.N", "KeyPairId.N")
-	if !ok {
+	filters, ok := keyPairFilters.read(w, req, "KeyName.N", "KeyPairId.N", "IncludePublicKey")
+	if !ok || refuseInvalidValues(w, req.Params, map[string][]string{"IncludePublicKey": ec2Bool}) {
 		return
 	}
 	kps, err := app.repo.ListKeyPairs(account, region)
@@ -2970,6 +3084,9 @@ func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, regi
 	out := ec2DescribeKeyPairsResult{KeySet: []ec2KeyPairXML{}}
 	for _, kp := range kps {
 		x := ec2KeyPairToXML(kp, tags)
+		if req.Params.Get("IncludePublicKey") == "true" {
+			x.PublicKey = kp.PublicKey
+		}
 		if (len(names) == 0 || slices.Contains(names, kp.Name)) && (len(ids) == 0 || slices.Contains(ids, kp.ID)) &&
 			keyPairFilters.matches(x, filters, tags) {
 			out.KeySet = append(out.KeySet, x)
@@ -3060,7 +3177,7 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 	// BLOCKING #1) so callers in any valid AWS region see the same
 	// fixture set as the boot-time slice.
 	app.ensureAMIFixturesForRegion(account, region)
-	wanted := queryListValues(req.Params, "ImageId.")
+	wanted := queryIDs(req.Params, "ImageId.")
 	var amis []*repository.EC2AMI
 	if len(wanted) == 0 {
 		var err error
@@ -3355,7 +3472,7 @@ func (app *Application) ec2DescribeInstanceTypes(w http.ResponseWriter, account,
 	if _, ok := ec2NoFilters.read(w, req, "InstanceType.N"); !ok {
 		return
 	}
-	wanted := queryListValues(req.Params, "InstanceType.")
+	wanted := queryIDs(req.Params, "InstanceType.")
 	if len(wanted) == 0 {
 		// Unfiltered DescribeInstanceTypes returns a representative
 		// slice. Common terraform-provider-aws docs examples are t3.* /
@@ -3480,7 +3597,7 @@ var ec2TaggedKinds = []ec2TaggedKind{
 		_, err := app.repo.GetVPC(account, region, id)
 		return err
 	}},
-	{"subnet-", "subnet", "InvalidSubnetID.NotFound", func(app *Application, account, region, id string) error {
+	{"subnet-", "subnet", ec2SubnetNotFound, func(app *Application, account, region, id string) error {
 		_, err := app.repo.GetSubnet(account, region, id)
 		return err
 	}},

@@ -105,6 +105,7 @@ type EC2Instance struct {
 	SubnetID               string `json:"subnet_id"`
 	AMIID                  string `json:"ami_id"`
 	InstanceType           string `json:"instance_type"`
+	KeyName                string `json:"key_name,omitempty"`
 	IAMInstanceProfileName string `json:"iam_instance_profile_name,omitempty"`
 	UserData               string `json:"user_data,omitempty"` // base64, as RunInstances sent it
 	State                  string `json:"state"`
@@ -217,11 +218,14 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance, eni *EC2N
 	); err != nil {
 		return mapInsertError(err)
 	}
-	used, err := usedPrivateIPs(tx, account, subnet.ID)
+	used, err := stringSet(tx, `SELECT private_ip FROM ec2_network_interfaces WHERE account_id = ? AND subnet_id = ?`, account, subnet.ID)
 	if err != nil {
 		return err
 	}
 	if eni.PrivateIP, err = privateIP(subnet.CidrBlock, eni.PrivateIP, used); err != nil {
+		return err
+	}
+	if err := claimPublicIP(tx, account, eni); err != nil {
 		return err
 	}
 	eniBody, _ := json.Marshal(eni)
@@ -234,21 +238,41 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance, eni *EC2N
 	return tx.Commit()
 }
 
-func usedPrivateIPs(tx *sql.Tx, account, subnetID string) (map[string]bool, error) {
-	rows, err := tx.Query(`SELECT private_ip FROM ec2_network_interfaces WHERE account_id = ? AND subnet_id = ?`, account, subnetID)
+// stringSet returns the set of the one text column query selects.
+func stringSet(tx *sql.Tx, query string, args ...any) (map[string]bool, error) {
+	rows, err := tx.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	used := map[string]bool{}
+	set := map[string]bool{}
 	for rows.Next() {
-		var ip string
-		if err := rows.Scan(&ip); err != nil {
+		var v string
+		if err := rows.Scan(&v); err != nil {
 			return nil, err
 		}
-		used[ip] = true
+		set[v] = true
 	}
-	return used, rows.Err()
+	return set, rows.Err()
+}
+
+// claimPublicIP moves eni's wanted public IP, if any, to the first one
+// from it up, wrapping within its /24, that no other ENI in its account
+// and region holds, so ip-address selects one instance. Its callers
+// set PublicIP only to an auto-assigned address: an Elastic IP is
+// already the region's own, from another /24.
+// ponytail: one /24 caps a region at 256 auto-assigned addresses.
+func claimPublicIP(tx *sql.Tx, account string, eni *EC2NetworkInterface) error {
+	if eni.PublicIP == "" {
+		return nil
+	}
+	held, err := stringSet(tx, `SELECT COALESCE(json_extract(data, '$.public_ip'), '') FROM ec2_network_interfaces
+		WHERE account_id = ? AND region = ? AND id != ?`, account, eni.Region, eni.ID)
+	if err != nil {
+		return err
+	}
+	eni.PublicIP, err = freeIP(eni.PublicIP, held)
+	return err
 }
 
 // privateIP returns want if it is a free usable address in cidr or,

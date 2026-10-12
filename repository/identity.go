@@ -112,8 +112,15 @@ func isEmpty(tx *sql.Tx, fixtureAMIIDs []string) (bool, error) {
 // from fakeaws-loader, which owns its AMIs, so fakeaws seeds no fixture
 // AMIs into it. No stored identity is not loaded.
 func (r *Repository) Loaded() (bool, error) {
+	return readLoaded(r.db)
+}
+
+// readLoaded is Loaded through q, a db or a transaction.
+func readLoaded(q interface {
+	QueryRow(query string, args ...any) *sql.Row
+}) (bool, error) {
 	var loaded bool
-	err := r.db.QueryRow(`SELECT loaded FROM identity WHERE id = 1`).Scan(&loaded)
+	err := q.QueryRow(`SELECT loaded FROM identity WHERE id = 1`).Scan(&loaded)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

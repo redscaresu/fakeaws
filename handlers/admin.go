@@ -417,11 +417,15 @@ func (app *Application) handleMockSnapshot(w http.ResponseWriter, _ *http.Reques
 }
 
 // handleMockRestore swaps in the snapshot's identity and db handle, so
-// it holds identityMu exclusively, as setIdentity does.
+// it holds identityMu exclusively, as setIdentity does. The copy of the
+// snapshot that goes live first gets the default security group of each
+// VPC stored without one (repository.BackfillDefaultGroups); if that
+// fails, the live state is left as it was.
 func (app *Application) handleMockRestore(w http.ResponseWriter, _ *http.Request) {
 	app.identityMu.Lock()
 	defer app.identityMu.Unlock()
-	if err := app.repo.Restore(); err != nil {
+	backfill := func(staged *repository.Repository) error { return staged.BackfillDefaultGroups(newDefaultGroup) }
+	if err := app.repo.Restore(backfill); err != nil {
 		// ErrNotFound = no snapshot baseline (404).
 		// ErrConflict = :memory: db (409).
 		status := http.StatusInternalServerError
