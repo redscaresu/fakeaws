@@ -21,16 +21,18 @@ const ec2NotModelled = "not modelled by fakeaws"
 // one of the row's values for name matches one of values; a row must
 // pass every Filter.N.
 type ec2Filter struct {
-	n      string // the N of Filter.N, which names a filter with no name
-	name   string
-	values []*regexp.Regexp
-	stray  bool // a Filter.N key that is neither Name nor Value.M
+	n          string // the N of Filter.N, as sent, which names a filter fakeaws cannot read
+	name       string
+	values     []*regexp.Regexp
+	unreadable bool // a non-digit N, a key that is neither one Name nor Value.<digits>, or a value that does not compile
 }
 
 // parseEC2Filters reads Filter.N.Name / Filter.N.Value.M into one
 // ec2Filter per N, in N order. A name repeated across Filter.N stays
 // separate filters, and every index is read, so a gap in N or M drops
-// nothing (unlike queryListValues, which stops at the first gap).
+// nothing (unlike queryListValues, which stops at the first gap). A
+// Filter.N fakeaws cannot read is marked, never dropped, so refuse
+// names it.
 func parseEC2Filters(p url.Values) []ec2Filter {
 	byN := map[string]*ec2Filter{}
 	for k, vs := range p {
@@ -41,19 +43,24 @@ func parseEC2Filters(p url.Values) []ec2Filter {
 		n, field, _ := strings.Cut(rest, ".")
 		f := byN[n]
 		if f == nil {
-			f = &ec2Filter{n: n}
+			f = &ec2Filter{n: n, unreadable: !ec2IsIndex(n)}
 			byN[n] = f
 		}
 		m, isValue := strings.CutPrefix(field, "Value.")
 		switch {
-		case field == "Name":
-			f.name = p.Get(k)
-		case isValue && m != "" && !strings.Contains(m, "."):
+		case field == "Name" && len(vs) == 1:
+			f.name = vs[0]
+		case isValue && ec2IsIndex(m):
 			for _, v := range vs {
-				f.values = append(f.values, ec2Wildcard(v))
+				re, err := ec2Wildcard(v)
+				if err != nil {
+					f.unreadable = true
+					continue
+				}
+				f.values = append(f.values, re)
 			}
 		default:
-			f.stray = true
+			f.unreadable = true
 		}
 	}
 	ns := slices.SortedFunc(maps.Keys(byN), func(a, b string) int {
@@ -68,8 +75,9 @@ func parseEC2Filters(p url.Values) []ec2Filter {
 
 // ec2Wildcard compiles an AWS filter value: * matches any run of
 // characters, / included, ? exactly one, and a backslash makes the
-// next character literal. Not path.Match, whose * stops at /.
-func ec2Wildcard(value string) *regexp.Regexp {
+// next character literal. Not path.Match, whose * stops at /. It
+// errors on a value too large to compile (millions of *).
+func ec2Wildcard(value string) (*regexp.Regexp, error) {
 	var b strings.Builder
 	b.WriteString(`(?s)^`)
 	escaped := false
@@ -92,7 +100,16 @@ func ec2Wildcard(value string) *regexp.Regexp {
 		b.WriteString(`\\`) // a trailing backslash is itself
 	}
 	b.WriteString(`$`)
-	return regexp.MustCompile(b.String())
+	return ec2Compile(b.String())
+}
+
+// ec2Compile is regexp.Compile; a test swaps it to fail the way a
+// multi-megabyte value does, without allocating one.
+var ec2Compile = regexp.Compile
+
+// ec2IsIndex reports whether s is a list index: non-empty, all digits.
+func ec2IsIndex(s string) bool {
+	return s != "" && strings.Trim(s, "0123456789") == ""
 }
 
 // ec2FilterTable is what one Describe honours: values maps each
@@ -105,13 +122,13 @@ type ec2FilterTable[R any] struct {
 }
 
 // unmodelled lists what t cannot honour in filters: each name it
-// lacks, and as Filter.<N> each Filter.N with no Name, no Value or a
-// stray key, since there may be no name to print.
+// lacks, and as Filter.<N> each Filter.N with no Name, no Value or
+// anything unreadable, since there may be no name to print.
 func (t ec2FilterTable[R]) unmodelled(filters []ec2Filter) []string {
 	var out []string
 	for _, f := range filters {
 		switch {
-		case f.name == "" || len(f.values) == 0 || f.stray:
+		case f.name == "" || len(f.values) == 0 || f.unreadable:
 			out = append(out, "Filter."+f.n)
 		case t.valuesFor(f.name) == nil:
 			out = append(out, f.name)
@@ -191,7 +208,7 @@ func (t ec2FilterTable[R]) refuse(w http.ResponseWriter, action string, filters 
 func ec2ParamName(k string) string {
 	parts := strings.Split(k, ".")
 	for i, s := range parts {
-		if s != "" && strings.Trim(s, "0123456789") == "" {
+		if ec2IsIndex(s) {
 			parts[i] = "N"
 		}
 	}

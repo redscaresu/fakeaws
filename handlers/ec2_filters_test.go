@@ -2,9 +2,12 @@ package handlers
 
 import (
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -147,4 +150,37 @@ func TestEC2Filter_RefusalNamesEveryNameSorted(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, eniTable.refuse(w, "DescribeNetworkInterfaces", parseEC2Filters(p), nil))
 	assert.Empty(t, w.Body.String())
+}
+
+func TestEC2Filter_UnreadableFilterRefused(t *testing.T) {
+	cases := []struct {
+		name, query string
+		want        []string
+	}{
+		{"Name sent twice", "Filter.1.Name=subnet-id&Filter.1.Name=group-id&Filter.1.Value.1=x", []string{"Filter.1"}},
+		{"non-digit N", "Filter.y.Name=subnet-id&Filter.y.Value.1=x", []string{"Filter.y"}},
+		{"empty N", "Filter..Name=subnet-id&Filter..Value.1=x", []string{"Filter."}},
+		{"non-digit M", "Filter.1.Name=subnet-id&Filter.1.Value.1=x&Filter.1.Value.x=y", []string{"Filter.1"}},
+		{"stray key", "Filter.1.Name=subnet-id&Filter.1.Value.1=x&Filter.1.Bogus=y", []string{"Filter.1"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, err := url.ParseQuery(c.query)
+			require.NoError(t, err)
+			assert.Equal(t, c.want, eniTable.unmodelled(parseEC2Filters(p)))
+		})
+	}
+
+	t.Run("value that does not compile", func(t *testing.T) {
+		compile := ec2Compile
+		t.Cleanup(func() { ec2Compile = compile })
+		ec2Compile = func(expr string) (*regexp.Regexp, error) {
+			if strings.Contains(expr, "huge") {
+				return nil, errors.New("error parsing regexp: expression too large")
+			}
+			return compile(expr)
+		}
+		filters := parseEC2Filters(url.Values{"Filter.1.Name": {"subnet-id"}, "Filter.1.Value.1": {"subnet-1"}, "Filter.1.Value.2": {"huge*"}})
+		assert.Equal(t, []string{"Filter.1"}, eniTable.unmodelled(filters))
+	})
 }
