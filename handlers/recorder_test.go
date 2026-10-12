@@ -380,11 +380,10 @@ func TestContract_request_log_not_modelled_404(t *testing.T) {
 func TestContract_request_log_filter_refused(t *testing.T) {
 	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
 	const region = "us-east-1"
-	var refused []byte
 	for _, action := range []string{"DescribeSecurityGroups", "DescribeVolumes", "DescribeRouteTables", "DescribeAddresses", "DescribeNetworkInterfaces", "DescribeTags"} {
-		var resp *http.Response
-		resp, refused = ec2Call(t, srv, region, action, url.Values{"Filter.1.Name": {"foo"}, "Filter.1.Value.1": {"bar"}})
-		assert.Equal(t, http.StatusConflict, resp.StatusCode, "%s: %s", action, refused)
+		resp, body := ec2Call(t, srv, region, action, url.Values{"Filter.1.Name": {"foo"}, "Filter.1.Value.1": {"bar"}})
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s: %s", action, body)
+		assert.Equal(t, action+": not modelled by fakeaws: foo", extractEC2Tag(body, "Message"), action)
 		assert.Equal(t, "filter-refused", lastClass(t, srv), action)
 	}
 
@@ -395,34 +394,34 @@ func TestContract_request_log_filter_refused(t *testing.T) {
 	resp, body = ec2Call(t, srv, region, "AssociateAddress", url.Values{
 		"AllocationId": {extractEC2Tag(body, "allocationId")}, "InstanceId": {instance}, "AllowReassociation": {"true"},
 	})
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AllowReassociation: %s", body)
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "AllowReassociation: %s", body)
 	assert.Equal(t, "filter-refused", lastClass(t, srv), "AllowReassociation")
 
 	ami, nic := "ami-0abcd1234", "NetworkInterface.1."
 	for _, c := range []struct {
 		action string
 		params url.Values
-		status int
 	}{
-		{"AllocateAddress", url.Values{"Domain": {"standard"}}, http.StatusConflict},
-		{"RunInstances", url.Values{"ImageId": {ami}, "InstanceType": {"t3.micro"}, nic + "DeviceIndex": {"0"}, nic + "NetworkInterfaceId": {"eni-x"}}, http.StatusConflict},
-		{"RunInstances", url.Values{"ImageId": {ami}, "InstanceType": {"t3.micro"}}, http.StatusConflict},
+		{"AllocateAddress", url.Values{"Domain": {"standard"}}},
+		{"RunInstances", url.Values{"ImageId": {ami}, "InstanceType": {"t3.micro"}, nic + "DeviceIndex": {"0"}, nic + "NetworkInterfaceId": {"eni-x"}}},
+		{"RunInstances", url.Values{"ImageId": {ami}, "InstanceType": {"t3.micro"}}},
 		{"RunInstances", url.Values{"SubnetId": {"subnet-x"}, "ImageId": {ami}, "InstanceType": {"t3.micro"},
-			"TagSpecification.1.ResourceType": {"spot-instances-request"}, "TagSpecification.1.Tag.1.Key": {"k"}}, http.StatusBadRequest},
-		{"ModifyNetworkInterfaceAttribute", url.Values{"NetworkInterfaceId": {"eni-x"}, "SourceDestCheck.Value": {"false"}}, http.StatusConflict},
-		{"CreateVpc", url.Values{"Ipv4IpamPoolId": {"ipam-pool-x"}, "Ipv4NetmaskLength": {"16"}}, http.StatusConflict},
-		{"CreateSubnet", url.Values{"VpcId": {"vpc-x"}, "Ipv6Native": {"true"}}, http.StatusConflict},
-		{"AssociateRouteTable", url.Values{"RouteTableId": {"rtb-x"}, "GatewayId": {"igw-x"}}, http.StatusConflict},
-		{"CreateRoute", url.Values{"RouteTableId": {"rtb-x"}, "DestinationIpv6CidrBlock": {"::/0"}, "GatewayId": {"igw-x"}}, http.StatusConflict},
-		{"CreateSecurityGroup", url.Values{"GroupName": {"g"}, "GroupDescription": {"g"}}, http.StatusConflict},
-		{"DeleteSecurityGroup", url.Values{"GroupName": {"web"}}, http.StatusConflict},
-		{"AuthorizeSecurityGroupIngress", url.Values{"GroupName": {"web"}, "IpPermissions.1.IpProtocol": {"tcp"}}, http.StatusConflict},
-		{"AuthorizeSecurityGroupIngress", url.Values{"GroupId": {"sg-x"}, "IpProtocol": {"tcp"}, "FromPort": {"22"}, "ToPort": {"22"}, "CidrIp": {"0.0.0.0/0"}}, http.StatusConflict},
-		{"RevokeSecurityGroupIngress", url.Values{"GroupName": {"web"}}, http.StatusConflict},
-		{"CreateTags", url.Values{"ResourceId.1": {"vol-x"}, "Tag.1.Key": {"k"}}, http.StatusBadRequest},
+			"TagSpecification.1.ResourceType": {"spot-instances-request"}, "TagSpecification.1.Tag.1.Key": {"k"}}},
+		{"ModifyNetworkInterfaceAttribute", url.Values{"NetworkInterfaceId": {"eni-x"}, "SourceDestCheck.Value": {"false"}}},
+		{"CreateVpc", url.Values{"Ipv4IpamPoolId": {"ipam-pool-x"}, "Ipv4NetmaskLength": {"16"}}},
+		{"CreateSubnet", url.Values{"VpcId": {"vpc-x"}, "Ipv6Native": {"true"}}},
+		{"AssociateRouteTable", url.Values{"RouteTableId": {"rtb-x"}, "GatewayId": {"igw-x"}}},
+		{"CreateRoute", url.Values{"RouteTableId": {"rtb-x"}, "DestinationIpv6CidrBlock": {"::/0"}, "GatewayId": {"igw-x"}}},
+		{"CreateSecurityGroup", url.Values{"GroupName": {"g"}, "GroupDescription": {"g"}}},
+		{"DeleteSecurityGroup", url.Values{"GroupName": {"web"}}},
+		{"AuthorizeSecurityGroupIngress", url.Values{"GroupName": {"web"}, "IpPermissions.1.IpProtocol": {"tcp"}}},
+		{"AuthorizeSecurityGroupIngress", url.Values{"GroupId": {"sg-x"}, "IpProtocol": {"tcp"}, "FromPort": {"22"}, "ToPort": {"22"}, "CidrIp": {"0.0.0.0/0"}}},
+		{"RevokeSecurityGroupIngress", url.Values{"GroupName": {"web"}}},
+		{"CreateTags", url.Values{"ResourceId.1": {"vol-x"}, "Tag.1.Key": {"k"}}},
 	} {
 		resp, body := ec2Call(t, srv, region, c.action, c.params)
-		assert.Equal(t, c.status, resp.StatusCode, "%v: %s", c.params, body)
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%v: %s", c.params, body)
+		assert.Contains(t, extractEC2Tag(body, "Message"), c.action+": not modelled by fakeaws: ", "%v", c.params)
 		assert.Equal(t, "filter-refused", lastClass(t, srv), "%v", c.params)
 	}
 	resp, body = rdsCall(t, srv, region, "ListTagsForResource", url.Values{"ResourceName": {"arn:aws:rds:us-east-1:000000000000:snapshot:x"}})
@@ -450,7 +449,6 @@ func TestContract_request_log_filter_refused(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
 	resp, body = ec2Call(t, srv, region, "CreateSecurityGroup", dup)
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "a duplicate group name in one VPC: %s", body)
-	assert.Equal(t, string(refused), string(body), "a modelled 409 is wire-identical to a refusal")
 	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "a modelled 409")
 
 	resp, body = ec2Call(t, srv, region, "CreateVpc", url.Values{
@@ -484,9 +482,9 @@ func TestContract_request_log_read_set_entry(t *testing.T) {
 		call call
 		want readSet
 	}{
-		{"EC2 DescribeVpcs", func() (*http.Response, []byte) {
-			return ec2Call(t, srv, region, "DescribeVpcs", url.Values{"Filter.1.Name": {"tag-key"}, "Filter.1.Value.1": {"env"}})
-		}, readSet{"ec2", "query", "DescribeVpcs", map[string]any{"Filter.1.Name": "tag-key", "Filter.1.Value.1": "env"}, http.StatusOK}},
+		{"EC2 DescribeSubnets", func() (*http.Response, []byte) {
+			return ec2Call(t, srv, region, "DescribeSubnets", url.Values{"Filter.1.Name": {"vpc-id"}, "Filter.1.Value.1": {"vpc-1"}})
+		}, readSet{"ec2", "query", "DescribeSubnets", map[string]any{"Filter.1.Name": "vpc-id", "Filter.1.Value.1": "vpc-1"}, http.StatusOK}},
 		{"IAM GetRole", func() (*http.Response, []byte) {
 			return iamCall(t, srv, "GetRole", url.Values{"RoleName": {"app"}})
 		}, readSet{"iam", "query", "GetRole", map[string]any{"RoleName": "app"}, http.StatusNotFound}},

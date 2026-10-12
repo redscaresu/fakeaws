@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -38,6 +37,15 @@ func (app *Application) registerEC2Routes(r chi.Router) {
 	r.Post("/ec2/region/{region}", app.handleEC2)
 }
 
+// handleEC2 dispatches an EC2 Query-RPC request on its Action.
+//
+// MUST[ec2-describe-filter-never-ignored]: every Describe arm but
+// DescribeVpcAttribute, DescribeInstanceAttribute and
+// DescribeAddressesAttribute (no Filter in the AWS API) reads through
+// an ec2FilterTable's read, naming the params it reads; every other
+// param but MaxResults and NextToken, and every Filter.N the table does
+// not honour, goes to ec2Refuse: 501 NotImplemented naming it, classed
+// filter-refused. A Describe never ignores a param.
 func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	region := chi.URLParam(r, "region")
 	req, err := awsproto.ParseQueryRPC(r)
@@ -254,9 +262,7 @@ type ec2CreateVpcResult struct {
 func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	cidr := req.Params.Get("CidrBlock")
 	if cidr == "" {
-		markClass(w, classFilterRefused) // AWS also takes Ipv4IpamPoolId
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("CidrBlock required: %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "no CidrBlock") // AWS also takes Ipv4IpamPoolId
 		return
 	}
 	specs, refused := refuseTagSpecifications(w, req.Params, "vpc")
@@ -278,10 +284,17 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateVpc", &out)
 }
 
+// ec2NoFilters honours no filter: a Describe reading through it
+// refuses every Filter.N, by name.
+var ec2NoFilters ec2FilterTable[any]
+
 // ec2DescribeVpcs answers VpcId.N with exactly those VPCs: the
 // provider's lookup by id wants one result, so listing every VPC in
 // the region breaks it as soon as a second VPC exists.
 func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if _, ok := ec2NoFilters.read(w, req, "VpcId.N"); !ok {
+		return
+	}
 	var vpcs []*repository.EC2VPC
 	ids := queryListValues(req.Params, "VpcId.")
 	var err error
@@ -429,9 +442,7 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 	vpcID := req.Params.Get("VpcId")
 	cidr := req.Params.Get("CidrBlock")
 	if vpcID == "" || cidr == "" {
-		markClass(w, classFilterRefused) // AWS also takes Ipv6Native or Ipv4IpamPoolId
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("VpcId and CidrBlock required: %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "no VpcId or CidrBlock") // AWS also takes Ipv6Native or Ipv4IpamPoolId
 		return
 	}
 	vpc, err := app.repo.GetVPC(account, region, vpcID)
@@ -482,31 +493,22 @@ func subnetCIDRInRange(vpcCIDR, cidr string) bool {
 	return sub.Bits() >= 16 && sub.Bits() <= 28 && sub.Bits() >= vpc.Bits() && vpc.Contains(sub.Addr())
 }
 
+// subnetFilters are the DescribeSubnets filters fakeaws models.
+var subnetFilters = ec2FilterTable[*repository.EC2Subnet]{values: map[string]func(*repository.EC2Subnet) []string{
+	"vpc-id": func(s *repository.EC2Subnet) []string { return []string{s.VPCID} },
+}}
+
+// ec2DescribeSubnets answers SubnetId.N, the direct-by-id lookup the
+// provider's Read sends to find exactly the subnet it created (a wrong
+// match count loops its wait until "couldn't find resource"), and the
+// vpc-id filter.
 func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	// terraform-provider-aws's Read flow sends SubnetId.N=<id> to look
-	// up exactly one subnet (the one it just created), then expects
-	// the response to contain that subnet and no others. Without the
-	// filter, returning all subnets confuses the wait loop into
-	// reporting "couldn't find resource (21 retries)" because the
-	// match count is wrong. Filter.N.Name=vpc-id is the legacy filter
-	// shape; SubnetId.N is the direct-by-id parameter that the v2 SDK
-	// uses preferentially.
-	subnetIDFilter := map[string]struct{}{}
-	for k, vs := range req.Params {
-		if strings.HasPrefix(k, "SubnetId.") && len(vs) > 0 {
-			subnetIDFilter[vs[0]] = struct{}{}
-		}
+	filters, ok := subnetFilters.read(w, req, "SubnetId.N")
+	if !ok {
+		return
 	}
-	vpcFilter := ""
-	for k, vs := range req.Params {
-		if strings.HasPrefix(k, "Filter.") && strings.HasSuffix(k, ".Name") && len(vs) > 0 && vs[0] == "vpc-id" {
-			prefix := strings.TrimSuffix(k, ".Name")
-			if v := req.Params.Get(prefix + ".Value.1"); v != "" {
-				vpcFilter = v
-			}
-		}
-	}
-	subnets, err := app.repo.ListSubnets(account, region, vpcFilter)
+	ids := queryListValues(req.Params, "SubnetId.")
+	subnets, err := app.repo.ListSubnets(account, region)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
@@ -517,10 +519,8 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 	}
 	out := ec2DescribeSubnetsResult{SubnetSet: make([]ec2SubnetXML, 0, len(subnets))}
 	for _, s := range subnets {
-		if len(subnetIDFilter) > 0 {
-			if _, ok := subnetIDFilter[s.ID]; !ok {
-				continue
-			}
+		if len(ids) > 0 && !slices.Contains(ids, s.ID) || !subnetFilters.matches(s, filters, tags) {
+			continue
 		}
 		x := ec2SubnetToXML(account, s)
 		x.TagSet = tags[s.ID]
@@ -702,6 +702,9 @@ func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account,
 // ec2DescribeInternetGateways answers InternetGatewayId.N with exactly
 // those gateways, as ec2DescribeVpcs does VpcId.N.
 func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if _, ok := ec2NoFilters.read(w, req, "InternetGatewayId.N"); !ok {
+		return
+	}
 	var igws []*repository.EC2InternetGateway
 	ids := queryListValues(req.Params, "InternetGatewayId.")
 	var err error
@@ -895,22 +898,14 @@ var rtFilterValues = map[string]func(rt ec2RouteTableXML) []string{
 	},
 }
 
+var rtFilters = ec2FilterTable[ec2RouteTableXML]{values: rtFilterValues}
+
 func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	filters := ec2Filters(req.Params)
-	for name := range filters {
-		if rtFilterValues[name] == nil {
-			markClass(w, classFilterRefused)
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-				fmt.Errorf("DescribeRouteTables filter %q not supported by fakeaws: %w", name, models.ErrConflict))
-			return
-		}
+	filters, ok := rtFilters.read(w, req, "RouteTableId.N")
+	if !ok {
+		return
 	}
-	var wanted []string
-	for k, vs := range req.Params {
-		if strings.HasPrefix(k, "RouteTableId.") && len(vs) > 0 {
-			wanted = append(wanted, vs[0])
-		}
-	}
+	wanted := queryListValues(req.Params, "RouteTableId.")
 	// Pre-load all routes once and key by route_table_id so the
 	// per-RT lookup below is O(1). ListRoutes returns the union for
 	// the account; we filter by RT id at populate time.
@@ -982,12 +977,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 		}
 	}
 	out.RouteTableSet = slices.DeleteFunc(out.RouteTableSet, func(rt ec2RouteTableXML) bool {
-		for name, want := range filters {
-			if !slices.ContainsFunc(rtFilterValues[name](rt), func(v string) bool { return slices.Contains(want, v) }) {
-				return true
-			}
-		}
-		return false
+		return !rtFilters.matches(rt, filters, tags)
 	})
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeRouteTables", &out)
 }
@@ -1004,9 +994,7 @@ func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account, r
 	rtID := req.Params.Get("RouteTableId")
 	subnetID := req.Params.Get("SubnetId")
 	if rtID == "" || subnetID == "" {
-		markClass(w, classFilterRefused) // AWS also takes GatewayId
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("RouteTableId and SubnetId required: %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "no RouteTableId or SubnetId") // AWS also takes GatewayId
 		return
 	}
 	assoc := &repository.EC2RouteTableAssociation{
@@ -1038,9 +1026,7 @@ func (app *Application) ec2CreateRoute(w http.ResponseWriter, account, region st
 		NetworkInterfaceID:   req.Params.Get("NetworkInterfaceId"),
 	}
 	if rt.RouteTableID == "" || rt.DestinationCidrBlock == "" {
-		markClass(w, classFilterRefused) // AWS also takes DestinationIpv6CidrBlock or DestinationPrefixListId
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("RouteTableId and DestinationCidrBlock required: %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "no RouteTableId or DestinationCidrBlock") // AWS also takes DestinationIpv6CidrBlock or DestinationPrefixListId
 		return
 	}
 	if err := app.repo.CreateRoute(account, region, rt); err != nil {
@@ -1102,9 +1088,7 @@ func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, regio
 	}
 	if domain != "vpc" {
 		// classic EIPs are out of scope at v1 per PLAN.md S44.
-		markClass(w, classFilterRefused)
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("Domain=%q not supported (v1 supports 'vpc' only): %w", domain, models.ErrConflict))
+		ec2Refuse(w, req.Action, "Domain="+domain)
 		return
 	}
 	specs, refused := refuseTagSpecifications(w, req.Params, "elastic-ip")
@@ -1173,22 +1157,19 @@ func writeEIPError(w http.ResponseWriter, id string, err error) {
 	}
 }
 
+// addressFilters are the DescribeAddresses filters fakeaws models.
+var addressFilters = ec2FilterTable[*repository.EC2EIP]{values: map[string]func(*repository.EC2EIP) []string{
+	"association-id": func(e *repository.EC2EIP) []string { return []string{e.AssociationID} },
+}}
+
 // ec2DescribeAddresses answers the AllocationId.N lookup the provider
 // makes, its association-id filter after AssociateAddress and, with
 // neither, the scope sweep's list of every address. Other filters and
 // PublicIp.N are refused rather than ignored.
 func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if refuseUnmodelled(w, req, "PublicIp.") {
+	filters, ok := addressFilters.read(w, req, "AllocationId.N")
+	if !ok {
 		return
-	}
-	filters := ec2Filters(req.Params)
-	for name := range filters {
-		if name != "association-id" {
-			markClass(w, classFilterRefused)
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-				fmt.Errorf("DescribeAddresses filter %q not supported by fakeaws: %w", name, models.ErrConflict))
-			return
-		}
 	}
 	eips, ok := app.ec2FindAddresses(w, account, region, req)
 	if !ok {
@@ -1200,7 +1181,7 @@ func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, reg
 	}
 	out := ec2DescribeAddressesResult{AddressSet: []ec2AddressXML{}}
 	for _, eip := range eips {
-		if want, ok := filters["association-id"]; ok && !slices.Contains(want, eip.AssociationID) {
+		if !addressFilters.matches(eip, filters, tags) {
 			continue
 		}
 		out.AddressSet = append(out.AddressSet, ec2AddressXML{
@@ -1274,9 +1255,7 @@ func (app *Application) ec2AssociateAddress(w http.ResponseWriter, account, regi
 		return
 	}
 	if req.Params.Get("AllowReassociation") == "true" {
-		markClass(w, classFilterRefused)
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("AssociateAddress AllowReassociation not supported by fakeaws: %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "AllowReassociation")
 		return
 	}
 	eip.AssociationID = "eipassoc-" + ec2RandID()
@@ -1498,9 +1477,7 @@ func queryListItems(params url.Values, prefix string) []string {
 			ns = append(ns, rest[:i])
 		}
 	}
-	slices.SortFunc(ns, func(a, b string) int {
-		return cmp.Or(cmp.Compare(len(a), len(b)), strings.Compare(a, b))
-	})
+	slices.SortFunc(ns, ec2IndexOrder)
 	items := make([]string, len(ns))
 	for i, n := range ns {
 		items[i] = prefix + n + "."
@@ -1564,9 +1541,7 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 	desc := req.Params.Get("GroupDescription")
 	vpcID := req.Params.Get("VpcId")
 	if groupName == "" || desc == "" || vpcID == "" {
-		markClass(w, classFilterRefused) // AWS puts a group without VpcId in the default VPC
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("GroupName, GroupDescription, and VpcId required: %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "no GroupName, GroupDescription or VpcId") // AWS puts a group without VpcId in the default VPC
 		return
 	}
 	specs, refused := refuseTagSpecifications(w, req.Params, "security-group")
@@ -1638,7 +1613,7 @@ func (app *Application) ec2FindSecurityGroups(w http.ResponseWriter, account, re
 // and, with none, the scope sweep's list of every group. Filter.N and
 // GroupName.N are refused rather than ignored.
 func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if refuseUnmodelled(w, req, "Filter.", "GroupName.") {
+	if _, ok := ec2NoFilters.read(w, req, "GroupId.N"); !ok {
 		return
 	}
 	sgs, ok := app.ec2FindSecurityGroups(w, account, region, req)
@@ -1677,9 +1652,7 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, r
 	id := req.Params.Get("GroupId")
 	if id == "" {
 		// AWS also accepts GroupName for non-VPC SGs; v1 supports GroupId only.
-		markClass(w, classFilterRefused)
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("GroupId required: %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "no GroupId")
 		return
 	}
 	if err := app.repo.DeleteSecurityGroup(account, region, id); err != nil {
@@ -1696,16 +1669,12 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, r
 func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
 	sgID := req.Params.Get("GroupId")
 	if sgID == "" {
-		markClass(w, classFilterRefused) // AWS also takes GroupName for ingress
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("GroupId required: %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "no GroupId") // AWS also takes GroupName for ingress
 		return
 	}
 	add := parseIpPermissions(req)
 	if len(add) == 0 {
-		markClass(w, classFilterRefused) // AWS also takes the legacy top-level IpProtocol, CidrIp, ...
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("at least one IpPermissions.<n>.* required: %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "no IpPermissions.N") // AWS also takes the legacy top-level IpProtocol, CidrIp, ...
 		return
 	}
 	if app.refuseIpPermissions(w, account, region, add) {
@@ -1732,9 +1701,7 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
 	sgID := req.Params.Get("GroupId")
 	if sgID == "" {
-		markClass(w, classFilterRefused) // AWS also takes GroupName for ingress
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("GroupId required: %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "no GroupId") // AWS also takes GroupName for ingress
 		return
 	}
 	rm := parseIpPermissions(req)
@@ -2130,26 +2097,28 @@ func ec2ENIToXML(account string, eni *repository.EC2NetworkInterface) ec2Network
 	return x
 }
 
-// queryListValues returns a flattened scalar list (<prefix>1,
-// <prefix>2, ...) in order, never nil. The SDK numbers lists from 1
-// without gaps.
+// queryListValues returns a flattened scalar list (<prefix><n>) in
+// numeric <n> order, never nil. Every index is read, a gap or a
+// repeated key included, so a Describe that declares it reads Name.N
+// drops no item.
 func queryListValues(p url.Values, prefix string) []string {
+	var ns []string
+	for k := range p {
+		if n, ok := strings.CutPrefix(k, prefix); ok && ec2IsIndex(n) {
+			ns = append(ns, n)
+		}
+	}
+	slices.SortFunc(ns, ec2IndexOrder)
 	out := []string{}
-	for i := 1; p.Has(prefix + strconv.Itoa(i)); i++ {
-		out = append(out, p.Get(prefix+strconv.Itoa(i)))
+	for _, n := range ns {
+		out = append(out, p[prefix+n]...)
 	}
 	return out
 }
 
 // parseInstanceIDs reads InstanceId.<n> params.
 func parseInstanceIDs(req awsproto.QueryRPCRequest) []string {
-	var ids []string
-	for k, vs := range req.Params {
-		if strings.HasPrefix(k, "InstanceId.") && len(vs) > 0 {
-			ids = append(ids, vs[0])
-		}
-	}
-	return ids
+	return queryListValues(req.Params, "InstanceId.")
 }
 
 // ec2InstanceNetwork is where RunInstances puts the primary ENI.
@@ -2161,7 +2130,7 @@ type ec2InstanceNetwork struct {
 }
 
 // errNICNotModelled refuses a network interface fakeaws does not launch.
-var errNICNotModelled = fmt.Errorf("fakeaws launches only a new primary network interface (NetworkInterface.1, DeviceIndex 0, deleted on termination): %w", models.ErrConflict)
+var errNICNotModelled = errors.New("a network interface other than a new primary one (NetworkInterface.1, DeviceIndex 0, deleted on termination)")
 
 // errNICWithInstanceLevelPlacement is AWS's InvalidParameterCombination.
 var errNICWithInstanceLevelPlacement = errors.New("Network interfaces and an instance-level subnet ID, security groups or private IP may not be specified on the same request")
@@ -2226,7 +2195,8 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		return
 	}
 	if errors.Is(err, errNICNotModelled) {
-		markClass(w, classFilterRefused)
+		ec2Refuse(w, req.Action, err.Error())
+		return
 	}
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
@@ -2235,16 +2205,15 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	imageID := req.Params.Get("ImageId")
 	instanceType := req.Params.Get("InstanceType")
 	if nw.subnetID == "" || imageID == "" || instanceType == "" {
-		markClass(w, classFilterRefused) // AWS defaults the subnet (default VPC) and InstanceType
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("SubnetId, ImageId, InstanceType required: %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "no SubnetId, ImageId or InstanceType") // AWS defaults the subnet (default VPC) and InstanceType
 		return
 	}
 	// The provider adds a volume spec whenever default_tags is set;
 	// fakeaws has no volumes, so those tags are accepted and dropped.
-	specs, refused := refuseTagSpecifications(w, req.Params, "instance", "network-interface", "volume")
-	if refused {
-		markClass(w, classFilterRefused) // AWS also tags spot-instances-request, elastic-gpu, ...
+	specs, refusedType := tagSpecifications(req.Params, "instance", "network-interface", "volume")
+	if specs == nil {
+		// AWS also tags spot-instances-request, elastic-gpu, ...
+		ec2Refuse(w, req.Action, "TagSpecification.N.ResourceType="+refusedType)
 		return
 	}
 	// Lazy-seed canonical AMI fixtures for this region (Codex pass 9
@@ -2303,6 +2272,9 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 }
 
 func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if _, ok := ec2NoFilters.read(w, req, "InstanceId.N"); !ok {
+		return
+	}
 	wanted := parseInstanceIDs(req)
 	var instances []*repository.EC2Instance
 	if len(wanted) > 0 {
@@ -2385,15 +2357,7 @@ var eniFilterValues = map[string]func(*repository.EC2NetworkInterface) []string{
 	"group-id":               func(e *repository.EC2NetworkInterface) []string { return e.SecurityGroupIDs },
 }
 
-// ec2Filters reads Filter.<n>.Name / Filter.<n>.Value.<m> as name → values.
-func ec2Filters(p url.Values) map[string][]string {
-	out := map[string][]string{}
-	for _, f := range queryListItems(p, "Filter.") {
-		name := p.Get(f + "Name")
-		out[name] = append(out[name], queryListValues(p, f+"Value.")...)
-	}
-	return out
-}
+var eniFilters = ec2FilterTable[*repository.EC2NetworkInterface]{values: eniFilterValues}
 
 // writeInstanceError answers a failed instance lookup, with
 // InvalidInstanceID.NotFound for a missing instance.
@@ -2418,14 +2382,9 @@ func writeENINotFound(w http.ResponseWriter, id string) {
 // the provider reads as "gone"; an unsupported filter is refused
 // rather than ignored.
 func (app *Application) ec2DescribeNetworkInterfaces(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	filters := ec2Filters(req.Params)
-	for name := range filters {
-		if eniFilterValues[name] == nil {
-			markClass(w, classFilterRefused)
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-				fmt.Errorf("DescribeNetworkInterfaces filter %q not supported by fakeaws: %w", name, models.ErrConflict))
-			return
-		}
+	filters, ok := eniFilters.read(w, req, "NetworkInterfaceId.N")
+	if !ok {
+		return
 	}
 	enis, err := app.repo.ListNetworkInterfaces(account, region)
 	if err != nil {
@@ -2444,22 +2403,11 @@ func (app *Application) ec2DescribeNetworkInterfaces(w http.ResponseWriter, acco
 		if len(ids) > 0 && !slices.Contains(ids, eni.ID) {
 			continue
 		}
-		if eniMatches(eni, filters) {
+		if eniFilters.matches(eni, filters, nil) {
 			out.NetworkInterfaceSet = append(out.NetworkInterfaceSet, ec2ENIToXML(account, eni))
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeNetworkInterfaces", &out)
-}
-
-// eniMatches reports whether eni has, for every filter, a value among
-// that filter's values.
-func eniMatches(eni *repository.EC2NetworkInterface, filters map[string][]string) bool {
-	for name, want := range filters {
-		if !slices.ContainsFunc(eniFilterValues[name](eni), func(v string) bool { return slices.Contains(want, v) }) {
-			return false
-		}
-	}
-	return true
 }
 
 // ec2ModifyNetworkInterfaceAttribute models the Groups attribute only:
@@ -2469,9 +2417,7 @@ func (app *Application) ec2ModifyNetworkInterfaceAttribute(w http.ResponseWriter
 	id := req.Params.Get("NetworkInterfaceId")
 	groups := queryListValues(req.Params, "SecurityGroupId.")
 	if id == "" || len(groups) == 0 {
-		markClass(w, classFilterRefused)
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-			fmt.Errorf("NetworkInterfaceId and SecurityGroupId.N required (fakeaws models only the Groups attribute): %w", models.ErrConflict))
+		ec2Refuse(w, req.Action, "no NetworkInterfaceId or SecurityGroupId.N (only the Groups attribute is modelled)")
 		return
 	}
 	eni, err := app.repo.GetNetworkInterface(account, region, id)
@@ -2661,14 +2607,14 @@ func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region 
 	awsproto.WriteEC2QueryRPCResponse(w, "ImportKeyPair", &out)
 }
 
+// ec2DescribeKeyPairs answers KeyName.N, terraform-provider-aws's
+// read path, and with none lists the region's key pairs. KeyPairId.N
+// is refused.
 func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	// KeyName.<n> filter — terraform-provider-aws's read path.
-	var wanted []string
-	for k, vs := range req.Params {
-		if strings.HasPrefix(k, "KeyName.") && len(vs) > 0 {
-			wanted = append(wanted, vs[0])
-		}
+	if _, ok := ec2NoFilters.read(w, req, "KeyName.N"); !ok {
+		return
 	}
+	wanted := queryListValues(req.Params, "KeyName.")
 	tags, ok := app.tagSets(w, account)
 	if !ok {
 		return
@@ -2731,20 +2677,20 @@ type ec2DescribeImagesResult struct {
 	ImagesSet []ec2ImageXML `xml:"imagesSet>item"`
 }
 
+// ec2DescribeImages answers ImageId.N, most common from
+// terraform-provider-aws where users pass a literal AMI id, and
+// Owner.N. data.aws_ami's filters are refused per the S44-T0 pitfall,
+// as is ExecutableBy.N. IncludeDisabled is read: there are no disabled
+// images, so it cannot change the answer.
 func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if _, ok := ec2NoFilters.read(w, req, "ImageId.N", "Owner.N", "IncludeDisabled"); !ok {
+		return
+	}
 	// Lazy-seed canonical AMI fixtures for this region (Codex pass 9
 	// BLOCKING #1) so callers in any valid AWS region see the same
 	// fixture set as the boot-time slice.
 	app.ensureAMIFixturesForRegion(account, region)
-	// ImageId.<n> filter — most common from terraform-provider-aws
-	// where users pass a literal AMI id. data.aws_ami is NOT supported
-	// per the S44-T0 pitfall.
-	var wanted []string
-	for k, vs := range req.Params {
-		if strings.HasPrefix(k, "ImageId.") && len(vs) > 0 {
-			wanted = append(wanted, vs[0])
-		}
-	}
+	wanted := queryListValues(req.Params, "ImageId.")
 	var amis []*repository.EC2AMI
 	if len(wanted) == 0 {
 		var err error
@@ -2763,8 +2709,7 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 		}
 	}
 	// Owner.N keeps images of those owners, "self" meaning the caller:
-	// the scope sweep's Owner.1=self sees none of the fixtures. There
-	// are no disabled images, so IncludeDisabled changes nothing.
+	// the scope sweep's Owner.1=self sees none of the fixtures.
 	owners := queryListValues(req.Params, "Owner.")
 	out := ec2DescribeImagesResult{ImagesSet: []ec2ImageXML{}}
 	for _, a := range amis {
@@ -2793,11 +2738,16 @@ type ec2DescribeNoneResult struct {
 }
 
 // ec2DescribeNone answers a Describe in ec2NoneSets with its real
-// result, an empty set, and refuses Filter.N rather than ignoring it.
-// ponytail: an id lookup (VolumeId.N, ...) answers empty, not the
-// service's NotFound code; add the codes when a caller looks one up.
+// result, an empty set, and refuses every other param, an id lookup
+// (VolumeId.N, ...) and Filter.N included. DescribeSnapshots reads
+// Owner.N (the SDK's OwnerIds), which the scope sweep sends: an empty
+// set has no owner to tell apart.
 func ec2DescribeNone(w http.ResponseWriter, req awsproto.QueryRPCRequest) {
-	if refuseUnmodelled(w, req, "Filter.") {
+	var reads []string
+	if req.Action == "DescribeSnapshots" {
+		reads = []string{"Owner.N"}
+	}
+	if _, ok := ec2NoFilters.read(w, req, reads...); !ok {
 		return
 	}
 	markClass(w, classEmptyCollection)
@@ -2805,19 +2755,17 @@ func ec2DescribeNone(w http.ResponseWriter, req awsproto.QueryRPCRequest) {
 		&ec2DescribeNoneResult{Set: ec2EmptySet{XMLName: xml.Name{Local: ec2NoneSets[req.Action]}}})
 }
 
-// refuseUnmodelled answers 409 when req carries a param under one of
-// prefixes, a filter fakeaws does not model, rather than ignoring it
-// and describing everything. It reports whether it answered.
-func refuseUnmodelled(w http.ResponseWriter, req awsproto.QueryRPCRequest, prefixes ...string) bool {
-	for k := range req.Params {
-		if slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(k, p) }) {
-			markClass(w, classFilterRefused)
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-				fmt.Errorf("%s parameter %q not supported by fakeaws: %w", req.Action, k, models.ErrConflict))
-			return true
-		}
-	}
-	return false
+// ec2Refuse is EC2's one refusal of what AWS accepts but fakeaws does
+// not model: 501 NotImplemented naming, deduped and sorted bytewise,
+// each of names after "<action>: not modelled by fakeaws: ", classed
+// filter-refused. 501 is fakeaws's own refusal, not a claim about AWS
+// (AWS answers an unknown filter name 400 InvalidParameterValue, which
+// would blame valid HCL), and aws-sdk-go-v2's retryer does not retry it.
+func ec2Refuse(w http.ResponseWriter, action string, names ...string) {
+	names = slices.Compact(slices.Sorted(slices.Values(names)))
+	markClass(w, classFilterRefused)
+	awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusNotImplemented, "NotImplemented",
+		fmt.Sprintf("%s: %s: %s", action, ec2NotModelled, strings.Join(names, ", ")))
 }
 
 func ec2AMIToXML(a *repository.EC2AMI) ec2ImageXML {
@@ -2879,12 +2827,10 @@ type ec2DescribeInstanceTypesResult struct {
 // rather than enumerating: mocks optimize for fast feedback, not for
 // rejecting unknown fixture data.
 func (app *Application) ec2DescribeInstanceTypes(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	var wanted []string
-	for k, vs := range req.Params {
-		if strings.HasPrefix(k, "InstanceType.") && len(vs) > 0 {
-			wanted = append(wanted, vs[0])
-		}
+	if _, ok := ec2NoFilters.read(w, req, "InstanceType.N"); !ok {
+		return
 	}
+	wanted := queryListValues(req.Params, "InstanceType.")
 	if len(wanted) == 0 {
 		// Unfiltered DescribeInstanceTypes returns a representative
 		// slice. Common terraform-provider-aws docs examples are t3.* /
@@ -3033,14 +2979,13 @@ func parseTags(p url.Values, prefix string) []repository.EC2Tag {
 }
 
 // tagSpecifications reads TagSpecification.N as resource type → tags,
-// or returns the InvalidParameterValue message for a type the
-// operation cannot tag.
+// or returns nil and the first type the operation cannot tag.
 func tagSpecifications(p url.Values, allowed ...string) (map[string][]repository.EC2Tag, string) {
 	out := map[string][]repository.EC2Tag{}
 	for _, spec := range queryListItems(p, "TagSpecification.") {
 		rt := p.Get(spec + "ResourceType")
 		if !slices.Contains(allowed, rt) {
-			return nil, fmt.Sprintf("'%s' is not a valid taggable resource type for this operation.", rt)
+			return nil, rt
 		}
 		out[rt] = append(out[rt], parseTags(p, spec+"Tag.")...)
 	}
@@ -3050,9 +2995,10 @@ func tagSpecifications(p url.Values, allowed ...string) (map[string][]repository
 // refuseTagSpecifications parses TagSpecification.N and writes
 // InvalidParameterValue when a type is not in allowed.
 func refuseTagSpecifications(w http.ResponseWriter, p url.Values, allowed ...string) (map[string][]repository.EC2Tag, bool) {
-	specs, msg := tagSpecifications(p, allowed...)
-	if msg != "" {
-		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue", msg)
+	specs, rt := tagSpecifications(p, allowed...)
+	if specs == nil {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue",
+			fmt.Sprintf("'%s' is not a valid taggable resource type for this operation.", rt))
 		return nil, true
 	}
 	return specs, false
@@ -3094,10 +3040,10 @@ func (app *Application) tagSets(w http.ResponseWriter, account string) (map[stri
 
 // taggableResources resolves each ResourceId.N to its EC2 resource
 // type. It writes the typed NotFound code for a missing resource, and
-// InvalidID for an id of a type fakeaws cannot tag, and then reports
-// false.
-func (app *Application) taggableResources(w http.ResponseWriter, account, region string, p url.Values) (map[string]string, bool) {
-	ids := queryListValues(p, "ResourceId.")
+// refuses through ec2Refuse an id of a type fakeaws cannot tag, and
+// then reports false.
+func (app *Application) taggableResources(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) (map[string]string, bool) {
+	ids := queryListValues(req.Params, "ResourceId.")
 	if len(ids) == 0 {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("ResourceId.N required: %w", models.ErrConflict))
@@ -3107,9 +3053,7 @@ func (app *Application) taggableResources(w http.ResponseWriter, account, region
 	for _, id := range ids {
 		i := slices.IndexFunc(ec2TaggedKinds, func(k ec2TaggedKind) bool { return strings.HasPrefix(id, k.prefix) })
 		if i < 0 {
-			markClass(w, classFilterRefused)
-			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
-				"InvalidID", fmt.Sprintf("The ID '%s' is not valid", id))
+			ec2Refuse(w, req.Action, "tags on "+id)
 			return nil, false
 		}
 		kind := ec2TaggedKinds[i]
@@ -3129,7 +3073,7 @@ func (app *Application) taggableResources(w http.ResponseWriter, account, region
 }
 
 func (app *Application) ec2CreateTags(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	resources, ok := app.taggableResources(w, account, region, req.Params)
+	resources, ok := app.taggableResources(w, account, region, req)
 	if !ok {
 		return
 	}
@@ -3154,7 +3098,7 @@ func (app *Application) ec2CreateTags(w http.ResponseWriter, account, region str
 // Value is sent (an empty one included), and every tag when no Tag.N
 // is sent, as EC2 does.
 func (app *Application) ec2DeleteTags(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	resources, ok := app.taggableResources(w, account, region, req.Params)
+	resources, ok := app.taggableResources(w, account, region, req)
 	if !ok {
 		return
 	}
@@ -3185,28 +3129,23 @@ type ec2TagXML struct {
 	Value        string `xml:"value"`
 }
 
-// tagFilterValues maps each DescribeTags filter fakeaws supports to a
-// tag's value for it. The provider filters by resource-id, and by key
-// for single-tag lookups (the instance read's launch-template tags).
-var tagFilterValues = map[string]func(repository.EC2Tag) string{
-	"resource-id":   func(t repository.EC2Tag) string { return t.ResourceID },
-	"resource-type": func(t repository.EC2Tag) string { return t.ResourceType },
-	"key":           func(t repository.EC2Tag) string { return t.Key },
-	"value":         func(t repository.EC2Tag) string { return t.Value },
-}
+// tagFilters are the DescribeTags filters fakeaws models. The provider
+// filters by resource-id, and by key for single-tag lookups (the
+// instance read's launch-template tags).
+var tagFilters = ec2FilterTable[repository.EC2Tag]{values: map[string]func(repository.EC2Tag) []string{
+	"resource-id":   func(t repository.EC2Tag) []string { return []string{t.ResourceID} },
+	"resource-type": func(t repository.EC2Tag) []string { return []string{t.ResourceType} },
+	"key":           func(t repository.EC2Tag) []string { return []string{t.Key} },
+	"value":         func(t repository.EC2Tag) []string { return []string{t.Value} },
+}}
 
 // ec2DescribeTags lists the region's tags matching every filter; no
 // match is a 200 with an empty tagSet. An unsupported filter is
 // refused rather than ignored.
 func (app *Application) ec2DescribeTags(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	filters := ec2Filters(req.Params)
-	for name := range filters {
-		if tagFilterValues[name] == nil {
-			markClass(w, classFilterRefused)
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
-				fmt.Errorf("DescribeTags filter %q not supported by fakeaws: %w", name, models.ErrConflict))
-			return
-		}
+	filters, ok := tagFilters.read(w, req)
+	if !ok {
+		return
 	}
 	tags, err := app.repo.ListTags(account, region)
 	if err != nil {
@@ -3215,20 +3154,11 @@ func (app *Application) ec2DescribeTags(w http.ResponseWriter, account, region s
 	}
 	out := ec2DescribeTagsResult{TagSet: []ec2TagXML{}}
 	for _, t := range tags {
-		if tagMatches(t, filters) {
+		if tagFilters.matches(t, filters, nil) {
 			out.TagSet = append(out.TagSet, ec2TagXML{ResourceId: t.ResourceID, ResourceType: t.ResourceType, Key: t.Key, Value: t.Value})
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeTags", &out)
-}
-
-func tagMatches(t repository.EC2Tag, filters map[string][]string) bool {
-	for name, want := range filters {
-		if !slices.Contains(want, tagFilterValues[name](t)) {
-			return false
-		}
-	}
-	return true
 }
 
 // synthesizeInstanceType returns a plausible InstanceTypeInfo for any
@@ -3298,7 +3228,7 @@ func (app *Application) gatherEC2StateReal(account string) (map[string]any, erro
 	}
 	out["vpcs"] = vOut
 
-	subnets, err := app.repo.ListSubnets(account, "", "")
+	subnets, err := app.repo.ListSubnets(account, "")
 	if err != nil {
 		return nil, err
 	}
