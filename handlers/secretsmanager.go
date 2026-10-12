@@ -75,6 +75,7 @@ func (app *Application) handleSecretsManager(w http.ResponseWriter, r *http.Requ
 	case "ListSecretVersionIds":
 		app.smListSecretVersionIds(w, account, region, req)
 	default:
+		markClass(w, classNotModelled404)
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
 			fmt.Errorf("Secrets Manager operation %q not yet implemented in fakeaws v1: %w", req.Operation, models.ErrNotFound))
 	}

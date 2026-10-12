@@ -105,6 +105,7 @@ func (app *Application) handleKMS(w http.ResponseWriter, r *http.Request) {
 	case "EnableKey", "DisableKey":
 		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
 	default:
+		markClass(w, classNotModelled404)
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
 			fmt.Errorf("KMS operation %q not yet implemented in fakeaws v1: %w", req.Operation, models.ErrNotFound))
 	}
