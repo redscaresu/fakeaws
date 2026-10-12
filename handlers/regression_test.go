@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"slices"
 	"strings"
 	"testing"
 
@@ -1328,16 +1327,25 @@ func TestRegressionDescribeLiteralNIndexRefused(t *testing.T) {
 // read of its own run's network got 501. Each now selects by tag.
 func TestRegressionNetworkDescribesHonourTagFilters(t *testing.T) {
 	srv := newTestServerForRegression(t)
-	for _, kind := range taggedKinds {
-		if !slices.Contains([]string{"vpc", "subnet", "internet-gateway", "route-table"}, kind.resourceType) {
-			continue
-		}
+	kinds := map[string]taggedKind{}
+	for _, k := range taggedKinds {
+		kinds[k.resourceType] = k
+	}
+	for _, tc := range []struct {
+		kind string
+		ids  func(describedIDs) []string
+	}{
+		{"vpc", func(d describedIDs) []string { return d.Vpcs }},
+		{"subnet", func(d describedIDs) []string { return d.Subnets }},
+		{"internet-gateway", func(d describedIDs) []string { return d.Gateways }},
+		{"route-table", func(d describedIDs) []string { return d.RouteTables }},
+	} {
+		kind, ok := kinds[tc.kind]
+		require.True(t, ok, "no taggedKinds entry for %s", tc.kind)
 		picked := kind.create(t, srv, "Name", "picked")
-		other := kind.create(t, srv, "Name", "other")
+		kind.create(t, srv, "Name", "other")
 		action, _ := kind.describe(picked)
-		resp, body := ec2Call(t, srv, tagRegion, action, ec2FilterParams("tag:Name", "picked"))
-		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", action, body)
-		assert.Contains(t, string(body), picked, action)
-		assert.NotContains(t, string(body), other, action)
+		got := tc.ids(describeIDs(t, srv, action, ec2FilterParams("tag:Name", "picked")))
+		assert.Equal(t, []string{picked}, got, action)
 	}
 }
