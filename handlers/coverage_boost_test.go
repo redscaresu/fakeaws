@@ -52,9 +52,10 @@ func TestCoverage_EC2InstanceModifyAttribute(t *testing.T) {
 	resp, _ := ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {instID}})
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "ModifyInstanceAttribute")
 
-	// Missing instance → 404.
-	resp, _ = ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {"i-missing"}})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ModifyInstanceAttribute missing")
+	// Missing instance → EC2's 400 InvalidInstanceID.NotFound.
+	resp, body = ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {"i-missing"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "ModifyInstanceAttribute missing")
+	assert.Equal(t, "InvalidInstanceID.NotFound", extractEC2Tag(body, "Code"), "ModifyInstanceAttribute missing")
 }
 
 func TestCoverage_EC2DetachInternetGateway(t *testing.T) {

@@ -1370,7 +1370,9 @@ func TestContract_ec2_instance_attributes_from_rows(t *testing.T) {
 	_, raw = describeInstance(t, srv, region, launched)
 	assert.Contains(t, raw, "<ebsOptimized>true</ebsOptimized>", "DescribeInstances")
 
-	resp, body := ec2Call(t, srv, region, "TerminateInstances", url.Values{"InstanceId.1": {launched}})
+	resp, body := ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {launched}, "DisableApiTermination.Value": {"false"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ModifyInstanceAttribute: %s", body)
+	resp, body = ec2Call(t, srv, region, "TerminateInstances", url.Values{"InstanceId.1": {launched}})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "TerminateInstances: %s", body)
 	resp, body = attribute(launched, "sourceDestCheck")
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "terminated: %s", body)

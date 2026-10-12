@@ -101,53 +101,149 @@ func TestInstanceTerminalStateRefusesTransition(t *testing.T) {
 	}
 	r.CreateInstance(testAccount, inst, &EC2NetworkInterface{ID: "eni-1"})
 
-	if err := r.SetInstanceState(testAccount, testRegion, "i-1", "terminated"); err != nil {
+	if err := r.SetInstanceState(testAccount, testRegion, "terminated", "i-1"); err != nil {
 		t.Fatalf("transition to terminated: %v", err)
 	}
 	// From terminated → anything is refused (concepts.md "Standing
 	// patterns" item 9 — terminal-state refusal).
-	if err := r.SetInstanceState(testAccount, testRegion, "i-1", "running"); !errors.Is(err, models.ErrConflict) {
+	if err := r.SetInstanceState(testAccount, testRegion, "running", "i-1"); !errors.Is(err, models.ErrConflict) {
 		t.Errorf("transition out of terminated: want ErrConflict, got %v", err)
 	}
+}
+
+// createInstances creates running instances i-0 … i-<n-1> in one subnet.
+func createInstances(t *testing.T, r *Repository, n int) {
+	t.Helper()
+	_, subnetID := setupVPCSubnet(t, r)
+	for i := range n {
+		require.NoError(t, r.CreateInstance(testAccount, &EC2Instance{
+			ID: fmt.Sprintf("i-%d", i), SubnetID: subnetID, AMIID: "ami-1", InstanceType: "t3.micro",
+			Region: testRegion, ARN: "arn", State: "running", CreatedAt: "t",
+		}, &EC2NetworkInterface{ID: fmt.Sprintf("eni-%d", i)}))
+	}
+}
+
+// receive waits for one error from ch, failing the test after 10s.
+func receive(t *testing.T, ch <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s never finished", what)
+		return nil
+	}
+}
+
+// TestUpdateInstanceAttributesKeepsAConcurrentState: a state change
+// that arrives while an attribute update is between its read and its
+// write waits for it, rather than landing there and being overwritten
+// by the stale state the update read into data.
+func TestUpdateInstanceAttributesKeepsAConcurrentState(t *testing.T) {
+	r := setupRepo(t)
+	createInstances(t, r, 1)
+
+	stopped := make(chan error, 1)
+	require.NoError(t, r.UpdateInstanceAttributes(testAccount, testRegion, "i-0", EC2InstanceAttributeChange{Set: func(a *EC2InstanceAttributes) {
+		go func() { stopped <- r.SetInstanceState(testAccount, testRegion, "stopped", "i-0") }()
+		select { // without the update's transaction the state change finishes here
+		case err := <-stopped:
+			stopped <- err
+		case <-time.After(200 * time.Millisecond):
+		}
+		a.DisableAPIStop = true
+	}}))
+	require.NoError(t, receive(t, stopped, "the state change"))
+	got, err := r.GetInstance(testAccount, testRegion, "i-0")
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.State, "the state change is not undone")
+	assert.True(t, got.DisableAPIStop, "the update is kept")
+}
+
+// TestSetInstanceStateKeepsAConcurrentAttributeUpdate: a state change
+// and an attribute update queued on the one connection both survive,
+// whichever runs first. The pool hands the connection to a random
+// waiter, so each round runs the state change first about half the
+// time; a state change that read outside its transaction would then
+// lose the update committed between its read and its write.
+func TestSetInstanceStateKeepsAConcurrentAttributeUpdate(t *testing.T) {
+	const rounds = 20
+	r := setupRepo(t)
+	createInstances(t, r, rounds)
+	for i := range rounds {
+		id := fmt.Sprintf("i-%d", i)
+		hold, err := r.db.Begin() // takes the only connection
+		require.NoError(t, err)
+		waits := r.db.Stats().WaitCount
+		stateErr, attrErr := make(chan error, 1), make(chan error, 1)
+		go func() { stateErr <- r.SetInstanceState(testAccount, testRegion, "stopped", id) }()
+		go func() {
+			attrErr <- r.UpdateInstanceAttributes(testAccount, testRegion, id, EC2InstanceAttributeChange{
+				Set: func(a *EC2InstanceAttributes) { a.DisableAPITermination = true },
+			})
+		}()
+		require.Eventually(t, func() bool { return r.db.Stats().WaitCount >= waits+2 }, 10*time.Second, time.Millisecond, "both queued")
+		require.NoError(t, hold.Rollback())
+		require.NoError(t, receive(t, stateErr, "the state change"))
+		require.NoError(t, receive(t, attrErr, "the attribute update"))
+
+		got, err := r.GetInstance(testAccount, testRegion, id)
+		require.NoError(t, err)
+		assert.Equal(t, "stopped", got.State, "round %d", i)
+		assert.True(t, got.DisableAPITermination, "round %d: the update is kept", i)
+	}
+}
+
+// TestUpdateInstanceAttributesIsAtomic: the attribute write and the
+// ENI's sourceDestCheck write commit together or not at all, and a
+// terminated instance is refused before either.
+func TestUpdateInstanceAttributesIsAtomic(t *testing.T) {
+	r := setupRepo(t)
+	createInstances(t, r, 2)
+	off := false
+	change := EC2InstanceAttributeChange{Set: func(a *EC2InstanceAttributes) { a.DisableAPIStop = true }, SourceDestCheck: &off}
+
+	_, err := r.db.Exec(`DELETE FROM ec2_network_interfaces WHERE instance_id = 'i-0'`)
+	require.NoError(t, err)
+	assert.ErrorIs(t, r.UpdateInstanceAttributes(testAccount, testRegion, "i-0", change), models.ErrConflict, "no ENI for sourceDestCheck")
+	got, err := r.GetInstance(testAccount, testRegion, "i-0")
+	require.NoError(t, err)
+	assert.False(t, got.DisableAPIStop, "the attribute write rolled back with the ENI write")
+
+	require.NoError(t, r.SetInstanceState(testAccount, testRegion, "terminated", "i-1"))
+	assert.ErrorIs(t, r.UpdateInstanceAttributes(testAccount, testRegion, "i-1", change), models.ErrTerminalState, "terminated")
+	got, err = r.GetInstance(testAccount, testRegion, "i-1")
+	require.NoError(t, err)
+	assert.False(t, got.DisableAPIStop, "nothing written to a terminated instance")
+	assert.ErrorIs(t, r.UpdateInstanceAttributes(testAccount, testRegion, "i-missing", change), models.ErrNotFound)
+}
+
+// TestSetInstanceStateTerminationProtected: terminating several
+// instances, one with DisableAPITermination set, terminates none.
+func TestSetInstanceStateTerminationProtected(t *testing.T) {
+	r := setupRepo(t)
+	createInstances(t, r, 2)
+	require.NoError(t, r.UpdateInstanceAttributes(testAccount, testRegion, "i-1", EC2InstanceAttributeChange{
+		Set: func(a *EC2InstanceAttributes) { a.DisableAPITermination = true },
+	}))
+
+	err := r.SetInstanceState(testAccount, testRegion, "terminated", "i-0", "i-1")
+	var protected *TerminationProtectedError
+	require.ErrorAs(t, err, &protected)
+	assert.Equal(t, "i-1", protected.InstanceID)
+	for _, id := range []string{"i-0", "i-1"} {
+		got, err := r.GetInstance(testAccount, testRegion, id)
+		require.NoError(t, err)
+		assert.Equal(t, "running", got.State, id)
+	}
+	enis, err := r.ListNetworkInterfaces(testAccount, testRegion)
+	require.NoError(t, err)
+	assert.Len(t, enis, 2, "no ENI deleted")
 }
 
 // TestPrivateIP pins the subnet allocator: AWS keeps the first four
 // addresses and the last one, so a /28 holds 11 ENIs, and a requested
 // address must be one of those and free.
-// TestUpdateInstanceAttributesKeepsAConcurrentState: a terminate that
-// arrives while an attribute update is between its read and its write
-// waits for it, rather than landing there and being overwritten by the
-// stale state the update read into data.
-func TestUpdateInstanceAttributesKeepsAConcurrentState(t *testing.T) {
-	r := setupRepo(t)
-	_, subnetID := setupVPCSubnet(t, r)
-	require.NoError(t, r.CreateInstance(testAccount, &EC2Instance{
-		ID: "i-1", SubnetID: subnetID, AMIID: "ami-1", InstanceType: "t3.micro",
-		Region: testRegion, ARN: "arn", State: "running", CreatedAt: "t",
-	}, &EC2NetworkInterface{ID: "eni-1"}))
-
-	terminated := make(chan error, 1)
-	require.NoError(t, r.UpdateInstanceAttributes(testAccount, testRegion, "i-1", func(a *EC2InstanceAttributes) {
-		go func() { terminated <- r.SetInstanceState(testAccount, testRegion, "i-1", "terminated") }()
-		select { // without the update's transaction the terminate finishes here
-		case err := <-terminated:
-			terminated <- err
-		case <-time.After(200 * time.Millisecond):
-		}
-		a.DisableAPITermination = true
-	}))
-	select {
-	case err := <-terminated:
-		require.NoError(t, err, "terminate")
-	case <-time.After(10 * time.Second):
-		t.Fatal("terminate never finished")
-	}
-	got, err := r.GetInstance(testAccount, testRegion, "i-1")
-	require.NoError(t, err)
-	assert.Equal(t, "terminated", got.State, "the terminate is not undone")
-	assert.True(t, got.DisableAPITermination, "the update is kept")
-}
-
 func TestPrivateIP(t *testing.T) {
 	used := map[string]bool{}
 	for i := 4; i <= 14; i++ {

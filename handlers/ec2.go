@@ -2344,6 +2344,9 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		ec2Refuse(w, req.Action, "no SubnetId, ImageId or InstanceType") // AWS defaults the subnet (default VPC) and InstanceType
 		return
 	}
+	if refuseShutdownBehavior(w, req.Params, "InstanceInitiatedShutdownBehavior") {
+		return
+	}
 	// The provider adds a volume spec whenever default_tags is set;
 	// fakeaws has no volumes, so those tags are accepted and dropped.
 	specs, refusedType := tagSpecifications(req.Params, "instance", "network-interface", "volume")
@@ -2580,9 +2583,10 @@ func (app *Application) ec2ModifyNetworkInterfaceAttribute(w http.ResponseWriter
 // ec2ModifyInstanceAttribute stores SourceDestCheck on the primary
 // ENI that DescribeInstances reads it from (the provider sends it
 // after create for source_dest_check = false), and the
-// ec2InstanceAttributes on the instance. Other attributes are accepted
-// and not stored. State changes go through the dedicated state-machine
-// handlers (Start / Stop / Terminate).
+// ec2InstanceAttributes on the instance, in one transaction. Any other
+// param (UserData.Value, InstanceType.Value, GroupId.N, the legacy
+// Attribute and Value, ...) is refused, and so is a terminated
+// instance, before anything is written.
 func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	id := req.Params.Get("InstanceId")
 	if id == "" {
@@ -2590,22 +2594,63 @@ func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, accoun
 			fmt.Errorf("InstanceId required: %w", models.ErrConflict))
 		return
 	}
-	_, err := app.repo.GetInstance(account, region, id)
-	// SourceDestCheck first: it refuses a terminated instance before
-	// anything is written.
-	if v := req.Params.Get("SourceDestCheck.Value"); err == nil && v != "" {
-		err = app.setSourceDestCheck(account, id, v == "true")
+	reads := []string{"InstanceId", "SourceDestCheck.Value"}
+	for name := range ec2InstanceAttributes {
+		reads = append(reads, name+".Value")
 	}
-	if err == nil {
-		err = app.repo.UpdateInstanceAttributes(account, region, id, func(a *repository.EC2InstanceAttributes) {
-			setInstanceAttributes(a, req.Params, ".Value")
-		})
+	if ec2RefuseUnread(w, req, reads...) || refuseShutdownBehavior(w, req.Params, "InstanceInitiatedShutdownBehavior.Value") {
+		return
+	}
+	change := repository.EC2InstanceAttributeChange{Set: func(a *repository.EC2InstanceAttributes) {
+		setInstanceAttributes(a, req.Params, ".Value")
+	}}
+	if v := req.Params.Get("SourceDestCheck.Value"); v != "" {
+		on := v == "true"
+		change.SourceDestCheck = &on
+	}
+	err := app.repo.UpdateInstanceAttributes(account, region, id, change)
+	if errors.Is(err, models.ErrTerminalState) {
+		// UNVERIFIED(aws-code): IncorrectInstanceState from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "IncorrectInstanceState",
+			fmt.Sprintf("The instance '%s' is not in a state from which it can be modified.", id))
+		return
 	}
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		writeInstanceError(w, id, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "ModifyInstanceAttribute", nil)
+}
+
+// ec2RefuseUnread refuses req through ec2Refuse, naming each param
+// whose name (ec2ParamName) is not in reads, and reports whether it
+// did.
+func ec2RefuseUnread(w http.ResponseWriter, req awsproto.QueryRPCRequest, reads ...string) bool {
+	var unread []string
+	for k := range req.Params {
+		if name := ec2ParamName(k); !slices.Contains(reads, name) {
+			unread = append(unread, name)
+		}
+	}
+	if len(unread) == 0 {
+		return false
+	}
+	ec2Refuse(w, req.Action, unread...)
+	return true
+}
+
+// refuseShutdownBehavior answers InvalidParameterValue, and reports
+// true, when p sets param to anything but stop or terminate.
+func refuseShutdownBehavior(w http.ResponseWriter, p url.Values, param string) bool {
+	switch v := p.Get(param); v {
+	case "", "stop", "terminate":
+		return false
+	default:
+		// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue",
+			fmt.Sprintf("Value (%s) for parameter instanceInitiatedShutdownBehavior is invalid. Expected: 'stop', 'terminate'.", v))
+		return true
+	}
 }
 
 // ec2InstanceAttributes maps each attribute stored on the instance row
@@ -2628,20 +2673,6 @@ func setInstanceAttributes(a *repository.EC2InstanceAttributes, p url.Values, su
 	}
 }
 
-func (app *Application) setSourceDestCheck(account, instanceID string, on bool) error {
-	enis, err := app.instanceENIs(account)
-	if err != nil {
-		return err
-	}
-	eni := enis[instanceID]
-	if eni == nil {
-		return fmt.Errorf("instance %s has no network interface (terminated): %w", instanceID, models.ErrConflict)
-	}
-	return app.repo.UpdateNetworkInterface(account, eni.Region, eni.ID, func(e *repository.EC2NetworkInterface) {
-		e.SourceDestCheck = on
-	})
-}
-
 func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	ids := parseInstanceIDs(req)
 	if len(ids) == 0 {
@@ -2650,56 +2681,51 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, re
 		return
 	}
 	out := ec2TerminateInstancesResult{}
+	var live []string
 	for _, id := range ids {
 		inst, err := app.repo.GetInstance(account, region, id)
-		if err != nil {
-			// Already gone — TerminateInstances is idempotent in real
-			// AWS: a second call after the row has been GCd still
-			// returns 200 with terminated/terminated. Match that by
-			// synthesising the response when the row is no longer in
-			// the repo. (The hard-delete-on-terminate below depends
-			// on this branch to stay idempotent.)
-			if errors.Is(err, models.ErrNotFound) {
-				out.InstancesSet = append(out.InstancesSet, ec2InstanceStateChangeXML{
-					InstanceId:    id,
-					CurrentState:  ec2InstanceStateForName("terminated"),
-					PreviousState: ec2InstanceStateForName("terminated"),
-				})
-				continue
+		if err != nil && !errors.Is(err, models.ErrNotFound) {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return
+		}
+		previous := "terminated"
+		// Already gone, or already terminated: TerminateInstances is
+		// idempotent in real AWS and answers terminated/terminated.
+		// Concepts.md "Standing patterns" item 9 — terminal state
+		// refuses transitions; the wire response just echoes it.
+		if err == nil && inst.State != "terminated" {
+			previous = inst.State
+			if !slices.Contains(live, id) { // a repeated id is terminated once
+				live = append(live, id)
 			}
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-			return
-		}
-		previous := inst.State
-		if previous == "terminated" {
-			// Already terminated — AWS surfaces this as state-stays-terminated,
-			// not as a 409. Concepts.md "Standing patterns" item 9 — terminal
-			// state refuses transitions; the wire response just echoes
-			// terminated/terminated.
-			out.InstancesSet = append(out.InstancesSet, ec2InstanceStateChangeXML{
-				InstanceId:    id,
-				CurrentState:  ec2InstanceStateForName("terminated"),
-				PreviousState: ec2InstanceStateForName("terminated"),
-			})
-			continue
-		}
-		if err := app.repo.SetInstanceState(account, region, id, "terminated"); err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-			return
 		}
 		out.InstancesSet = append(out.InstancesSet, ec2InstanceStateChangeXML{
 			InstanceId:    id,
 			CurrentState:  ec2InstanceStateForName("terminated"),
 			PreviousState: ec2InstanceStateForName(previous),
 		})
-		// NOTE: do NOT hard-delete the row here. The provider's
-		// destroy wait-loop polls DescribeInstances expecting to
-		// observe the state transition (running→stopping→terminated)
-		// before accepting "gone." Hard-deleting collapses the wait
-		// into a confusing "couldn't find resource (21 retries)"
-		// error. Cleanup of terminated rows happens lazily inside
-		// DeleteSubnet/DeleteVPC so the FK constraint doesn't block
-		// dependent resource deletion.
+	}
+	// One transaction for every id: as in AWS, an instance that cannot
+	// be terminated leaves all of them running.
+	//
+	// NOTE: do NOT hard-delete the rows. The provider's destroy
+	// wait-loop polls DescribeInstances expecting to observe the state
+	// transition (running→stopping→terminated) before accepting "gone."
+	// Hard-deleting collapses the wait into a confusing "couldn't find
+	// resource (21 retries)" error. Cleanup of terminated rows happens
+	// lazily inside DeleteSubnet/DeleteVPC so the FK constraint doesn't
+	// block dependent resource deletion.
+	err := app.repo.SetInstanceState(account, region, "terminated", live...)
+	var protected *repository.TerminationProtectedError
+	if errors.As(err, &protected) {
+		// UNVERIFIED(aws-code): OperationNotPermitted from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "OperationNotPermitted",
+			fmt.Sprintf("The instance '%s' may not be terminated. Modify its 'disableApiTermination' instance attribute and try again.", protected.InstanceID))
+		return
+	}
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "TerminateInstances", &out)
 }

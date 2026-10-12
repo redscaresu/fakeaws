@@ -276,13 +276,20 @@ func privateIP(cidr, want string, used map[string]bool) (string, error) {
 // GetInstance looks up an instance by id, optionally scoped to a
 // region (Codex pass 7 BLOCKING #1).
 func (r *Repository) GetInstance(account, region, id string) (*EC2Instance, error) {
-	var data string
-	var err error
 	if region == "" {
-		err = r.db.QueryRow(`SELECT data FROM ec2_instances WHERE account_id = ? AND id = ?`, account, id).Scan(&data)
-	} else {
-		err = r.db.QueryRow(`SELECT data FROM ec2_instances WHERE account_id = ? AND region = ? AND id = ?`, account, region, id).Scan(&data)
+		return scanInstance(r.db.QueryRow(`SELECT data FROM ec2_instances WHERE account_id = ? AND id = ?`, account, id))
 	}
+	return scanInstance(r.db.QueryRow(`SELECT data FROM ec2_instances WHERE account_id = ? AND region = ? AND id = ?`, account, region, id))
+}
+
+// getInstanceTx is GetInstance inside tx, for a read its write depends on.
+func getInstanceTx(tx *sql.Tx, account, region, id string) (*EC2Instance, error) {
+	return scanInstance(tx.QueryRow(`SELECT data FROM ec2_instances WHERE account_id = ? AND region = ? AND id = ?`, account, region, id))
+}
+
+func scanInstance(row *sql.Row) (*EC2Instance, error) {
+	var data string
+	err := row.Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -323,76 +330,116 @@ func (r *Repository) ListInstances(account, region string) ([]*EC2Instance, erro
 	return out, rows.Err()
 }
 
-// UpdateInstanceAttributes applies change to the instance's
-// attributes and saves its data. It reads and writes in one
-// transaction (SetMaxOpenConns(1): only tx may touch the db until
-// Commit), so a state change cannot land between them and be
-// overwritten by the stale state in data.
-func (r *Repository) UpdateInstanceAttributes(account, region, id string, change func(*EC2InstanceAttributes)) error {
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var data string
-	err = tx.QueryRow(`SELECT data FROM ec2_instances WHERE account_id = ? AND region = ? AND id = ?`, account, region, id).Scan(&data)
-	if errors.Is(err, sql.ErrNoRows) {
-		return models.ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	var inst EC2Instance
-	if err := json.Unmarshal([]byte(data), &inst); err != nil {
-		return err
-	}
-	change(&inst.EC2InstanceAttributes)
-	body, _ := json.Marshal(&inst)
-	if _, err := tx.Exec(`UPDATE ec2_instances SET data = ? WHERE account_id = ? AND id = ?`, string(body), account, id); err != nil {
-		return err
-	}
-	return tx.Commit()
+// EC2InstanceAttributeChange is one ModifyInstanceAttribute: Set
+// changes the instance's attributes, and SourceDestCheck, when not
+// nil, is stored on its primary ENI.
+type EC2InstanceAttributeChange struct {
+	Set             func(*EC2InstanceAttributes)
+	SourceDestCheck *bool
 }
 
-// SetInstanceState moves an instance through the state machine,
-// collapsed to pending → running → shutting-down → terminated
-// (concepts.md "Standing patterns" item 9 — terminal-state refusal is
-// enforced here). Terminating deletes the instance's ENIs and clears
-// its EIP associations in the same transaction.
-func (r *Repository) SetInstanceState(account, region, id, state string) error {
-	current, err := r.GetInstance(account, region, id)
+// UpdateInstanceAttributes applies change in one transaction, so a
+// failure applies none of it. The read is in the transaction too
+// (SetMaxOpenConns(1): only tx may touch the db until Commit), so a
+// state change can neither land between the read and the write and be
+// overwritten by the stale state in data, nor overwrite this change. A
+// terminated instance is refused with models.ErrTerminalState before
+// anything is written.
+func (r *Repository) UpdateInstanceAttributes(account, region, id string, change EC2InstanceAttributeChange) error {
+	return r.inTx(func(tx *sql.Tx) error {
+		inst, err := getInstanceTx(tx, account, region, id)
+		if err != nil {
+			return err
+		}
+		if inst.State == "terminated" {
+			return fmt.Errorf("instance %s is terminated: %w", id, models.ErrTerminalState)
+		}
+		if change.Set != nil {
+			change.Set(&inst.EC2InstanceAttributes)
+		}
+		body, err := json.Marshal(inst)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE ec2_instances SET data = ? WHERE account_id = ? AND id = ?`, string(body), account, id); err != nil {
+			return err
+		}
+		if change.SourceDestCheck == nil {
+			return nil
+		}
+		res, err := tx.Exec(`UPDATE ec2_network_interfaces SET data = json_set(data, '$.source_dest_check', json(?)) WHERE account_id = ? AND instance_id = ?`,
+			fmt.Sprint(*change.SourceDestCheck), account, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("instance %s has no network interface: %w", id, models.ErrConflict)
+		}
+		return nil
+	})
+}
+
+// TerminationProtectedError is SetInstanceState's refusal to terminate
+// an instance whose DisableAPITermination is set.
+type TerminationProtectedError struct{ InstanceID string }
+
+func (e *TerminationProtectedError) Error() string {
+	return "instance " + e.InstanceID + " has disableApiTermination set"
+}
+
+func (e *TerminationProtectedError) Unwrap() error { return models.ErrConflict }
+
+// SetInstanceState moves each of ids to state in one transaction, so
+// all move or none does. The state machine is collapsed to pending →
+// running → shutting-down → terminated. It refuses, moving none, an
+// instance already terminated (models.ErrConflict: concepts.md
+// "Standing patterns" item 9 — terminal-state refusal is enforced
+// here) and the termination of one whose DisableAPITermination is set
+// (*TerminationProtectedError). Each read is in the transaction, so an
+// attribute committed meanwhile is not overwritten. Terminating
+// deletes the instance's ENIs and clears its EIP associations.
+func (r *Repository) SetInstanceState(account, region, state string, ids ...string) error {
+	return r.inTx(func(tx *sql.Tx) error {
+		for _, id := range ids {
+			if err := setInstanceStateTx(tx, account, region, id, state); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func setInstanceStateTx(tx *sql.Tx, account, region, id, state string) error {
+	inst, err := getInstanceTx(tx, account, region, id)
 	if err != nil {
 		return err
 	}
-	if current.State == "terminated" {
+	if inst.State == "terminated" {
 		return models.ErrConflict
 	}
-	current.State = state
-	body, _ := json.Marshal(current)
-	tx, err := r.db.Begin()
+	if state == "terminated" && inst.DisableAPITermination {
+		return &TerminationProtectedError{InstanceID: id}
+	}
+	inst.State = state
+	body, err := json.Marshal(inst)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(
-		`UPDATE ec2_instances SET state = ?, data = ? WHERE account_id = ? AND id = ?`,
-		state, string(body), account, id,
-	); err != nil {
+	if _, err := tx.Exec(`UPDATE ec2_instances SET state = ?, data = ? WHERE account_id = ? AND id = ?`, state, string(body), account, id); err != nil {
 		return err
 	}
-	if state == "terminated" {
-		if _, err := tx.Exec(`DELETE FROM ec2_network_interfaces WHERE account_id = ? AND instance_id = ?`, account, id); err != nil {
-			return err
-		}
-		// EC2 disassociates an instance's Elastic IPs when it terminates.
-		if _, err := tx.Exec(
-			`UPDATE ec2_eips SET network_interface_id = NULL, instance_id = NULL, association_id = NULL,
-			   data = json_remove(data, '$.network_interface_id', '$.instance_id', '$.association_id', '$.private_ip')
-			 WHERE account_id = ? AND instance_id = ?`, account, id); err != nil {
-			return err
-		}
+	if state != "terminated" {
+		return nil
 	}
-	return tx.Commit()
+	if _, err := tx.Exec(`DELETE FROM ec2_network_interfaces WHERE account_id = ? AND instance_id = ?`, account, id); err != nil {
+		return err
+	}
+	// EC2 disassociates an instance's Elastic IPs when it terminates.
+	_, err = tx.Exec(
+		`UPDATE ec2_eips SET network_interface_id = NULL, instance_id = NULL, association_id = NULL,
+		   data = json_remove(data, '$.network_interface_id', '$.instance_id', '$.association_id', '$.private_ip')
+		 WHERE account_id = ? AND instance_id = ?`, account, id)
+	return err
 }
 
 func (r *Repository) DeleteInstance(account, region, id string) error {
