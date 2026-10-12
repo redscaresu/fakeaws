@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -24,21 +23,24 @@ func TestRegisterLoader_Refuses(t *testing.T) {
 }
 
 // TestLoader_RenderReadsBackThroughTheTx: inside the load's transaction,
-// PutVpc's render reads the rows its load stored back through LoadTx's
-// Query and answers them with DescribeVpcs's encoder.
+// PutVpc's render reads the rows its items' writes stored back through
+// LoadTx's Query.
 func TestLoader_RenderReadsBackThroughTheTx(t *testing.T) {
 	repo, err := repository.New(":memory:")
 	require.NoError(t, err)
 	defer repo.Close()
-	i := slices.IndexFunc(loaders, func(l loader) bool { return l.key == LoadKey{"fakeaws-test", "PutVpc"} })
-	require.GreaterOrEqual(t, i, 0)
-	l := loaders[i]
+	l := loaderFor(LoadKey{"fakeaws-test", "PutVpc"})
 	env := &loadEnvelope{Account: "111122223333", Region: "eu-west-1"}
+	items, err := l.decode(env, &loadExchange{Body: `<PutVpcResponse><vpcSet>` +
+		`<item><vpcId>vpc-0render-b</vpcId><cidrBlock>10.1.0.0/16</cidrBlock></item>` +
+		`<item><vpcId>vpc-0render-a</vpcId><cidrBlock>10.0.0.0/16</cidrBlock></item>` +
+		`</vpcSet></PutVpcResponse>`})
+	require.NoError(t, err)
 
 	var rendered string
 	require.NoError(t, repo.Load(repository.Identity{AccountID: env.Account, Region: env.Region}, func(tx *repository.LoadTx) error {
-		for _, id := range []string{"vpc-0render-b", "vpc-0render-a"} {
-			if _, err := l.load(tx, env, &loadExchange{Body: id}); err != nil {
+		for _, item := range items {
+			if err := item.write(tx); err != nil {
 				return err
 			}
 		}
@@ -47,7 +49,8 @@ func TestLoader_RenderReadsBackThroughTheTx(t *testing.T) {
 		assert.False(t, tx.Failed())
 		return err
 	}))
-	assert.Contains(t, rendered, "<DescribeVpcsResponse>")
-	assert.Regexp(t, `(?s)<vpcId>vpc-0render-a</vpcId>.*<vpcId>vpc-0render-b</vpcId>`, rendered)
-	assert.Contains(t, rendered, "<ownerId>111122223333</ownerId>", "the row's account, read back")
+	assert.Equal(t, `<PutVpcResponse><vpcSet>`+
+		`<item><vpcId>vpc-0render-a</vpcId><cidrBlock>10.0.0.0/16</cidrBlock></item>`+
+		`<item><vpcId>vpc-0render-b</vpcId><cidrBlock>10.1.0.0/16</cidrBlock></item>`+
+		`</vpcSet></PutVpcResponse>`, rendered)
 }
