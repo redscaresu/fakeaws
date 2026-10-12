@@ -1,4 +1,4 @@
-dbSchemaVersion 2
+dbSchemaVersion 3
 
 === table audit
 CREATE TABLE audit (

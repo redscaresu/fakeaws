@@ -1,0 +1,8 @@
+<!-- Source: AWS EC2 API reference, DescribeVpcAttribute, Example 2 (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeVpcAttribute.html), request Attribute=enableDnsHostnames; vpcId vpc-1a2b3c4d changed to DescribeVpcs.xml's vpc-0ee975135dEXAMPLE. -->
+<DescribeVpcAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <requestId>7a62c49f-347e-4fc4-9331-6e8eEXAMPLE</requestId>
+  <vpcId>vpc-0ee975135dEXAMPLE</vpcId>
+   <enableDnsHostnames>
+    <value>true</value>
+   </enableDnsHostnames>
+</DescribeVpcAttributeResponse>
