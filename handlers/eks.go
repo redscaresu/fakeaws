@@ -563,13 +563,16 @@ func (app *Application) eksDeleteAddon(w http.ResponseWriter, r *http.Request) {
 //
 // Codex pass 3 BLOCKING #2 fix: clusters now also surface their
 // nodegroups + addons (was previously only emitting clusters).
-func (app *Application) gatherEKSStateReal(account string) map[string]any {
+func (app *Application) gatherEKSStateReal(account string) (map[string]any, error) {
 	out := map[string]any{
 		"clusters":    []any{},
 		"node_groups": []any{},
 		"addons":      []any{},
 	}
-	clusters, _ := app.repo.ListEKSClusters(account, "")
+	clusters, err := app.repo.ListEKSClusters(account, "")
+	if err != nil {
+		return nil, err
+	}
 	cOut := make([]map[string]any, 0, len(clusters))
 	for _, c := range clusters {
 		// Codex pass 15 BLOCKING #2: include security_group_ids and
@@ -587,7 +590,10 @@ func (app *Application) gatherEKSStateReal(account string) map[string]any {
 	// instead of raw nested queries. The previous implementation
 	// risked deadlock under SetMaxOpenConns(1) by holding `rows`
 	// open while issuing nested Get* queries on the same connection.
-	ngs, _ := app.repo.ListEKSNodeGroups(account, "", "")
+	ngs, err := app.repo.ListEKSNodeGroups(account, "", "")
+	if err != nil {
+		return nil, err
+	}
 	ngOut := make([]map[string]any, 0, len(ngs))
 	for _, ng := range ngs {
 		// Codex pass 15 BLOCKING #2: include instance_types and
@@ -604,15 +610,17 @@ func (app *Application) gatherEKSStateReal(account string) map[string]any {
 		}
 		if ng.ScalingConfig != "" {
 			var sc any
-			if err := json.Unmarshal([]byte(ng.ScalingConfig), &sc); err == nil {
-				entry["scaling_config"] = sc
-			} else {
-				entry["scaling_config"] = ng.ScalingConfig
+			if err := json.Unmarshal([]byte(ng.ScalingConfig), &sc); err != nil {
+				return nil, fmt.Errorf("node group %s/%s scaling_config: %w", ng.ClusterName, ng.Name, err)
 			}
+			entry["scaling_config"] = sc
 		}
 		ngOut = append(ngOut, entry)
 	}
-	addons, _ := app.repo.ListEKSAddons(account, "", "")
+	addons, err := app.repo.ListEKSAddons(account, "", "")
+	if err != nil {
+		return nil, err
+	}
 	addOut := make([]map[string]any, 0, len(addons))
 	for _, a := range addons {
 		addOut = append(addOut, map[string]any{
@@ -622,7 +630,7 @@ func (app *Application) gatherEKSStateReal(account string) map[string]any {
 	}
 	out["node_groups"] = ngOut
 	out["addons"] = addOut
-	return out
+	return out, nil
 }
 
 // ensure the strings import is used by something.

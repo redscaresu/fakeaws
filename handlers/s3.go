@@ -47,11 +47,14 @@ func (app *Application) registerS3Routes(r chi.Router) {
 }
 
 // gatherS3StateReal returns the S3 block of /mock/state.
-func (app *Application) gatherS3StateReal(account string) map[string]any {
+func (app *Application) gatherS3StateReal(account string) (map[string]any, error) {
 	out := map[string]any{
 		"buckets": []any{},
 	}
-	buckets, _ := app.repo.ListBuckets(account)
+	buckets, err := app.repo.ListBuckets(account)
+	if err != nil {
+		return nil, err
+	}
 	bs := make([]map[string]any, 0, len(buckets))
 	for _, b := range buckets {
 		entry := map[string]any{
@@ -60,12 +63,20 @@ func (app *Application) gatherS3StateReal(account string) map[string]any {
 			"arn":        b.ARN,
 			"created_at": b.CreatedAt,
 		}
-		configs, _ := app.repo.ListBucketConfigs(account, b.Name)
+		configs, err := app.repo.ListBucketConfigs(account, b.Name)
+		if errors.Is(err, models.ErrNotFound) {
+			continue // deleted since the list
+		}
+		if err != nil {
+			return nil, err
+		}
 		if len(configs) > 0 {
 			confMap := make(map[string]any, len(configs))
 			for k, v := range configs {
 				var raw any
-				_ = json.Unmarshal(v, &raw)
+				if err := json.Unmarshal(v, &raw); err != nil {
+					return nil, fmt.Errorf("bucket %s %s config: %w", b.Name, k, err)
+				}
 				confMap[k] = raw
 			}
 			entry["configs"] = confMap
@@ -73,7 +84,7 @@ func (app *Application) gatherS3StateReal(account string) map[string]any {
 		bs = append(bs, entry)
 	}
 	out["buckets"] = bs
-	return out
+	return out, nil
 }
 
 // ----- Bucket CRUD -----

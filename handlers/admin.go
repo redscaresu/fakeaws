@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -465,7 +466,15 @@ func (app *Application) writeState(w http.ResponseWriter, service string) {
 // handlers yet).
 //
 // Each service's gather<Service>StateReal, in its own file, returns
-// its block.
+// its block, or its first failed read, never a partial block: a table
+// that fails to read must not look empty to an orphan check. A child
+// table is read per parent row, so with no parent rows it is not read
+// and adds nothing to the block. A parent a follow-up read no longer
+// finds (models.ErrNotFound) was deleted since the list and is left
+// out; any other error fails. collectState stops at the first error
+// and returns only "<service> state could not be read", so /mock/state
+// answers 500 and no state at all; the detail (SQL, table, decoder
+// text) goes to the log, never the response.
 //
 // The account is read once, before any gather, and passed to every
 // gather, so an unreadable identity is an error rather than a state no
@@ -473,7 +482,8 @@ func (app *Application) writeState(w http.ResponseWriter, service string) {
 func (app *Application) collectState(service string) (map[string]any, error) {
 	account, err := app.AccountID()
 	if err != nil {
-		return nil, err
+		log.Printf("GET /mock/state: read account: %v", err)
+		return nil, errors.New("account identity could not be read")
 	}
 	state := map[string]any{
 		"schema_version": stateSchemaVersion,
@@ -483,19 +493,33 @@ func (app *Application) collectState(service string) (map[string]any, error) {
 		"audit":      app.requests.audit(),
 	}
 
-	// Per-service gather hooks. Each one returns either a populated
-	// map for its service or an empty map. Adding a service is one
-	// line here.
-	state["iam"] = app.gatherIAMStateReal(account)
-	state["s3"] = app.gatherS3StateReal(account)
-	state["ec2"] = app.gatherEC2StateReal(account)
-	state["rds"] = app.gatherRDSStateReal(account)
-	state["dynamodb"] = app.gatherDynamoDBStateReal(account)
-	state["eks"] = app.gatherEKSStateReal(account)
-	state["sqs"] = app.gatherSQSStateReal(account)
-	state["route53"] = app.gatherRoute53StateReal(account)
-	state["secretsmanager"] = app.gatherSecretsManagerStateReal(account)
-	state["ssm"] = app.gatherSSMStateReal(account)
+	// Per-service gather hooks. Adding a service is one line here.
+	// A per-service request reads only its own service's tables.
+	for _, g := range []struct {
+		service string
+		gather  func(account string) (map[string]any, error)
+	}{
+		{"iam", app.gatherIAMStateReal},
+		{"s3", app.gatherS3StateReal},
+		{"ec2", app.gatherEC2StateReal},
+		{"rds", app.gatherRDSStateReal},
+		{"dynamodb", app.gatherDynamoDBStateReal},
+		{"eks", app.gatherEKSStateReal},
+		{"sqs", app.gatherSQSStateReal},
+		{"route53", app.gatherRoute53StateReal},
+		{"secretsmanager", app.gatherSecretsManagerStateReal},
+		{"ssm", app.gatherSSMStateReal},
+	} {
+		if service != "" && service != g.service {
+			continue
+		}
+		block, err := g.gather(account)
+		if err != nil {
+			log.Printf("GET /mock/state: read %s state: %v", g.service, err)
+			return nil, fmt.Errorf("%s state could not be read", g.service)
+		}
+		state[g.service] = block
+	}
 
 	if service == "" {
 		return state, nil

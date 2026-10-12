@@ -221,7 +221,7 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 // gatherIAMStateReal emits the IAM block of /mock/state. Per
 // concepts.md "Required surface" item 4 — topology_derive_aws (S43-T9)
 // keys off this shape.
-func (app *Application) gatherIAMStateReal(account string) map[string]any {
+func (app *Application) gatherIAMStateReal(account string) (map[string]any, error) {
 	out := map[string]any{
 		"roles":             []any{},
 		"policies":          []any{},
@@ -230,7 +230,10 @@ func (app *Application) gatherIAMStateReal(account string) map[string]any {
 		"access_keys":       []any{},
 	}
 
-	roles, _ := app.repo.ListRoles(account)
+	roles, err := app.repo.ListRoles(account)
+	if err != nil {
+		return nil, err
+	}
 	rolesOut := make([]map[string]any, 0, len(roles))
 	for _, r := range roles {
 		rolesOut = append(rolesOut, map[string]any{
@@ -243,7 +246,10 @@ func (app *Application) gatherIAMStateReal(account string) map[string]any {
 	}
 	out["roles"] = rolesOut
 
-	policies, _ := app.repo.ListPolicies(account)
+	policies, err := app.repo.ListPolicies(account)
+	if err != nil {
+		return nil, err
+	}
 	pOut := make([]map[string]any, 0, len(policies))
 	for _, p := range policies {
 		// Filter AWS-managed policy stubs (arn:aws:iam::aws:policy/*)
@@ -265,7 +271,10 @@ func (app *Application) gatherIAMStateReal(account string) map[string]any {
 	}
 	out["policies"] = pOut
 
-	profs, _ := app.repo.ListInstanceProfiles(account)
+	profs, err := app.repo.ListInstanceProfiles(account)
+	if err != nil {
+		return nil, err
+	}
 	profsOut := make([]map[string]any, 0, len(profs))
 	for _, p := range profs {
 		profsOut = append(profsOut, map[string]any{
@@ -278,7 +287,10 @@ func (app *Application) gatherIAMStateReal(account string) map[string]any {
 	}
 	out["instance_profiles"] = profsOut
 
-	users, _ := app.repo.ListUsers(account)
+	users, err := app.repo.ListUsers(account)
+	if err != nil {
+		return nil, err
+	}
 	uOut := make([]map[string]any, 0, len(users))
 	for _, u := range users {
 		uOut = append(uOut, map[string]any{
@@ -294,7 +306,10 @@ func (app *Application) gatherIAMStateReal(account string) map[string]any {
 	// #1 fix: previously absent, so terraform-provider-aws's
 	// aws_iam_access_key drift checks were invisible to topology
 	// derivation). ListAccessKeys with empty userName lists all users.
-	keys, _ := app.repo.ListAccessKeys(account, "")
+	keys, err := app.repo.ListAccessKeys(account, "")
+	if err != nil {
+		return nil, err
+	}
 	kOut := make([]map[string]any, 0, len(keys))
 	for _, k := range keys {
 		kOut = append(kOut, map[string]any{
@@ -306,7 +321,7 @@ func (app *Application) gatherIAMStateReal(account string) map[string]any {
 	}
 	out["access_keys"] = kOut
 
-	return out
+	return out, nil
 }
 
 // ----- Role handlers -----

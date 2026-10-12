@@ -626,13 +626,6 @@ func r53IsApex(recordName, zoneName string) bool {
 	return r == z
 }
 
-// ----- /mock/state gather -----
-
-// gatherRoute53StateReal emits the Route53 block of /mock/state.
-//
-// Codex pass 3 BLOCKING #2 fix: hosted zones now also surface their
-// non-default record sets (was previously only emitting zones).
-// NS+SOA defaults are excluded so the count reflects user records only.
 // r53ChangeTagsForResource adds and removes a zone's tags in one call;
 // aws_route53_zone tags this way at create as well as on update.
 func (app *Application) r53ChangeTagsForResource(w http.ResponseWriter, r *http.Request) {
@@ -662,20 +655,36 @@ func (app *Application) r53ChangeTagsForResource(w http.ResponseWriter, r *http.
 	}{})
 }
 
-func (app *Application) gatherRoute53StateReal(account string) map[string]any {
+// ----- /mock/state gather -----
+
+// gatherRoute53StateReal emits the Route53 block of /mock/state.
+//
+// Codex pass 3 BLOCKING #2 fix: hosted zones now also surface their
+// non-default record sets (was previously only emitting zones).
+// NS+SOA defaults are excluded so the count reflects user records only.
+func (app *Application) gatherRoute53StateReal(account string) (map[string]any, error) {
 	out := map[string]any{
 		"hosted_zones": []any{},
 		"record_sets":  []any{},
 	}
-	zones, _ := app.repo.ListHostedZones(account)
+	zones, err := app.repo.ListHostedZones(account)
+	if err != nil {
+		return nil, err
+	}
 	zOut := make([]map[string]any, 0, len(zones))
 	rsOut := []map[string]any{}
 	for _, z := range zones {
+		rsets, err := app.repo.ListRecordSets(account, z.ID)
+		if errors.Is(err, models.ErrNotFound) {
+			continue // deleted since the list
+		}
+		if err != nil {
+			return nil, err
+		}
 		zOut = append(zOut, map[string]any{
 			"id": z.ID, "name": z.Name, "comment": z.Comment, "private": z.Private,
 			"arn": z.ARN,
 		})
-		rsets, _ := app.repo.ListRecordSets(account, z.ID)
 		for _, rs := range rsets {
 			// Skip the auto-seeded NS + SOA at the apex — they
 			// inflate user-record counts that scenarios assert against.
@@ -694,16 +703,15 @@ func (app *Application) gatherRoute53StateReal(account string) map[string]any {
 			// identity checks can see the alias contract.
 			if rs.AliasTarget != "" {
 				var alias any
-				if err := json.Unmarshal([]byte(rs.AliasTarget), &alias); err == nil {
-					entry["alias_target"] = alias
-				} else {
-					entry["alias_target"] = rs.AliasTarget
+				if err := json.Unmarshal([]byte(rs.AliasTarget), &alias); err != nil {
+					return nil, fmt.Errorf("record set %s %s alias_target: %w", rs.Name, rs.Type, err)
 				}
+				entry["alias_target"] = alias
 			}
 			rsOut = append(rsOut, entry)
 		}
 	}
 	out["hosted_zones"] = zOut
 	out["record_sets"] = rsOut
-	return out
+	return out, nil
 }

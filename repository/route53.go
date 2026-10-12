@@ -4,13 +4,13 @@
 // global (no region in ARN). The two load-bearing contracts at this
 // layer:
 //
-// 1. Non-empty-zone delete refusal: DeleteHostedZone counts records
-//    other than the default NS + SOA pair and rejects if any exist
-//    (concepts.md "Standing patterns" item 11).
-// 2. Transactional batch on ChangeResourceRecordSets: validate ALL
-//    changes before applying any (concepts.md "Standing patterns"
-//    item 7). Implemented at the handler layer; this file ships the
-//    underlying record-set CRUD primitives.
+//  1. Non-empty-zone delete refusal: DeleteHostedZone counts records
+//     other than the default NS + SOA pair and rejects if any exist
+//     (concepts.md "Standing patterns" item 11).
+//  2. Transactional batch on ChangeResourceRecordSets: validate ALL
+//     changes before applying any (concepts.md "Standing patterns"
+//     item 7). Implemented at the handler layer; this file ships the
+//     underlying record-set CRUD primitives.
 //
 // Default NS + SOA record sets are seeded automatically on
 // CreateHostedZone — they're how AWS surfaces "this zone is empty
@@ -251,7 +251,9 @@ func (r *Repository) ListRecordSets(account, zoneID string) ([]*Route53RecordSet
 		if err := rows.Scan(&rs.Name, &rs.Type, &rs.TTL, &recordsJSON, &rs.AliasTarget, &rs.SetIdentifier); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(recordsJSON), &rs.Records)
+		if err := json.Unmarshal([]byte(recordsJSON), &rs.Records); err != nil {
+			return nil, fmt.Errorf("record set %s %s records: %w", rs.Name, rs.Type, err)
+		}
 		out = append(out, &rs)
 	}
 	return out, rows.Err()

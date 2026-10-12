@@ -417,21 +417,17 @@ func (r *Repository) CreateInstanceProfile(account string, p *IAMInstanceProfile
 	return nil
 }
 
-func (r *Repository) GetInstanceProfile(account, name string) (*IAMInstanceProfile, error) {
+// instanceProfileSelect reads a profile with its attached role, if any
+// (a profile holds at most one).
+const instanceProfileSelect = `SELECT p.data, r.role_name
+	   FROM iam_instance_profiles p
+	   LEFT JOIN instance_profile_roles r
+	     ON p.account_id = r.account_id AND p.name = r.profile_name`
+
+func scanInstanceProfile(row interface{ Scan(...any) error }) (*IAMInstanceProfile, error) {
 	var data string
 	var roleName sql.NullString
-	err := r.db.QueryRow(
-		`SELECT p.data, r.role_name
-		   FROM iam_instance_profiles p
-		   LEFT JOIN instance_profile_roles r
-		     ON p.account_id = r.account_id AND p.name = r.profile_name
-		  WHERE p.account_id = ? AND p.name = ?`,
-		account, name,
-	).Scan(&data, &roleName)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, models.ErrNotFound
-	}
-	if err != nil {
+	if err := row.Scan(&data, &roleName); err != nil {
 		return nil, err
 	}
 	var profile IAMInstanceProfile
@@ -444,33 +440,31 @@ func (r *Repository) GetInstanceProfile(account, name string) (*IAMInstanceProfi
 	return &profile, nil
 }
 
+func (r *Repository) GetInstanceProfile(account, name string) (*IAMInstanceProfile, error) {
+	p, err := scanInstanceProfile(r.db.QueryRow(instanceProfileSelect+` WHERE p.account_id = ? AND p.name = ?`, account, name))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, models.ErrNotFound
+	}
+	return p, err
+}
+
+// ListInstanceProfiles reads every profile in one query, so none can be
+// deleted between the list and a read of it.
 func (r *Repository) ListInstanceProfiles(account string) ([]*IAMInstanceProfile, error) {
-	rows, err := r.db.Query(
-		`SELECT p.name FROM iam_instance_profiles p WHERE p.account_id = ? ORDER BY p.name`,
-		account,
-	)
+	rows, err := r.db.Query(instanceProfileSelect+` WHERE p.account_id = ? ORDER BY p.name`, account)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var names []string
+	out := []*IAMInstanceProfile{}
 	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		names = append(names, n)
-	}
-	rows.Close()
-	out := make([]*IAMInstanceProfile, 0, len(names))
-	for _, n := range names {
-		p, err := r.GetInstanceProfile(account, n)
+		p, err := scanInstanceProfile(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, p)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func (r *Repository) DeleteInstanceProfile(account, name string) error {

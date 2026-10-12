@@ -212,8 +212,9 @@ func (app *Application) kmsScheduleKeyDeletion(w http.ResponseWriter, account, r
 		// polls DescribeKey expecting KeyState="PendingDeletion" — if
 		// we hard-delete and return 404, the wait-loop errors with
 		// ResourceNotFoundException. Persist the state transition so
-		// DescribeKey can report it. /mock/reset purges everything for
-		// clean re-runs.
+		// DescribeKey can report it. kmsStore is process memory, so
+		// /mock/reset leaves the key here (AccountID's note records
+		// that gap).
 		k.State = "PendingDeletion"
 		k.Deleted = &deletionDate
 	}

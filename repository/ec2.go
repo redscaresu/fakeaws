@@ -554,10 +554,16 @@ func (r *Repository) ListInternetGateways(account, region string) ([]*EC2Interne
 		}
 		pairs = append(pairs, p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	rows.Close()
 	out := make([]*EC2InternetGateway, 0, len(pairs))
 	for _, p := range pairs {
 		igw, err := r.GetInternetGateway(account, p.reg, p.id)
+		if errors.Is(err, models.ErrNotFound) {
+			continue // deleted since the list
+		}
 		if err != nil {
 			return nil, err
 		}
