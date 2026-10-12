@@ -14,12 +14,15 @@
 //	                                                           optional role attachment
 //	iam_users              (account_id, name)               — top-level
 //	iam_access_keys        (account_id, user_name, id)      — child of iam_users,
-//	                                                           ON DELETE CASCADE
+//	                                                           ON DELETE CASCADE, but
+//	                                                           DeleteUser refuses while
+//	                                                           a key, an inline policy
+//	                                                           or an attachment remains
 //	role_policy_attachments(account_id, role_name, policy_arn)
 //	                       — many-to-many between roles and policies,
-//	                         ON DELETE CASCADE on role,
-//	                         FK-blocked on policy delete (per real IAM:
-//	                         you cannot delete an attached policy).
+//	                         ON DELETE CASCADE on role, but DeleteRole
+//	                         refuses while one remains (real IAM does),
+//	                         and DeletePolicy refuses an attached policy.
 //	instance_profile_roles (account_id, profile_name, role_name)
 //	                       — single role per profile (real IAM allows 1),
 //	                         ON DELETE CASCADE on profile.
@@ -293,20 +296,25 @@ func (r *Repository) UpdateRole(account string, role *IAMRole) error {
 	return nil
 }
 
-// DeleteRole removes the role. CASCADE on role_policy_attachments
-// drops attachments; instance_profile_roles and role_inline_policies
-// use RESTRICT (an instance profile referencing the role, or an inline
-// policy on it, blocks delete with ErrInUse).
+// DeleteRole removes the role, refusing with ErrInUse while anything
+// holds it, as IAM does: a managed-policy attachment (the delete's own
+// NOT EXISTS, since role_policy_attachments' CASCADE predates this
+// refusal and changing it would bump dbSchemaVersion), or an instance
+// profile or inline policy (their RESTRICT foreign keys).
 func (r *Repository) DeleteRole(account, name string) error {
-	res, err := r.db.Exec(`DELETE FROM iam_roles WHERE account_id = ? AND name = ?`, account, name)
+	res, err := r.db.Exec(`DELETE FROM iam_roles WHERE account_id = ? AND name = ?
+		AND NOT EXISTS (SELECT 1 FROM role_policy_attachments WHERE account_id = ? AND role_name = ?)`,
+		account, name, account, name)
 	if err != nil {
 		return mapDeleteError(err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return models.ErrNotFound
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
 	}
-	return nil
+	if _, err := r.GetRole(account, name); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: role %s has managed policies attached", models.ErrInUse, name)
 }
 
 // ----- Policies -----
@@ -386,34 +394,28 @@ func (r *Repository) ListPolicies(account string) ([]*IAMPolicy, error) {
 }
 
 // DeletePolicy returns ErrInUse if the policy is still attached to a
-// role (real IAM contract: you must DetachRolePolicy first). Returns
-// ErrNotFound if the policy doesn't exist.
+// role or a user (real IAM contract: you must detach it first).
+// Returns ErrNotFound if the policy doesn't exist. The attachment
+// check is the delete's own NOT EXISTS, and an attach inserts only
+// while the policy row exists, so neither order leaves an attachment
+// to a deleted policy.
 func (r *Repository) DeletePolicy(account, name string) error {
-	// Look up the ARN so we can check role_policy_attachments.
-	var arn string
-	err := r.db.QueryRow(`SELECT arn FROM iam_policies WHERE account_id = ? AND name = ?`, account, name).Scan(&arn)
-	if errors.Is(err, sql.ErrNoRows) {
-		return models.ErrNotFound
-	}
+	res, err := r.db.Exec(`DELETE FROM iam_policies WHERE account_id = ? AND name = ?
+		AND NOT EXISTS (SELECT 1 FROM role_policy_attachments a
+			WHERE a.account_id = iam_policies.account_id AND a.policy_arn = iam_policies.arn)
+		AND NOT EXISTS (SELECT 1 FROM user_policy_attachments a
+			WHERE a.account_id = iam_policies.account_id AND a.policy_arn = iam_policies.arn)`,
+		account, name)
 	if err != nil {
 		return err
 	}
-	var n int
-	if err := r.db.QueryRow(`SELECT COUNT(*) FROM role_policy_attachments WHERE account_id = ? AND policy_arn = ?`, account, arn).Scan(&n); err != nil {
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	if _, err := r.GetPolicy(account, name); err != nil {
 		return err
 	}
-	if n > 0 {
-		return models.ErrInUse
-	}
-	res, err := r.db.Exec(`DELETE FROM iam_policies WHERE account_id = ? AND name = ?`, account, name)
-	if err != nil {
-		return err
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return models.ErrNotFound
-	}
-	return nil
+	return fmt.Errorf("%w: policy %s is attached", models.ErrInUse, name)
 }
 
 // ----- Instance Profiles -----
@@ -600,16 +602,26 @@ func (r *Repository) ListUsers(account string) ([]*IAMUser, error) {
 	return out, rows.Err()
 }
 
+// DeleteUser removes the user, refusing with ErrInUse while a managed
+// policy, an inline policy or an access key remains, as IAM does. The
+// refusal is the delete's own NOT EXISTS: those tables' CASCADE
+// predates it, and changing them would bump dbSchemaVersion.
 func (r *Repository) DeleteUser(account, name string) error {
-	res, err := r.db.Exec(`DELETE FROM iam_users WHERE account_id = ? AND name = ?`, account, name)
+	res, err := r.db.Exec(`DELETE FROM iam_users WHERE account_id = ? AND name = ?
+		AND NOT EXISTS (SELECT 1 FROM user_policy_attachments WHERE account_id = ? AND user_name = ?)
+		AND NOT EXISTS (SELECT 1 FROM user_inline_policies WHERE account_id = ? AND user_name = ?)
+		AND NOT EXISTS (SELECT 1 FROM iam_access_keys WHERE account_id = ? AND user_name = ?)`,
+		account, name, account, name, account, name, account, name)
 	if err != nil {
 		return mapDeleteError(err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return models.ErrNotFound
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
 	}
-	return nil
+	if _, err := r.GetUser(account, name); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: user %s has policies or access keys", models.ErrInUse, name)
 }
 
 func (r *Repository) CreateAccessKey(account string, k *IAMAccessKey) error {
@@ -677,27 +689,29 @@ func (r *Repository) DeleteAccessKey(account, userName, id string) error {
 // ----- Role / Policy attachments -----
 
 // AttachRolePolicy inserts a row into role_policy_attachments. FK-
-// validates role existence; policy existence is asserted via ARN
-// lookup so callers can attach managed policies via ARN without
-// knowing the policy's name.
+// validates role existence; the insert itself requires the policy by
+// ARN (so callers can attach managed policies without knowing the
+// policy's name), in the same statement, so it never races DeletePolicy.
 func (r *Repository) AttachRolePolicy(account, role, policyARN string) error {
 	if _, err := r.GetRole(account, role); err != nil {
 		return err
 	}
-	// Confirm the policy exists in this account by ARN.
-	var n int
-	if err := r.db.QueryRow(`SELECT COUNT(*) FROM iam_policies WHERE account_id = ? AND arn = ?`, account, policyARN).Scan(&n); err != nil {
-		return err
-	}
-	if n == 0 {
-		return models.ErrNotFound
-	}
-	_, err := r.db.Exec(
-		`INSERT INTO role_policy_attachments (account_id, role_name, policy_arn) VALUES (?, ?, ?)`,
-		account, role, policyARN,
-	)
+	// Inserts only while the policy exists in this account (DeletePolicy).
+	return insertPolicyAttachment(r.db.Exec(
+		`INSERT INTO role_policy_attachments (account_id, role_name, policy_arn)
+		SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM iam_policies WHERE account_id = ? AND arn = ?)`,
+		account, role, policyARN, account, policyARN,
+	))
+}
+
+// insertPolicyAttachment maps an attach INSERT ... WHERE EXISTS: no row
+// inserted means the policy does not exist.
+func insertPolicyAttachment(res sql.Result, err error) error {
 	if err != nil {
 		return mapInsertError(err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return models.ErrNotFound
 	}
 	return nil
 }
@@ -749,28 +763,18 @@ func (r *Repository) ListAttachedRolePolicies(account, role string) ([]string, e
 // is reported as drifted-or-gone, terminating the apply.
 
 // AttachUserPolicy inserts a row into user_policy_attachments. FK-
-// validates user existence; policy existence is asserted via ARN
-// lookup so callers can attach managed policies via ARN. Mirrors
-// AttachRolePolicy.
+// validates user existence; the insert itself requires the policy by
+// ARN, as AttachRolePolicy's does.
 func (r *Repository) AttachUserPolicy(account, user, policyARN string) error {
 	if _, err := r.GetUser(account, user); err != nil {
 		return err
 	}
-	var n int
-	if err := r.db.QueryRow(`SELECT COUNT(*) FROM iam_policies WHERE account_id = ? AND arn = ?`, account, policyARN).Scan(&n); err != nil {
-		return err
-	}
-	if n == 0 {
-		return models.ErrNotFound
-	}
-	_, err := r.db.Exec(
-		`INSERT INTO user_policy_attachments (account_id, user_name, policy_arn) VALUES (?, ?, ?)`,
-		account, user, policyARN,
-	)
-	if err != nil {
-		return mapInsertError(err)
-	}
-	return nil
+	// Inserts only while the policy exists in this account (DeletePolicy).
+	return insertPolicyAttachment(r.db.Exec(
+		`INSERT INTO user_policy_attachments (account_id, user_name, policy_arn)
+		SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM iam_policies WHERE account_id = ? AND arn = ?)`,
+		account, user, policyARN, account, policyARN,
+	))
 }
 
 // DetachUserPolicy removes an attachment. Returns ErrNotFound when no

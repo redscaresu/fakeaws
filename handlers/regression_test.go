@@ -23,10 +23,14 @@ package handlers_test
 import (
 	"encoding/xml"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -321,14 +325,14 @@ func TestRegressionTerminalStateRefusesTransitions(t *testing.T) {
 // fakegcp pass-20.
 //
 // IAM is in scope today: DeletePolicy of an attached policy returns
-// ResourceInUseException (409); a hypothetical terminal-state error
-// would return InvalidRequestException (409). The two must NOT
-// collapse.
+// IAM's DeleteConflict (409), never the generic ResourceInUseException
+// or ConflictException, and a duplicate CreateRole returns
+// EntityAlreadyExists (409). The two must NOT collapse.
 func TestRegressionDistinct409Sentinels(t *testing.T) {
 	srv := newTestServerForRegression(t)
 	createRole(t, srv, "r")
 	createPolicy(t, srv, "p")
-	// Attach + try to delete: ErrInUse → 409 ResourceInUseException.
+	// Attach + try to delete: ErrInUse → 409 DeleteConflict.
 	policyArn := "arn:aws:iam::000000000000:policy/p"
 	_, body := iamPost(t, srv, "AttachRolePolicy", url.Values{
 		"RoleName": {"r"}, "PolicyArn": {policyArn},
@@ -336,7 +340,10 @@ func TestRegressionDistinct409Sentinels(t *testing.T) {
 	require.NotNil(t, body, "AttachRolePolicy returned nil body")
 	resp, body := iamPost(t, srv, "DeletePolicy", url.Values{"PolicyName": {"p"}})
 	require.Equal(t, http.StatusConflict, resp.StatusCode, "DeletePolicy attached")
-	assert.Contains(t, string(body), "ResourceInUseException", "body must carry ResourceInUseException (not generic ConflictException): %s", body)
+	assert.Contains(t, string(body), "<Code>DeleteConflict</Code>", "body must carry DeleteConflict (not ResourceInUseException): %s", body)
+	resp, body = iamPost(t, srv, "CreateRole", url.Values{"RoleName": {"r"}})
+	require.Equal(t, http.StatusConflict, resp.StatusCode, "duplicate CreateRole")
+	assert.Contains(t, string(body), "<Code>EntityAlreadyExists</Code>", "duplicate CreateRole: %s", body)
 }
 
 // 11. Hosted-zone delete refused if non-empty.
@@ -434,8 +441,8 @@ func TestRegressionTombstoneSemanticsOnParentDelete(t *testing.T) {
 // of fakegcp pass-22.
 //
 // IAM has the analog: AttachRolePolicy on a missing role must 404
-// (not 500). Asserted here for the IAM case; service tickets light
-// up additional sub-resources as they land.
+// NoSuchEntity (not 500). Asserted here for the IAM case; service
+// tickets light up additional sub-resources as they land.
 func TestRegressionResourceExistenceGateOnSubResource(t *testing.T) {
 	srv := newTestServerForRegression(t)
 	resp, body := iamPost(t, srv, "AttachRolePolicy", url.Values{
@@ -443,7 +450,7 @@ func TestRegressionResourceExistenceGateOnSubResource(t *testing.T) {
 		"PolicyArn": {"arn:aws:iam::000000000000:policy/p"},
 	})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "AttachRolePolicy with missing role; body=%s", body)
-	assert.Contains(t, string(body), "ResourceNotFoundException", "body must carry ResourceNotFoundException: %s", body)
+	assert.Contains(t, string(body), "<Code>NoSuchEntity</Code>", "body must carry NoSuchEntity: %s", body)
 }
 
 // 14. Server-stamped fields are never trusted from the client.
@@ -1847,4 +1854,157 @@ func TestRegressionInstancePublicIPNeverAnEIP(t *testing.T) {
 	}
 	require.NotEmpty(t, clashed, "no launch derived a held IP")
 	assert.Equal(t, []string{held[clashed]}, describeIDs(t, srv, "DescribeInstances", ec2FilterParams("ip-address", clashed)).Instances)
+}
+
+// TestRegressionIAMMissingRoleIsNoSuchEntity: IAM answered a missing
+// role with the generic ResourceNotFoundException; IAM's code is
+// NoSuchEntity, the one terraform-provider-aws reads as the role being
+// gone on refresh and destroy.
+func TestRegressionIAMMissingRoleIsNoSuchEntity(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	resp, body := iamPost(t, srv, "GetRole", url.Values{"RoleName": {"ghost"}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "GetRole on a missing role: %s", body)
+	assert.Contains(t, string(body), "<Code>NoSuchEntity</Code>", "GetRole on a missing role: %s", body)
+	assert.Contains(t, string(body), "<Message>The role with name ghost cannot be found.</Message>", "GetRole on a missing role")
+}
+
+// TestRegressionIAMDeleteRoleWithManagedPolicyIsDeleteConflict: a
+// DeleteRole cascaded the role's managed-policy attachments away; IAM
+// refuses it with DeleteConflict while any is attached, and the role
+// stays.
+func TestRegressionIAMDeleteRoleWithManagedPolicyIsDeleteConflict(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	createRole(t, srv, "r")
+	createPolicy(t, srv, "p")
+	resp, body := iamPost(t, srv, "AttachRolePolicy", url.Values{
+		"RoleName": {"r"}, "PolicyArn": {"arn:aws:iam::000000000000:policy/p"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "AttachRolePolicy: %s", body)
+
+	resp, body = iamPost(t, srv, "DeleteRole", url.Values{"RoleName": {"r"}})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DeleteRole with a managed policy attached: %s", body)
+	assert.Contains(t, string(body), "<Code>DeleteConflict</Code>", "DeleteRole with a managed policy attached: %s", body)
+	resp, body = iamPost(t, srv, "GetRole", url.Values{"RoleName": {"r"}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "the refused DeleteRole keeps the role: %s", body)
+}
+
+// TestRegressionIAMOneErrorWriter: IAM handlers each wrote their own
+// error code, so a missing role answered ResourceNotFoundException and
+// an attached policy ResourceInUseException. iamWriteError is now the
+// only function in handlers/iam.go that writes an error.
+func TestRegressionIAMOneErrorWriter(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filepath.Join(handlersDir(t), "iam.go"), nil, 0)
+	require.NoError(t, err)
+	writers := map[string]bool{}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if ok && fmt.Sprint(sel.X) == "awsproto" && strings.HasSuffix(sel.Sel.Name, "Error") {
+				writers[fn.Name.Name] = true
+			}
+			return true
+		})
+	}
+	assert.Equal(t, map[string]bool{"iamWriteError": true}, writers, "functions in iam.go calling an awsproto error writer")
+}
+
+// TestRegressionIAMDeletePolicyAttachedToUserIsDeleteConflict:
+// DeletePolicy only checked role attachments, so a policy attached to
+// a user was deleted and left the attachment dangling; IAM refuses it
+// with DeleteConflict.
+func TestRegressionIAMDeletePolicyAttachedToUserIsDeleteConflict(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	createPolicy(t, srv, "p")
+	resp, body := iamPost(t, srv, "CreateUser", url.Values{"UserName": {"u"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateUser: %s", body)
+	resp, body = iamPost(t, srv, "AttachUserPolicy", url.Values{
+		"UserName": {"u"}, "PolicyArn": {"arn:aws:iam::000000000000:policy/p"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "AttachUserPolicy: %s", body)
+
+	resp, body = iamPost(t, srv, "DeletePolicy", url.Values{"PolicyName": {"p"}})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DeletePolicy attached to a user: %s", body)
+	assert.Contains(t, string(body), "<Code>DeleteConflict</Code>", "DeletePolicy attached to a user: %s", body)
+	resp, body = iamPost(t, srv, "GetPolicy", url.Values{"PolicyName": {"p"}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "the refused DeletePolicy keeps the policy: %s", body)
+}
+
+// TestRegressionIAMDeleteUserHoldingKeyIsDeleteConflict: DeleteUser
+// cascaded the user's access keys, managed attachments and inline
+// policies away; IAM refuses it with DeleteConflict while any remains
+// (TestDeleteUserRefusedWhileHeld covers each), and keeps both.
+func TestRegressionIAMDeleteUserHoldingKeyIsDeleteConflict(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	resp, body := iamPost(t, srv, "CreateUser", url.Values{"UserName": {"alice"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateUser body=%s", body)
+
+	resp, body = iamPost(t, srv, "CreateAccessKey", url.Values{"UserName": {"alice"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateAccessKey body=%s", body)
+	keyID := xmlExtract(body, "AccessKeyId")
+	require.NotEmpty(t, keyID, "CreateAccessKey body: %s", body)
+
+	resp, body = iamPost(t, srv, "DeleteUser", url.Values{"UserName": {"alice"}})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DeleteUser holding a key: %s", body)
+	assert.Contains(t, string(body), "<Code>DeleteConflict</Code>", "DeleteUser holding a key: %s", body)
+	resp, body = iamPost(t, srv, "ListAccessKeys", url.Values{"UserName": {"alice"}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "ListAccessKeys")
+	assert.Contains(t, string(body), keyID, "the refused DeleteUser keeps the key: %s", body)
+
+	resp, body = iamPost(t, srv, "DeleteAccessKey", url.Values{"UserName": {"alice"}, "AccessKeyId": {keyID}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteAccessKey: %s", body)
+	resp, body = iamPost(t, srv, "DeleteUser", url.Values{"UserName": {"alice"}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteUser after DeleteAccessKey: %s", body)
+}
+
+// TestRegressionIAMDuplicateCreateMessageCarriesNoSQL: a duplicate
+// Create* answered EntityAlreadyExists with SQLite's text as the
+// message ("UNIQUE constraint failed: iam_roles.account_id, ...").
+// iamWriteError never puts an error's text on the wire; the message is
+// IAM's, naming the entity.
+func TestRegressionIAMDuplicateCreateMessageCarriesNoSQL(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	for _, c := range []struct{ action, param, kind string }{
+		{"CreateRole", "RoleName", "Role"},
+		{"CreatePolicy", "PolicyName", "Policy"},
+		{"CreateInstanceProfile", "InstanceProfileName", "Instance profile"},
+		{"CreateUser", "UserName", "User"},
+	} {
+		params := url.Values{c.param: {"dup"}}
+		resp, body := iamPost(t, srv, c.action, params)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", c.action, body)
+		resp, body = iamPost(t, srv, c.action, params)
+		assert.Equal(t, http.StatusConflict, resp.StatusCode, "duplicate %s: %s", c.action, body)
+		assert.Contains(t, string(body), "<Code>EntityAlreadyExists</Code>", "duplicate %s", c.action)
+		assert.Contains(t, string(body), "<Message>"+c.kind+" with name dup already exists.</Message>", "duplicate %s: %s", c.action, body)
+		for _, sql := range []string{"constraint", "UNIQUE", "iam_"} {
+			assert.NotContains(t, string(body), sql, "duplicate %s message carries SQL text", c.action)
+		}
+	}
+}
+
+// TestRegressionIAMSecondRoleForInstanceProfileIsLimitExceeded: a
+// second AddRoleToInstanceProfile answered EntityAlreadyExists; IAM
+// allows one role per profile and answers LimitExceeded.
+func TestRegressionIAMSecondRoleForInstanceProfileIsLimitExceeded(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	createRole(t, srv, "r1")
+	createRole(t, srv, "r2")
+	resp, body := iamPost(t, srv, "CreateInstanceProfile", url.Values{"InstanceProfileName": {"p"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateInstanceProfile: %s", body)
+	resp, body = iamPost(t, srv, "AddRoleToInstanceProfile", url.Values{"InstanceProfileName": {"p"}, "RoleName": {"r1"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "AddRoleToInstanceProfile r1: %s", body)
+
+	resp, body = iamPost(t, srv, "AddRoleToInstanceProfile", url.Values{"InstanceProfileName": {"p"}, "RoleName": {"r2"}})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "a second role: %s", body)
+	assert.Contains(t, string(body), "<Code>LimitExceeded</Code>", "a second role: %s", body)
+	assert.Contains(t, string(body), "<Message>Cannot exceed quota for InstanceSessionsPerInstanceProfile: 1</Message>")
+	resp, body = iamPost(t, srv, "GetInstanceProfile", url.Values{"InstanceProfileName": {"p"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GetInstanceProfile: %s", body)
+	assert.Contains(t, string(body), "<RoleName>r1</RoleName>", "the profile keeps its first role")
+	assert.NotContains(t, string(body), "<RoleName>r2</RoleName>", "the refused role is not added")
 }
