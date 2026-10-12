@@ -431,13 +431,16 @@ func sqsRandID() string {
 
 // ----- /mock/state gather -----
 
-func (app *Application) gatherSQSStateReal(account string) map[string]any {
+func (app *Application) gatherSQSStateReal(account string) (map[string]any, error) {
 	out := map[string]any{
 		"queues":              []any{},
 		"messages":            []any{},
 		"tombstoned_messages": 0,
 	}
-	queues, _ := app.repo.ListSQSQueues(account, "")
+	queues, err := app.repo.ListSQSQueues(account, "")
+	if err != nil {
+		return nil, err
+	}
 	qOut := make([]map[string]any, 0, len(queues))
 	for _, q := range queues {
 		qOut = append(qOut, map[string]any{
@@ -451,7 +454,10 @@ func (app *Application) gatherSQSStateReal(account string) map[string]any {
 	// /mock/state so update-phase verification can see send/receive
 	// mutations. Tombstoned messages are filtered out of this list
 	// (they get a separate counter below) but still backed in SQLite.
-	msgs, _ := app.repo.ListSQSMessages(account, "")
+	msgs, err := app.repo.ListSQSMessages(account, "")
+	if err != nil {
+		return nil, err
+	}
 	mOut := make([]map[string]any, 0, len(msgs))
 	totalTombstoned := 0
 	for _, m := range msgs {
@@ -470,5 +476,5 @@ func (app *Application) gatherSQSStateReal(account string) map[string]any {
 	}
 	out["messages"] = mOut
 	out["tombstoned_messages"] = totalTombstoned
-	return out
+	return out, nil
 }

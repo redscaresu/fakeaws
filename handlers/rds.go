@@ -1065,7 +1065,7 @@ func parseRDSFilter(req awsproto.QueryRPCRequest, want string) (string, []string
 // Codex pass 4 BLOCKING #2 fix: every modeled collection is populated
 // directly from a list path on the repo (was previously inferred
 // from instance metadata, missing standalone groups).
-func (app *Application) gatherRDSStateReal(account string) map[string]any {
+func (app *Application) gatherRDSStateReal(account string) (map[string]any, error) {
 	out := map[string]any{
 		"db_instances":                []any{},
 		"db_clusters":                 []any{},
@@ -1073,7 +1073,10 @@ func (app *Application) gatherRDSStateReal(account string) map[string]any {
 		"db_parameter_groups":         []any{},
 		"db_cluster_parameter_groups": []any{},
 	}
-	instances, _ := app.repo.ListDBInstances(account, "")
+	instances, err := app.repo.ListDBInstances(account, "")
+	if err != nil {
+		return nil, err
+	}
 	iOut := make([]map[string]any, 0, len(instances))
 	for _, inst := range instances {
 		iOut = append(iOut, map[string]any{
@@ -1086,7 +1089,10 @@ func (app *Application) gatherRDSStateReal(account string) map[string]any {
 	}
 	out["db_instances"] = iOut
 
-	sgs, _ := app.repo.ListDBSubnetGroups(account)
+	sgs, err := app.repo.ListDBSubnetGroups(account)
+	if err != nil {
+		return nil, err
+	}
 	sgOut := make([]map[string]any, 0, len(sgs))
 	for _, sg := range sgs {
 		sgOut = append(sgOut, map[string]any{
@@ -1096,7 +1102,10 @@ func (app *Application) gatherRDSStateReal(account string) map[string]any {
 	}
 	out["db_subnet_groups"] = sgOut
 
-	pgs, _ := app.repo.ListDBParameterGroups(account)
+	pgs, err := app.repo.ListDBParameterGroups(account)
+	if err != nil {
+		return nil, err
+	}
 	pgOut := make([]map[string]any, 0, len(pgs))
 	for _, pg := range pgs {
 		pgOut = append(pgOut, map[string]any{
@@ -1105,7 +1114,10 @@ func (app *Application) gatherRDSStateReal(account string) map[string]any {
 	}
 	out["db_parameter_groups"] = pgOut
 
-	cpgs, _ := app.repo.ListDBClusterParameterGroups(account)
+	cpgs, err := app.repo.ListDBClusterParameterGroups(account)
+	if err != nil {
+		return nil, err
+	}
 	cpgOut := make([]map[string]any, 0, len(cpgs))
 	for _, pg := range cpgs {
 		cpgOut = append(cpgOut, map[string]any{
@@ -1114,7 +1126,10 @@ func (app *Application) gatherRDSStateReal(account string) map[string]any {
 	}
 	out["db_cluster_parameter_groups"] = cpgOut
 
-	clusters, _ := app.repo.ListDBClusters(account, "")
+	clusters, err := app.repo.ListDBClusters(account, "")
+	if err != nil {
+		return nil, err
+	}
 	cOut := make([]map[string]any, 0, len(clusters))
 	for _, c := range clusters {
 		cOut = append(cOut, map[string]any{
@@ -1124,5 +1139,5 @@ func (app *Application) gatherRDSStateReal(account string) map[string]any {
 	}
 	out["db_clusters"] = cOut
 
-	return out
+	return out, nil
 }

@@ -5,13 +5,18 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -60,6 +65,127 @@ func TestAdminMockState_UnknownServiceReturnsEmptyBlock(t *testing.T) {
 	resp, body := doGet(t, srv, "/mock/state/notreal")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, string(body), `"notreal":{}`, "expected empty block for unknown service: %s", body)
+}
+
+// TestAdminMockState_UnreadableTableIs500: a table that cannot be read,
+// or a stored rule or config that cannot be decoded, answers 500 naming
+// its service and carries no state, never an empty block an orphan
+// check would pass.
+func TestAdminMockState_UnreadableTableIs500(t *testing.T) {
+	const region = "us-east-1"
+	for _, c := range []struct {
+		name, service, breakSQL string
+		setup                   func(t *testing.T, srv *httptest.Server)
+	}{
+		{name: "iam", service: "iam", breakSQL: `DROP TABLE iam_roles`},
+		{name: "s3", service: "s3", breakSQL: `DROP TABLE s3_buckets`},
+		{name: "s3 config", service: "s3", breakSQL: `UPDATE s3_bucket_configs SET data = 'not json'`,
+			setup: func(t *testing.T, srv *httptest.Server) {
+				mustOK(t)(s3Do(t, srv, http.MethodPut, "/s3/fail-closed/", "", ""))
+				mustOK(t)(s3Do(t, srv, http.MethodPut, "/s3/fail-closed/?versioning",
+					`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`, "application/xml"))
+			}},
+		{name: "ec2", service: "ec2", breakSQL: `DROP TABLE ec2_vpcs`},
+		{name: "ec2 security group rules", service: "ec2", breakSQL: `UPDATE ec2_security_groups SET ingress = 'not json'`,
+			setup: func(t *testing.T, srv *httptest.Server) {
+				vpcID := extractEC2Tag(mustOK(t)(ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})), "vpcId")
+				mustOK(t)(ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
+					"GroupName": {"fail-closed"}, "GroupDescription": {"d"}, "VpcId": {vpcID},
+				}))
+			}},
+		{name: "rds", service: "rds", breakSQL: `DROP TABLE rds_db_instances`},
+		{name: "dynamodb", service: "dynamodb", breakSQL: `DROP TABLE dynamodb_tables`},
+		{name: "eks", service: "eks", breakSQL: `DROP TABLE eks_clusters`},
+		{name: "sqs", service: "sqs", breakSQL: `DROP TABLE sqs_queues`},
+		{name: "route53", service: "route53", breakSQL: `DROP TABLE route53_hosted_zones`},
+		{name: "secretsmanager", service: "secretsmanager", breakSQL: `DROP TABLE secretsmanager_secrets`},
+		{name: "ssm", service: "ssm", breakSQL: `DROP TABLE ssm_parameters`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			app, srv := newTestApp(t, ":memory:")
+			if c.setup != nil {
+				c.setup(t, srv)
+			}
+			_, err := app.Repository().DB().Exec(c.breakSQL)
+			require.NoError(t, err)
+
+			for _, path := range []string{"/mock/state", "/mock/state/" + c.service} {
+				resp, body := doGet(t, srv, path)
+				assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "GET %s: %s", path, body)
+				var got map[string]any
+				require.NoError(t, json.Unmarshal(body, &got), "GET %s: %s", path, body)
+				assert.Equal(t, []string{"message", "status"}, slices.Sorted(maps.Keys(got)), "GET %s: %s", path, body)
+				assert.Contains(t, got["message"], "read "+c.service+" state", "GET %s", path)
+			}
+		})
+	}
+}
+
+// TestAdminMockState_PerServiceReadsOnlyItsTables: /mock/state/<service>
+// reads only that service's tables, so another service's unreadable
+// table leaves it 200.
+func TestAdminMockState_PerServiceReadsOnlyItsTables(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	_, err := app.Repository().DB().Exec(`DROP TABLE ssm_parameters`)
+	require.NoError(t, err)
+
+	resp, body := doGet(t, srv, "/mock/state/iam")
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+}
+
+// TestStateGathersKeepReadErrors: no gather collectState calls assigns
+// anything to `_`, so none can drop a repository read error and show an
+// unreadable table as an empty block.
+func TestStateGathersKeepReadErrors(t *testing.T) {
+	fset := token.NewFileSet()
+	admin, err := parser.ParseFile(fset, "admin.go", nil, 0)
+	require.NoError(t, err)
+	declared := map[string]bool{}
+	for _, decl := range admin.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "collectState" {
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "app" && strings.HasPrefix(sel.Sel.Name, "gather") {
+					declared[sel.Sel.Name] = false
+				}
+				return true
+			})
+		}
+	}
+	require.NotEmpty(t, declared, "collectState calls no app.gather*")
+
+	for _, path := range globGo(t, ".", "*.go", true) {
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		require.NoError(t, err)
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			if _, ok := declared[fn.Name.Name]; !ok {
+				continue
+			}
+			declared[fn.Name.Name] = true
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				for _, lhs := range as.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && id.Name == "_" {
+						assert.Fail(t, "gather discards a value with _", "%s at %s", fn.Name.Name, fset.Position(as.Pos()))
+					}
+				}
+				return true
+			})
+		}
+	}
+	for name, found := range declared {
+		assert.True(t, found, "collectState calls %s, which no handlers file declares", name)
+	}
 }
 
 func TestAdminMockReset_OK(t *testing.T) {

@@ -461,7 +461,7 @@ func (app *Application) smListSecretVersionIds(w http.ResponseWriter, account, r
 // PendingDeletion still works, the existing
 // TestSecretsManager_PendingDeletionRoundTrip + tests pinning the
 // 404 contract for Destroyed secrets still pass.
-func (app *Application) gatherSecretsManagerStateReal(account string) map[string]any {
+func (app *Application) gatherSecretsManagerStateReal(account string) (map[string]any, error) {
 	out := map[string]any{
 		"secrets":  []any{},
 		"versions": []any{},
@@ -471,7 +471,10 @@ func (app *Application) gatherSecretsManagerStateReal(account string) map[string
 	// Account-wide list (Codex pass 8 BLOCKING #2 fix: previous code
 	// walked a hard-coded region slice and dropped any secret created
 	// outside it).
-	secrets, _ := app.repo.ListSecrets(account, "")
+	secrets, err := app.repo.ListSecrets(account, "")
+	if err != nil {
+		return nil, err
+	}
 	for _, s := range secrets {
 		// S89: skip non-Active states. PendingDeletion + Destroyed
 		// secrets are post-delete from the orphan-check perspective.
@@ -487,7 +490,10 @@ func (app *Application) gatherSecretsManagerStateReal(account string) map[string
 		// #3 fix). Older versions remain in the DB after stage
 		// rotation but were previously invisible because the
 		// gather only fetched AWSCURRENT + AWSPREVIOUS.
-		versions, _ := app.repo.ListSecretVersions(account, s.Region, s.Name)
+		versions, err := app.repo.ListSecretVersions(account, s.Region, s.Name)
+		if err != nil {
+			return nil, err
+		}
 		for _, v := range versions {
 			allVersions = append(allVersions, map[string]any{
 				"secret_name": s.Name, "version_id": v.VersionID,
@@ -497,5 +503,5 @@ func (app *Application) gatherSecretsManagerStateReal(account string) map[string
 	}
 	out["secrets"] = allSecrets
 	out["versions"] = allVersions
-	return out
+	return out, nil
 }

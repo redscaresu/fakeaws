@@ -3266,7 +3266,7 @@ func synthesizeInstanceType(name string) ec2InstanceTypeXML {
 // Codex pass 3 BLOCKING #2 fix: every modeled collection emits
 // its actual contents (was previously declaring keys but only
 // filling vpcs/subnets/instances).
-func (app *Application) gatherEC2StateReal(account string) map[string]any {
+func (app *Application) gatherEC2StateReal(account string) (map[string]any, error) {
 	out := map[string]any{
 		"vpcs":                     []any{},
 		"subnets":                  []any{},
@@ -3281,7 +3281,10 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 		"network_interfaces":       []any{},
 	}
 
-	vpcs, _ := app.repo.ListVPCs(account, "")
+	vpcs, err := app.repo.ListVPCs(account, "")
+	if err != nil {
+		return nil, err
+	}
 	vOut := make([]map[string]any, 0, len(vpcs))
 	for _, v := range vpcs {
 		vOut = append(vOut, map[string]any{
@@ -3290,7 +3293,10 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 	}
 	out["vpcs"] = vOut
 
-	subnets, _ := app.repo.ListSubnets(account, "", "")
+	subnets, err := app.repo.ListSubnets(account, "", "")
+	if err != nil {
+		return nil, err
+	}
 	sOut := make([]map[string]any, 0, len(subnets))
 	for _, s := range subnets {
 		sOut = append(sOut, map[string]any{
@@ -3303,8 +3309,14 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 
 	// Instance network fields come from the primary ENI; a terminated
 	// instance has none, so its IPs are "" and its groups [].
-	instances, _ := app.repo.ListInstances(account, "")
-	enis, _ := app.instanceENIs(account)
+	instances, err := app.repo.ListInstances(account, "")
+	if err != nil {
+		return nil, err
+	}
+	enis, err := app.instanceENIs(account)
+	if err != nil {
+		return nil, err
+	}
 	iOut := make([]map[string]any, 0, len(instances))
 	for _, inst := range instances {
 		eni := enis[inst.ID]
@@ -3328,7 +3340,10 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 	}
 	out["instances"] = iOut
 
-	allENIs, _ := app.repo.ListNetworkInterfaces(account, "")
+	allENIs, err := app.repo.ListNetworkInterfaces(account, "")
+	if err != nil {
+		return nil, err
+	}
 	eniOut := make([]map[string]any, 0, len(allENIs))
 	for _, eni := range allENIs {
 		eniOut = append(eniOut, map[string]any{
@@ -3346,12 +3361,24 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 	// #1 fix: previous version inferred from instance.VPCSecurityGroupIDs
 	// which missed standalone SGs and duplicated shared ones. Rules are
 	// exported in both directions for state policies (open ingress).
-	sgs, _ := app.repo.ListSecurityGroups(account, "")
+	sgs, err := app.repo.ListSecurityGroups(account, "")
+	if err != nil {
+		return nil, err
+	}
 	sgOut := make([]map[string]any, 0, len(sgs))
 	for _, sg := range sgs {
-		ing, eg, _ := app.repo.GetSecurityGroupRules(account, sg.Region, sg.ID)
-		ingress, _ := decodeSGRules(ing)
-		egress, _ := decodeSGRules(eg)
+		ing, eg, err := app.repo.GetSecurityGroupRules(account, sg.Region, sg.ID)
+		if err != nil {
+			return nil, err
+		}
+		ingress, err := decodeSGRules(ing)
+		if err != nil {
+			return nil, fmt.Errorf("security group %s ingress: %w", sg.ID, err)
+		}
+		egress, err := decodeSGRules(eg)
+		if err != nil {
+			return nil, fmt.Errorf("security group %s egress: %w", sg.ID, err)
+		}
 		sgOut = append(sgOut, map[string]any{
 			"id": sg.ID, "vpc_id": sg.VPCID, "group_name": sg.GroupName,
 			"description": sg.Description, "region": sg.Region, "arn": sg.ARN,
@@ -3365,7 +3392,10 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 	// previously walked a hard-coded region slice, so KPs created in
 	// any other region disappeared from /mock/state).
 	kpOut := []map[string]any{}
-	kps, _ := app.repo.ListKeyPairs(account, "")
+	kps, err := app.repo.ListKeyPairs(account, "")
+	if err != nil {
+		return nil, err
+	}
 	for _, kp := range kps {
 		kpOut = append(kpOut, map[string]any{
 			"name": kp.Name, "fingerprint": kp.Fingerprint, "region": kp.Region,
@@ -3375,7 +3405,10 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 
 	// Internet gateways — account-wide list. Used by topology
 	// derivation to detect public subnets.
-	igws, _ := app.repo.ListInternetGateways(account, "")
+	igws, err := app.repo.ListInternetGateways(account, "")
+	if err != nil {
+		return nil, err
+	}
 	igwOut := make([]map[string]any, 0, len(igws))
 	for _, igw := range igws {
 		igwOut = append(igwOut, map[string]any{
@@ -3389,7 +3422,10 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 	// BLOCKING #2 fix: previously absent from /mock/state, so
 	// topology_derive_aws couldn't see public-subnet wiring or
 	// allocated EIPs.
-	rts, _ := app.repo.ListRouteTables(account, "")
+	rts, err := app.repo.ListRouteTables(account, "")
+	if err != nil {
+		return nil, err
+	}
 	rtOut := make([]map[string]any, 0, len(rts))
 	for _, rt := range rts {
 		rtOut = append(rtOut, map[string]any{
@@ -3399,7 +3435,10 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 	}
 	out["route_tables"] = rtOut
 
-	routes, _ := app.repo.ListRoutes(account)
+	routes, err := app.repo.ListRoutes(account)
+	if err != nil {
+		return nil, err
+	}
 	routeOut := make([]map[string]any, 0, len(routes))
 	for _, rr := range routes {
 		routeOut = append(routeOut, map[string]any{
@@ -3413,7 +3452,10 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 	}
 	out["routes"] = routeOut
 
-	assocs, _ := app.repo.ListRouteTableAssociations(account)
+	assocs, err := app.repo.ListRouteTableAssociations(account)
+	if err != nil {
+		return nil, err
+	}
 	assocOut := make([]map[string]any, 0, len(assocs))
 	for _, a := range assocs {
 		assocOut = append(assocOut, map[string]any{
@@ -3424,7 +3466,10 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 	}
 	out["route_table_associations"] = assocOut
 
-	eips, _ := app.repo.ListEIPs(account, "")
+	eips, err := app.repo.ListEIPs(account, "")
+	if err != nil {
+		return nil, err
+	}
 	eipOut := make([]map[string]any, 0, len(eips))
 	for _, eip := range eips {
 		eipOut = append(eipOut, map[string]any{
@@ -3440,7 +3485,7 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 	}
 	out["eips"] = eipOut
 
-	return out
+	return out, nil
 }
 
 // ensureAMIFixturesForRegion lazy-seeds the canonical AMI set into a

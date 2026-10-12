@@ -465,7 +465,10 @@ func (app *Application) writeState(w http.ResponseWriter, service string) {
 // handlers yet).
 //
 // Each service's gather<Service>StateReal, in its own file, returns
-// its block.
+// its block, or the first repository read error, never a partial
+// block: an unreadable table must not look empty to an orphan check.
+// collectState stops at the first error, naming the service, so
+// /mock/state answers 500 and no state at all.
 //
 // The account is read once, before any gather, and passed to every
 // gather, so an unreadable identity is an error rather than a state no
@@ -483,19 +486,32 @@ func (app *Application) collectState(service string) (map[string]any, error) {
 		"audit":      app.requests.audit(),
 	}
 
-	// Per-service gather hooks. Each one returns either a populated
-	// map for its service or an empty map. Adding a service is one
-	// line here.
-	state["iam"] = app.gatherIAMStateReal(account)
-	state["s3"] = app.gatherS3StateReal(account)
-	state["ec2"] = app.gatherEC2StateReal(account)
-	state["rds"] = app.gatherRDSStateReal(account)
-	state["dynamodb"] = app.gatherDynamoDBStateReal(account)
-	state["eks"] = app.gatherEKSStateReal(account)
-	state["sqs"] = app.gatherSQSStateReal(account)
-	state["route53"] = app.gatherRoute53StateReal(account)
-	state["secretsmanager"] = app.gatherSecretsManagerStateReal(account)
-	state["ssm"] = app.gatherSSMStateReal(account)
+	// Per-service gather hooks. Adding a service is one line here.
+	// A per-service request reads only its own service's tables.
+	for _, g := range []struct {
+		service string
+		gather  func(account string) (map[string]any, error)
+	}{
+		{"iam", app.gatherIAMStateReal},
+		{"s3", app.gatherS3StateReal},
+		{"ec2", app.gatherEC2StateReal},
+		{"rds", app.gatherRDSStateReal},
+		{"dynamodb", app.gatherDynamoDBStateReal},
+		{"eks", app.gatherEKSStateReal},
+		{"sqs", app.gatherSQSStateReal},
+		{"route53", app.gatherRoute53StateReal},
+		{"secretsmanager", app.gatherSecretsManagerStateReal},
+		{"ssm", app.gatherSSMStateReal},
+	} {
+		if service != "" && service != g.service {
+			continue
+		}
+		block, err := g.gather(account)
+		if err != nil {
+			return nil, fmt.Errorf("read %s state: %w", g.service, err)
+		}
+		state[g.service] = block
+	}
 
 	if service == "" {
 		return state, nil

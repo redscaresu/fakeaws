@@ -551,12 +551,15 @@ func (app *Application) ddbScanOrQuery(w http.ResponseWriter, account, region st
 // Codex pass 7 BLOCKING #2: items collection added — the table block
 // alone left mutations on persisted items invisible to /mock/state,
 // breaking the "every modeled collection populated" contract.
-func (app *Application) gatherDynamoDBStateReal(account string) map[string]any {
+func (app *Application) gatherDynamoDBStateReal(account string) (map[string]any, error) {
 	out := map[string]any{
 		"tables": []any{},
 		"items":  []any{},
 	}
-	tabs, _ := app.repo.ListDynamoDBTables(account, "")
+	tabs, err := app.repo.ListDynamoDBTables(account, "")
+	if err != nil {
+		return nil, err
+	}
 	tOut := make([]map[string]any, 0, len(tabs))
 	iOut := make([]map[string]any, 0)
 	for _, t := range tabs {
@@ -565,7 +568,10 @@ func (app *Application) gatherDynamoDBStateReal(account string) map[string]any {
 			"billing_mode": t.BillingMode, "status": t.Status,
 			"region": t.Region, "arn": t.ARN,
 		})
-		items, _ := app.repo.ScanDynamoDBTable(account, t.Region, t.Name)
+		items, err := app.repo.ScanDynamoDBTable(account, t.Region, t.Name)
+		if err != nil {
+			return nil, err
+		}
 		for _, it := range items {
 			iOut = append(iOut, map[string]any{
 				"table_name":  t.Name,
@@ -578,5 +584,5 @@ func (app *Application) gatherDynamoDBStateReal(account string) map[string]any {
 	}
 	out["tables"] = tOut
 	out["items"] = iOut
-	return out
+	return out, nil
 }

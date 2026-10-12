@@ -341,8 +341,11 @@ func (app *Application) ssmChangeTags(w http.ResponseWriter, account, region, op
 // parameter by name, type, version and region, never its value. The
 // public al2023 parameter is not the account's, so a loaded row of it
 // is skipped as DescribeParameters skips it.
-func (app *Application) gatherSSMStateReal(account string) map[string]any {
-	params, _ := app.repo.ListSSMParameters(account, "")
+func (app *Application) gatherSSMStateReal(account string) (map[string]any, error) {
+	params, err := app.repo.ListSSMParameters(account, "")
+	if err != nil {
+		return nil, err
+	}
 	out := []map[string]any{}
 	for _, p := range params {
 		if p.Name == al2023ParameterName {
@@ -352,5 +355,5 @@ func (app *Application) gatherSSMStateReal(account string) map[string]any {
 			"name": p.Name, "type": p.Type, "version": p.Version, "region": p.Region,
 		})
 	}
-	return map[string]any{"parameters": out}
+	return map[string]any{"parameters": out}, nil
 }
