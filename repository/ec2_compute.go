@@ -379,67 +379,87 @@ func (r *Repository) UpdateInstanceAttributes(account, region, id string, change
 	})
 }
 
-// TerminationProtectedError is SetInstanceState's refusal to terminate
-// an instance whose DisableAPITermination is set.
-type TerminationProtectedError struct{ InstanceID string }
+// ErrTerminationProtected is why SetInstanceState refuses to
+// terminate an instance whose DisableAPITermination is set.
+var ErrTerminationProtected = fmt.Errorf("disableApiTermination is set: %w", models.ErrConflict)
 
-func (e *TerminationProtectedError) Error() string {
-	return "instance " + e.InstanceID + " has disableApiTermination set"
+// InstanceError is SetInstanceState's refusal of one instance. Err is
+// models.ErrNotFound, models.ErrConflict (a move out of terminated),
+// ErrTerminationProtected or the database's error.
+type InstanceError struct {
+	InstanceID string
+	Err        error
 }
 
-func (e *TerminationProtectedError) Unwrap() error { return models.ErrConflict }
+func (e *InstanceError) Error() string { return "instance " + e.InstanceID + ": " + e.Err.Error() }
+
+func (e *InstanceError) Unwrap() error { return e.Err }
 
 // SetInstanceState moves each of ids to state in one transaction, so
-// all move or none does. The state machine is collapsed to pending →
-// running → shutting-down → terminated. It refuses, moving none, an
-// instance already terminated (models.ErrConflict: concepts.md
-// "Standing patterns" item 9 — terminal-state refusal is enforced
-// here) and the termination of one whose DisableAPITermination is set
-// (*TerminationProtectedError). Each read is in the transaction, so an
-// attribute committed meanwhile is not overwritten. Terminating
+// all move or none does, and returns the state each was in, in the
+// order of ids. Each decision is made on the row read in the
+// transaction (SetMaxOpenConns(1): only tx may touch the db until
+// Commit), so nothing committed meanwhile is overwritten or missed.
+// The state machine is collapsed to pending → running → shutting-down
+// → terminated. Terminating an instance already terminated leaves it
+// so, as in AWS, a repeated id included; any other move out of
+// terminated is refused (concepts.md "Standing patterns" item 9 —
+// terminal-state refusal is enforced here). An id with no row, and the
+// termination of an instance whose DisableAPITermination is set, are
+// refused too, each as an *InstanceError, moving none. Terminating
 // deletes the instance's ENIs and clears its EIP associations.
-func (r *Repository) SetInstanceState(account, region, state string, ids ...string) error {
-	return r.inTx(func(tx *sql.Tx) error {
-		for _, id := range ids {
-			if err := setInstanceStateTx(tx, account, region, id, state); err != nil {
-				return err
+func (r *Repository) SetInstanceState(account, region, state string, ids ...string) ([]string, error) {
+	previous := make([]string, len(ids))
+	err := r.inTx(func(tx *sql.Tx) error {
+		for i, id := range ids {
+			was, err := setInstanceStateTx(tx, account, region, id, state)
+			if err != nil {
+				return &InstanceError{InstanceID: id, Err: err}
 			}
+			previous[i] = was
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return previous, nil
 }
 
-func setInstanceStateTx(tx *sql.Tx, account, region, id, state string) error {
+func setInstanceStateTx(tx *sql.Tx, account, region, id, state string) (string, error) {
 	inst, err := getInstanceTx(tx, account, region, id)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if inst.State == "terminated" {
-		return models.ErrConflict
-	}
-	if state == "terminated" && inst.DisableAPITermination {
-		return &TerminationProtectedError{InstanceID: id}
+	was := inst.State
+	switch {
+	case was == "terminated" && state == "terminated":
+		return was, nil
+	case was == "terminated":
+		return "", models.ErrConflict
+	case state == "terminated" && inst.DisableAPITermination:
+		return "", ErrTerminationProtected
 	}
 	inst.State = state
 	body, err := json.Marshal(inst)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, err := tx.Exec(`UPDATE ec2_instances SET state = ?, data = ? WHERE account_id = ? AND id = ?`, state, string(body), account, id); err != nil {
-		return err
+		return "", err
 	}
 	if state != "terminated" {
-		return nil
+		return was, nil
 	}
 	if _, err := tx.Exec(`DELETE FROM ec2_network_interfaces WHERE account_id = ? AND instance_id = ?`, account, id); err != nil {
-		return err
+		return "", err
 	}
 	// EC2 disassociates an instance's Elastic IPs when it terminates.
 	_, err = tx.Exec(
 		`UPDATE ec2_eips SET network_interface_id = NULL, instance_id = NULL, association_id = NULL,
 		   data = json_remove(data, '$.network_interface_id', '$.instance_id', '$.association_id', '$.private_ip')
 		 WHERE account_id = ? AND instance_id = ?`, account, id)
-	return err
+	return was, err
 }
 
 func (r *Repository) DeleteInstance(account, region, id string) error {

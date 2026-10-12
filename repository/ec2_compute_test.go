@@ -101,14 +101,38 @@ func TestInstanceTerminalStateRefusesTransition(t *testing.T) {
 	}
 	r.CreateInstance(testAccount, inst, &EC2NetworkInterface{ID: "eni-1"})
 
-	if err := r.SetInstanceState(testAccount, testRegion, "terminated", "i-1"); err != nil {
+	if _, err := r.SetInstanceState(testAccount, testRegion, "terminated", "i-1"); err != nil {
 		t.Fatalf("transition to terminated: %v", err)
 	}
-	// From terminated → anything is refused (concepts.md "Standing
-	// patterns" item 9 — terminal-state refusal).
-	if err := r.SetInstanceState(testAccount, testRegion, "running", "i-1"); !errors.Is(err, models.ErrConflict) {
+	// From terminated → anything but terminated is refused (concepts.md
+	// "Standing patterns" item 9 — terminal-state refusal).
+	if _, err := r.SetInstanceState(testAccount, testRegion, "running", "i-1"); !errors.Is(err, models.ErrConflict) {
 		t.Errorf("transition out of terminated: want ErrConflict, got %v", err)
 	}
+}
+
+// TestSetInstanceStateTerminateTwice: a second terminate of the same
+// instance, in a later call or later in the same one, finds it
+// terminated in the transaction and leaves it so; an id with no row
+// is refused, terminating none of the others.
+func TestSetInstanceStateTerminateTwice(t *testing.T) {
+	r := setupRepo(t)
+	createInstances(t, r, 3)
+	previous, err := r.SetInstanceState(testAccount, testRegion, "terminated", "i-0")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"running"}, previous, "first terminate")
+	previous, err = r.SetInstanceState(testAccount, testRegion, "terminated", "i-0", "i-1", "i-1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"terminated", "running", "terminated"}, previous, "back-to-back, and a repeated id")
+
+	_, err = r.SetInstanceState(testAccount, testRegion, "terminated", "i-2", "i-missing")
+	var refused *InstanceError
+	require.ErrorAs(t, err, &refused)
+	assert.Equal(t, "i-missing", refused.InstanceID)
+	assert.ErrorIs(t, err, models.ErrNotFound)
+	got, err := r.GetInstance(testAccount, testRegion, "i-2")
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.State, "named with an unknown id, i-2 is not terminated")
 }
 
 // createInstances creates running instances i-0 … i-<n-1> in one subnet.
@@ -145,7 +169,10 @@ func TestUpdateInstanceAttributesKeepsAConcurrentState(t *testing.T) {
 
 	stopped := make(chan error, 1)
 	require.NoError(t, r.UpdateInstanceAttributes(testAccount, testRegion, "i-0", EC2InstanceAttributeChange{Set: func(a *EC2InstanceAttributes) {
-		go func() { stopped <- r.SetInstanceState(testAccount, testRegion, "stopped", "i-0") }()
+		go func() {
+			_, err := r.SetInstanceState(testAccount, testRegion, "stopped", "i-0")
+			stopped <- err
+		}()
 		select { // without the update's transaction the state change finishes here
 		case err := <-stopped:
 			stopped <- err
@@ -176,7 +203,10 @@ func TestSetInstanceStateKeepsAConcurrentAttributeUpdate(t *testing.T) {
 		require.NoError(t, err)
 		waits := r.db.Stats().WaitCount
 		stateErr, attrErr := make(chan error, 1), make(chan error, 1)
-		go func() { stateErr <- r.SetInstanceState(testAccount, testRegion, "stopped", id) }()
+		go func() {
+			_, err := r.SetInstanceState(testAccount, testRegion, "stopped", id)
+			stateErr <- err
+		}()
 		go func() {
 			attrErr <- r.UpdateInstanceAttributes(testAccount, testRegion, id, EC2InstanceAttributeChange{
 				Set: func(a *EC2InstanceAttributes) { a.DisableAPITermination = true },
@@ -210,7 +240,8 @@ func TestUpdateInstanceAttributesIsAtomic(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, got.DisableAPIStop, "the attribute write rolled back with the ENI write")
 
-	require.NoError(t, r.SetInstanceState(testAccount, testRegion, "terminated", "i-1"))
+	_, err = r.SetInstanceState(testAccount, testRegion, "terminated", "i-1")
+	require.NoError(t, err)
 	assert.ErrorIs(t, r.UpdateInstanceAttributes(testAccount, testRegion, "i-1", change), models.ErrTerminalState, "terminated")
 	got, err = r.GetInstance(testAccount, testRegion, "i-1")
 	require.NoError(t, err)
@@ -227,10 +258,11 @@ func TestSetInstanceStateTerminationProtected(t *testing.T) {
 		Set: func(a *EC2InstanceAttributes) { a.DisableAPITermination = true },
 	}))
 
-	err := r.SetInstanceState(testAccount, testRegion, "terminated", "i-0", "i-1")
-	var protected *TerminationProtectedError
-	require.ErrorAs(t, err, &protected)
-	assert.Equal(t, "i-1", protected.InstanceID)
+	_, err := r.SetInstanceState(testAccount, testRegion, "terminated", "i-0", "i-1")
+	var refused *InstanceError
+	require.ErrorAs(t, err, &refused)
+	assert.Equal(t, "i-1", refused.InstanceID)
+	assert.ErrorIs(t, err, ErrTerminationProtected)
 	for _, id := range []string{"i-0", "i-1"} {
 		got, err := r.GetInstance(testAccount, testRegion, id)
 		require.NoError(t, err)

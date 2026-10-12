@@ -5,7 +5,8 @@
 # The provider reads each back from DescribeInstanceAttribute (and
 # source_dest_check from DescribeInstances), so a value fakeaws does
 # not store plans a diff. v2 allows termination so destroy succeeds,
-# as it must on AWS.
+# as it must on AWS. disable_api_stop is stored and read back only:
+# fakeaws has no StopInstances, so nothing enforces it.
 
 terraform {
   required_providers {
@@ -35,7 +36,7 @@ variable "disable_api_termination" {
 
 variable "disable_api_stop" {
   type        = bool
-  description = "Stop protection. v1=false, v2=true."
+  description = "Stop protection, stored but not enforced (fakeaws has no StopInstances). v1=false, v2=true."
 }
 
 variable "instance_initiated_shutdown_behavior" {

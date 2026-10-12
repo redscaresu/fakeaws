@@ -49,11 +49,16 @@ func TestCoverage_EC2InstanceModifyAttribute(t *testing.T) {
 	})
 	instID := extractEC2Tag(body, "instanceId")
 
-	resp, _ := ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {instID}})
+	resp, _ := ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {instID}, "DisableApiStop.Value": {"true"}})
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "ModifyInstanceAttribute")
 
+	// No attribute → 400 MissingParameter.
+	resp, body = ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {instID}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "ModifyInstanceAttribute no attribute")
+	assert.Equal(t, "MissingParameter", extractEC2Tag(body, "Code"), "ModifyInstanceAttribute no attribute")
+
 	// Missing instance → EC2's 400 InvalidInstanceID.NotFound.
-	resp, body = ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {"i-missing"}})
+	resp, body = ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {"i-missing"}, "DisableApiStop.Value": {"true"}})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "ModifyInstanceAttribute missing")
 	assert.Equal(t, "InvalidInstanceID.NotFound", extractEC2Tag(body, "Code"), "ModifyInstanceAttribute missing")
 }

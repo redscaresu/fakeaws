@@ -2344,7 +2344,7 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		ec2Refuse(w, req.Action, "no SubnetId, ImageId or InstanceType") // AWS defaults the subnet (default VPC) and InstanceType
 		return
 	}
-	if refuseShutdownBehavior(w, req.Params, "InstanceInitiatedShutdownBehavior") {
+	if refuseInvalidValues(w, req.Params, ec2AttributeValues("")) {
 		return
 	}
 	// The provider adds a volume spec whenever default_tags is set;
@@ -2585,8 +2585,9 @@ func (app *Application) ec2ModifyNetworkInterfaceAttribute(w http.ResponseWriter
 // after create for source_dest_check = false), and the
 // ec2InstanceAttributes on the instance, in one transaction. Any other
 // param (UserData.Value, InstanceType.Value, GroupId.N, the legacy
-// Attribute and Value, ...) is refused, and so is a terminated
-// instance, before anything is written.
+// Attribute and Value, ...) is refused, and so are a value AWS does
+// not accept, a request with no attribute and a terminated instance,
+// before anything is written.
 func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	id := req.Params.Get("InstanceId")
 	if id == "" {
@@ -2594,11 +2595,16 @@ func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, accoun
 			fmt.Errorf("InstanceId required: %w", models.ErrConflict))
 		return
 	}
-	reads := []string{"InstanceId", "SourceDestCheck.Value"}
-	for name := range ec2InstanceAttributes {
-		reads = append(reads, name+".Value")
+	values := ec2AttributeValues(".Value")
+	values["SourceDestCheck.Value"] = ec2Bool
+	attrs := slices.Collect(maps.Keys(values))
+	if ec2RefuseUnread(w, req, append(attrs, "InstanceId")...) || refuseInvalidValues(w, req.Params, values) {
+		return
 	}
-	if ec2RefuseUnread(w, req, reads...) || refuseShutdownBehavior(w, req.Params, "InstanceInitiatedShutdownBehavior.Value") {
+	if !slices.ContainsFunc(attrs, req.Params.Has) {
+		// UNVERIFIED(aws-code): MissingParameter from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "MissingParameter",
+			"The request must contain an attribute to modify.")
 		return
 	}
 	change := repository.EC2InstanceAttributeChange{Set: func(a *repository.EC2InstanceAttributes) {
@@ -2622,57 +2628,76 @@ func (app *Application) ec2ModifyInstanceAttribute(w http.ResponseWriter, accoun
 	awsproto.WriteEC2QueryRPCResponse(w, "ModifyInstanceAttribute", nil)
 }
 
-// ec2RefuseUnread refuses req through ec2Refuse, naming each param
-// whose name (ec2ParamName) is not in reads, and reports whether it
-// did.
-func ec2RefuseUnread(w http.ResponseWriter, req awsproto.QueryRPCRequest, reads ...string) bool {
-	var unread []string
-	for k := range req.Params {
-		if name := ec2ParamName(k); !slices.Contains(reads, name) {
-			unread = append(unread, name)
-		}
-	}
-	if len(unread) == 0 {
-		return false
-	}
-	ec2Refuse(w, req.Action, unread...)
-	return true
+// ec2Bool is what AWS accepts for a boolean attribute value.
+var ec2Bool = []string{"true", "false"}
+
+// ec2InstanceAttribute is one attribute stored on the instance row:
+// the values AWS accepts for it and how one sets it.
+type ec2InstanceAttribute struct {
+	values []string
+	set    func(*repository.EC2InstanceAttributes, string)
 }
 
-// refuseShutdownBehavior answers InvalidParameterValue, and reports
-// true, when p sets param to anything but stop or terminate.
-func refuseShutdownBehavior(w http.ResponseWriter, p url.Values, param string) bool {
-	switch v := p.Get(param); v {
-	case "", "stop", "terminate":
-		return false
-	default:
-		// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
-		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue",
-			fmt.Sprintf("Value (%s) for parameter instanceInitiatedShutdownBehavior is invalid. Expected: 'stop', 'terminate'.", v))
-		return true
-	}
+// ec2InstanceAttributes are the attributes stored on the instance row.
+// RunInstances sends one as <Name>, ModifyInstanceAttribute as
+// <Name>.Value.
+var ec2InstanceAttributes = map[string]ec2InstanceAttribute{
+	"DisableApiTermination": {ec2Bool, func(a *repository.EC2InstanceAttributes, v string) { a.DisableAPITermination = v == "true" }},
+	"DisableApiStop":        {ec2Bool, func(a *repository.EC2InstanceAttributes, v string) { a.DisableAPIStop = v == "true" }},
+	"EbsOptimized":          {ec2Bool, func(a *repository.EC2InstanceAttributes, v string) { a.EBSOptimized = v == "true" }},
+	"InstanceInitiatedShutdownBehavior": {[]string{"stop", "terminate"},
+		func(a *repository.EC2InstanceAttributes, v string) { a.ShutdownBehavior = v }},
 }
 
-// ec2InstanceAttributes maps each attribute stored on the instance row
-// to how its value sets it. RunInstances sends one as <Name>,
-// ModifyInstanceAttribute as <Name>.Value.
-var ec2InstanceAttributes = map[string]func(*repository.EC2InstanceAttributes, string){
-	"DisableApiTermination":             func(a *repository.EC2InstanceAttributes, v string) { a.DisableAPITermination = v == "true" },
-	"DisableApiStop":                    func(a *repository.EC2InstanceAttributes, v string) { a.DisableAPIStop = v == "true" },
-	"EbsOptimized":                      func(a *repository.EC2InstanceAttributes, v string) { a.EBSOptimized = v == "true" },
-	"InstanceInitiatedShutdownBehavior": func(a *repository.EC2InstanceAttributes, v string) { a.ShutdownBehavior = v },
+// ec2AttributeValues maps each ec2InstanceAttributes param, named
+// <Name><suffix>, to the values AWS accepts for it.
+func ec2AttributeValues(suffix string) map[string][]string {
+	out := map[string][]string{}
+	for name, attr := range ec2InstanceAttributes {
+		out[name+suffix] = attr.values
+	}
+	return out
 }
 
 // setInstanceAttributes sets on a each attribute p carries as
 // <Name><suffix>.
 func setInstanceAttributes(a *repository.EC2InstanceAttributes, p url.Values, suffix string) {
-	for name, set := range ec2InstanceAttributes {
+	for name, attr := range ec2InstanceAttributes {
 		if v := p.Get(name + suffix); v != "" {
-			set(a, v)
+			attr.set(a, v)
 		}
 	}
 }
 
+// refuseInvalidValues answers InvalidParameterValue, and reports true,
+// when p carries a param of values with a value not listed for it, an
+// empty one included. Params are checked in name order, so the same
+// request always names the same param.
+func refuseInvalidValues(w http.ResponseWriter, p url.Values, values map[string][]string) bool {
+	for _, param := range slices.Sorted(maps.Keys(values)) {
+		if v := p.Get(param); p.Has(param) && !slices.Contains(values[param], v) {
+			// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue",
+				fmt.Sprintf("Value (%s) for parameter %s is invalid. Expected: '%s'.", v, param, strings.Join(values[param], "', '")))
+			return true
+		}
+	}
+	return false
+}
+
+// ec2TerminateInstances terminates every id in one transaction, where
+// each one's previous state is read: as in AWS, an instance that
+// cannot be terminated (unknown, or with disableApiTermination set)
+// leaves all of them as they were, and one already terminated answers
+// terminated/terminated.
+//
+// NOTE: do NOT hard-delete the rows. The provider's destroy wait-loop
+// polls DescribeInstances expecting to observe the state transition
+// (running→stopping→terminated) before accepting "gone."
+// Hard-deleting collapses the wait into a confusing "couldn't find
+// resource (21 retries)" error. Cleanup of terminated rows happens
+// lazily inside DeleteSubnet/DeleteVPC so the FK constraint doesn't
+// block dependent resource deletion.
 func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	ids := parseInstanceIDs(req)
 	if len(ids) == 0 {
@@ -2680,52 +2705,29 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, re
 			fmt.Errorf("InstanceId.<n> required: %w", models.ErrConflict))
 		return
 	}
-	out := ec2TerminateInstancesResult{}
-	var live []string
-	for _, id := range ids {
-		inst, err := app.repo.GetInstance(account, region, id)
-		if err != nil && !errors.Is(err, models.ErrNotFound) {
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-			return
-		}
-		previous := "terminated"
-		// Already gone, or already terminated: TerminateInstances is
-		// idempotent in real AWS and answers terminated/terminated.
-		// Concepts.md "Standing patterns" item 9 — terminal state
-		// refuses transitions; the wire response just echoes it.
-		if err == nil && inst.State != "terminated" {
-			previous = inst.State
-			if !slices.Contains(live, id) { // a repeated id is terminated once
-				live = append(live, id)
-			}
-		}
-		out.InstancesSet = append(out.InstancesSet, ec2InstanceStateChangeXML{
-			InstanceId:    id,
-			CurrentState:  ec2InstanceStateForName("terminated"),
-			PreviousState: ec2InstanceStateForName(previous),
-		})
-	}
-	// One transaction for every id: as in AWS, an instance that cannot
-	// be terminated leaves all of them running.
-	//
-	// NOTE: do NOT hard-delete the rows. The provider's destroy
-	// wait-loop polls DescribeInstances expecting to observe the state
-	// transition (running→stopping→terminated) before accepting "gone."
-	// Hard-deleting collapses the wait into a confusing "couldn't find
-	// resource (21 retries)" error. Cleanup of terminated rows happens
-	// lazily inside DeleteSubnet/DeleteVPC so the FK constraint doesn't
-	// block dependent resource deletion.
-	err := app.repo.SetInstanceState(account, region, "terminated", live...)
-	var protected *repository.TerminationProtectedError
-	if errors.As(err, &protected) {
+	previous, err := app.repo.SetInstanceState(account, region, "terminated", ids...)
+	var refused *repository.InstanceError
+	if errors.As(err, &refused) && errors.Is(err, repository.ErrTerminationProtected) {
 		// UNVERIFIED(aws-code): OperationNotPermitted from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "OperationNotPermitted",
-			fmt.Sprintf("The instance '%s' may not be terminated. Modify its 'disableApiTermination' instance attribute and try again.", protected.InstanceID))
+			fmt.Sprintf("The instance '%s' may not be terminated. Modify its 'disableApiTermination' instance attribute and try again.", refused.InstanceID))
+		return
+	}
+	if refused != nil {
+		writeInstanceError(w, refused.InstanceID, err)
 		return
 	}
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
+	}
+	out := ec2TerminateInstancesResult{}
+	for i, id := range ids {
+		out.InstancesSet = append(out.InstancesSet, ec2InstanceStateChangeXML{
+			InstanceId:    id,
+			CurrentState:  ec2InstanceStateForName("terminated"),
+			PreviousState: ec2InstanceStateForName(previous[i]),
+		})
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "TerminateInstances", &out)
 }
@@ -3064,10 +3066,13 @@ type ec2AttributeBoolValue struct {
 // CRITICAL[ec2-instance-attributes-from-rows]: each Attribute this
 // switch answers MUST be what RunInstances or ModifyInstanceAttribute
 // last stored, else AWS's default; any other Attribute MUST be refused
-// through ec2Refuse, never answered with a constant; and an unknown
-// InstanceId MUST be 400 InvalidInstanceID.NotFound. The provider
-// sets disable_api_termination and the others from these answers, so
-// a constant hides a ModifyInstanceAttribute and plans a diff.
+// through ec2Refuse, never answered with a constant, and a missing one
+// MUST be 400 MissingParameter; and an unknown InstanceId MUST be 400
+// InvalidInstanceID.NotFound. The provider sets disable_api_termination
+// and the others from these answers, so a constant hides a
+// ModifyInstanceAttribute and plans a diff. disableApiStop is stored
+// and answered, but nothing enforces it: fakeaws has no StopInstances,
+// which stays refused as not modelled (the default arm).
 func (app *Application) ec2DescribeInstanceAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	instanceID := req.Params.Get("InstanceId")
 	inst, err := app.repo.GetInstance(account, region, instanceID)
@@ -3101,6 +3106,11 @@ func (app *Application) ec2DescribeInstanceAttribute(w http.ResponseWriter, acco
 		if eni := enis[instanceID]; eni != nil {
 			out.SourceDestCheck = &ec2AttributeBoolValue{Value: eni.SourceDestCheck}
 		}
+	case "":
+		// UNVERIFIED(aws-code): MissingParameter from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "MissingParameter",
+			"The request must contain the parameter Attribute.")
+		return
 	default:
 		ec2Refuse(w, req.Action, "Attribute="+attr)
 		return

@@ -212,24 +212,47 @@ func (t ec2FilterTable[R]) valuesFor(name string) func(R, map[string][]ec2Resour
 }
 
 // read parses req's Filter.N and refuses, in one answer, each filter t
-// cannot honour and each other param whose name (ec2ParamName) is not
-// in reads, but MaxResults and NextToken: fakeaws answers every
-// Describe in one page. A key with a literal N segment (VpcId.N itself)
-// is refused too: its name would equal the declared VpcId.N, but
-// queryListValues reads only digit indexes and would drop it. It
-// reports false when it refused.
+// cannot honour and each other param unread finds against reads, but
+// MaxResults and NextToken: fakeaws answers every Describe in one page.
+// It reports false when it refused.
 func (t ec2FilterTable[R]) read(w http.ResponseWriter, req awsproto.QueryRPCRequest, reads ...string) ([]ec2Filter, bool) {
-	var unread []string
-	for k := range req.Params {
-		if strings.HasPrefix(k, "Filter.") || k == "MaxResults" || k == "NextToken" {
-			continue
-		}
-		if !slices.Contains(reads, ec2ParamName(k)) || slices.Contains(strings.Split(k, "."), "N") {
-			unread = append(unread, k)
+	var params []string
+	for _, k := range unread(req.Params, slices.Concat(reads, []string{"MaxResults", "NextToken"})) {
+		if !strings.HasPrefix(k, "Filter.") {
+			params = append(params, k)
 		}
 	}
 	filters := parseEC2Filters(req.Params)
-	return filters, !t.refuse(w, req.Action, filters, unread)
+	return filters, !t.refuse(w, req.Action, filters, params)
+}
+
+// unread returns each key of params whose name (ec2ParamName) is not
+// in reads, and each key with a literal N segment (VpcId.N itself): its
+// name would equal a declared VpcId.N, but queryListValues reads only
+// digit indexes and would drop it.
+func unread(params url.Values, reads []string) []string {
+	var out []string
+	for k := range params {
+		if !slices.Contains(reads, ec2ParamName(k)) || slices.Contains(strings.Split(k, "."), "N") {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// ec2RefuseUnread refuses req through ec2Refuse, naming each param
+// unread finds against reads, and reports whether it did.
+func ec2RefuseUnread(w http.ResponseWriter, req awsproto.QueryRPCRequest, reads ...string) bool {
+	keys := unread(req.Params, reads)
+	if len(keys) == 0 {
+		return false
+	}
+	names := make([]string, len(keys))
+	for i, k := range keys {
+		names[i] = ec2ParamName(k)
+	}
+	ec2Refuse(w, req.Action, names...)
+	return true
 }
 
 // refuse answers action through ec2Refuse naming all that t cannot

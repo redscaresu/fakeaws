@@ -1388,12 +1388,23 @@ func TestContract_ec2_instance_attributes_from_rows(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "DescribeInstances unknown instance: %s", body)
 	assert.Equal(t, "InvalidInstanceID.NotFound", extractEC2Tag(body, "Code"), "DescribeInstances")
 
-	for _, name := range []string{"instanceType", "groupSet", "kernel", ""} {
+	for _, name := range []string{"instanceType", "groupSet", "kernel"} {
 		resp, body := attribute(id, name)
 		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%q: %s", name, body)
 		assert.Equal(t, "DescribeInstanceAttribute: not modelled by fakeaws: Attribute="+name, extractEC2Tag(body, "Message"), name)
 		assert.Equal(t, "filter-refused", lastClass(t, srv), name)
 	}
+	resp, body = ec2Call(t, srv, region, "DescribeInstanceAttribute", url.Values{"InstanceId": {id}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "no Attribute: %s", body)
+	assert.Equal(t, "MissingParameter", extractEC2Tag(body, "Code"), "no Attribute")
+	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "no Attribute")
+
+	// disableApiStop guards nothing: StopInstances is not modelled. A
+	// StopInstances handler must refuse an instance whose disableApiStop
+	// is set before this assertion changes.
+	resp, body = ec2Call(t, srv, region, "StopInstances", url.Values{"InstanceId.1": {id}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "StopInstances: %s", body)
+	assert.Equal(t, "not-modelled-404", lastClass(t, srv), "StopInstances")
 }
 
 // ----- Tags -----
