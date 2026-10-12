@@ -22,8 +22,11 @@ import (
 // hashicorp/aws 5.100.0; every other operation answers 501.
 
 // al2023ParameterName is the read-only AWS public parameter naming the
-// latest Amazon Linux 2023 AMI. It resolves to AL2023AMIID in every
-// region and is never stored, so it is not listed or deletable.
+// latest Amazon Linux 2023 AMI. Unless the database is loaded it
+// resolves to AL2023AMIID in every region, with no row. On a loaded
+// database GetParameter reads the loader's row (ParameterNotFound when
+// there is none), still under the public, account-less ARN. Either way
+// it is not listed (DescribeParameters, /mock/state) or deletable.
 const al2023ParameterName = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 
 var ssmParameterTypes = []string{"String", "StringList", "SecureString"}
@@ -155,21 +158,32 @@ func (app *Application) ssmGetParameter(w http.ResponseWriter, account, region s
 		return
 	}
 	if in.Name == al2023ParameterName {
-		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameter": map[string]any{
-			"ARN":  awsproto.BuildSSMParameterARN(region, "", in.Name),
-			"Name": in.Name, "Type": "String", "DataType": "text",
-			"Value": AL2023AMIID, "Version": 1,
-		}})
-		return
+		loaded, err := app.repo.Loaded()
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
+			return
+		}
+		if !loaded {
+			awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameter": map[string]any{
+				"ARN":  awsproto.BuildSSMParameterARN(region, "", in.Name),
+				"Name": in.Name, "Type": "String", "DataType": "text",
+				"Value": AL2023AMIID, "Version": 1,
+			}})
+			return
+		}
 	}
 	p, err := app.repo.GetSSMParameter(account, region, in.Name)
 	if err != nil {
 		ssmNotFound(w, in.Name, err)
 		return
 	}
+	arnAccount := account
+	if p.Name == al2023ParameterName {
+		arnAccount = "" // public: no account in the ARN, as when unloaded
+	}
 	// SecureString values come back as stored, WithDecryption or not.
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameter": map[string]any{
-		"ARN":  awsproto.BuildSSMParameterARN(region, account, p.Name),
+		"ARN":  awsproto.BuildSSMParameterARN(region, arnAccount, p.Name),
 		"Name": p.Name, "Type": p.Type, "DataType": p.DataType,
 		"Value": p.Value, "Version": p.Version,
 		"LastModifiedDate": secretEpoch(p.LastModified),
@@ -210,6 +224,9 @@ func (app *Application) ssmDescribeParameters(w http.ResponseWriter, account, re
 	}
 	out := []map[string]any{}
 	for _, p := range params {
+		if p.Name == al2023ParameterName {
+			continue // a loaded public parameter is not the account's
+		}
 		if slices.ContainsFunc(in.ParameterFilters, func(f filter) bool { return !slices.Contains(f.Values, p.Name) }) {
 			continue
 		}
@@ -238,6 +255,11 @@ func ssmParameterMetadata(account, region string, p repository.SSMParameter) map
 func (app *Application) ssmDeleteParameter(w http.ResponseWriter, account, region string, body []byte) {
 	var in struct{ Name string }
 	if !ssmDecode(w, body, &in) {
+		return
+	}
+	if in.Name == al2023ParameterName {
+		// Never deletable: a loaded row stays, answered as when unloaded.
+		ssmNotFound(w, in.Name, models.ErrNotFound)
 		return
 	}
 	if err := app.repo.DeleteSSMParameter(account, region, in.Name); err != nil {
@@ -316,12 +338,16 @@ func (app *Application) ssmChangeTags(w http.ResponseWriter, account, region, op
 }
 
 // gatherSSMStateReal emits the ssm block of /mock/state: every user
-// parameter by name, type, version and region, never its value. Public
-// parameters are not stored, so they never appear.
+// parameter by name, type, version and region, never its value. The
+// public al2023 parameter is not the account's, so a loaded row of it
+// is skipped as DescribeParameters skips it.
 func (app *Application) gatherSSMStateReal(account string) map[string]any {
 	params, _ := app.repo.ListSSMParameters(account, "")
 	out := []map[string]any{}
 	for _, p := range params {
+		if p.Name == al2023ParameterName {
+			continue
+		}
 		out = append(out, map[string]any{
 			"name": p.Name, "type": p.Type, "version": p.Version, "region": p.Region,
 		})

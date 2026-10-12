@@ -199,15 +199,20 @@ func (app *Application) handleMockSeedImage(w http.ResponseWriter, r *http.Reque
 // seedAMI inserts ami unless its id is already stored in the region or
 // is a fixture, and returns the stored (or fixture) row. Fixtures land
 // in a region lazily, so they are matched from ec2AMIFixtures without
-// writing them. A new id must match amiIDPattern (errInvalidAMIID
-// otherwise); fixture ids such as AL2023AMIID do not.
+// writing them, unless the database is loaded and has none. A new id
+// must match amiIDPattern (errInvalidAMIID otherwise); fixture ids such
+// as AL2023AMIID do not.
 func (app *Application) seedAMI(account string, ami *repository.EC2AMI) (*repository.EC2AMI, error) {
 	stored, err := app.repo.GetAMI(account, ami.Region, ami.ID)
 	if !errors.Is(err, models.ErrNotFound) {
 		return stored, err
 	}
+	loaded, err := app.repo.Loaded()
+	if err != nil {
+		return nil, err
+	}
 	for _, f := range ec2AMIFixtures {
-		if f.ID == ami.ID {
+		if f.ID == ami.ID && !loaded {
 			f.Region = ami.Region
 			return &f, nil
 		}
