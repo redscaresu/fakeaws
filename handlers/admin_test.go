@@ -402,6 +402,34 @@ func TestAdminMockRestore_MemoryConflict(t *testing.T) {
 	assert.NoFileExists(t, ":memory:", ":memory: must not create a file")
 }
 
+// A snapshot at another db schema version is refused 409 naming the
+// stored and wanted versions, and the live state is as it was.
+func TestAdminMockRestore_AnotherSchemaVersionIs409(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	app, srv := newTestApp(t, dbPath)
+	resp, body := sqsCall(t, srv, "CreateQueue", `{"QueueName":"in-snapshot"}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateQueue: %s", body)
+	resp, body = doPost(t, srv, "/mock/snapshot")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "snapshot: %s", body)
+	resp, body = sqsCall(t, srv, "CreateQueue", `{"QueueName":"after-snapshot"}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateQueue: %s", body)
+
+	var want string
+	require.NoError(t, app.Repository().DB().QueryRow(`SELECT version FROM schema_version`).Scan(&want))
+	snap, err := sql.Open("sqlite", dbPath+".snapshot")
+	require.NoError(t, err)
+	_, err = snap.Exec(`UPDATE schema_version SET version = 1`)
+	require.NoError(t, err)
+	require.NoError(t, snap.Close())
+	_, before := doGet(t, srv, "/mock/state")
+
+	resp, body = doPost(t, srv, "/mock/restore")
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "restore: %s", body)
+	assert.Contains(t, string(body), "database schema version 1, fakeaws needs "+want)
+	_, after := doGet(t, srv, "/mock/state")
+	assert.Equal(t, string(before), string(after), "/mock/state as it was")
+}
+
 // assertOwnerOnly checks each path is a file with mode exactly 0600.
 func assertOwnerOnly(t *testing.T, paths ...string) {
 	t.Helper()

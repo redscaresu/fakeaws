@@ -1,9 +1,16 @@
 package repository
 
 import (
+	"crypto/sha256"
+	"database/sql"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/redscaresu/fakeaws/models"
 )
@@ -67,6 +74,49 @@ func TestRepositoryAdminLifecycle(t *testing.T) {
 	if !errors.Is(err, models.ErrNotFound) {
 		t.Errorf("Restore after Reset should return ErrNotFound, got %v", err)
 	}
+}
+
+// TestNewRefusesAnotherSchemaVersion: a file db whose schema_version is
+// not exactly one row, dbSchemaVersion, is refused naming the stored and
+// wanted versions, and the file is left byte for byte as it was.
+func TestNewRefusesAnotherSchemaVersion(t *testing.T) {
+	cases := []struct{ name, stmt, stored string }{
+		{"older", `UPDATE schema_version SET version = 1`, "1"},
+		{"newer", fmt.Sprintf(`UPDATE schema_version SET version = %d`, dbSchemaVersion+1), fmt.Sprint(dbSchemaVersion + 1)},
+		{"no row", `DELETE FROM schema_version`, "none"},
+		{"two rows", `INSERT INTO schema_version (version) VALUES (1)`, fmt.Sprintf("1, %d", dbSchemaVersion)},
+		{"no table", `DROP TABLE schema_version`, "none"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "state.db")
+			r, err := New(dbPath)
+			require.NoError(t, err)
+			require.NoError(t, r.Close())
+			execOnFile(t, dbPath, c.stmt)
+			before := sha256File(t, dbPath)
+
+			_, err = New(dbPath)
+			require.ErrorIs(t, err, models.ErrConflict)
+			assert.Contains(t, err.Error(), fmt.Sprintf("database schema version %s, fakeaws needs %d: reset or delete the file", c.stored, dbSchemaVersion))
+			assert.Equal(t, before, sha256File(t, dbPath), "the file is left as it was")
+		})
+	}
+}
+
+// TestNewFileDBAtSchemaVersion: a new file db is at dbSchemaVersion,
+// reopens, and snapshot then restore succeeds.
+func TestNewFileDBAtSchemaVersion(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	r, err := New(dbPath)
+	require.NoError(t, err)
+	assert.Equal(t, fmt.Sprint(dbSchemaVersion), storedVersion(t, r))
+	require.NoError(t, r.Close())
+
+	r = restoreRepo(t, dbPath)
+	require.NoError(t, r.Restore(nil))
+	assert.Equal(t, []string{"vpc-snap"}, vpcIDs(t, r))
+	assert.Equal(t, fmt.Sprint(dbSchemaVersion), storedVersion(t, r))
 }
 
 func TestNewMemoryDBSnapshotIsConflict(t *testing.T) {
@@ -197,6 +247,31 @@ func TestPatchMergeNestedRecursive(t *testing.T) {
 }
 
 // ----- test helpers -----
+
+// execOnFile runs stmt on the db file at path and closes it.
+func execOnFile(t *testing.T, path, stmt string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = db.Exec(stmt)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+}
+
+// storedVersion is every schema_version row of r, comma-separated.
+func storedVersion(t *testing.T, r *Repository) string {
+	t.Helper()
+	var v string
+	require.NoError(t, r.db.QueryRow(`SELECT group_concat(version, ', ') FROM schema_version`).Scan(&v))
+	return v
+}
+
+func sha256File(t *testing.T, path string) [sha256.Size]byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return sha256.Sum256(b)
+}
 
 type countingCache struct {
 	name      string

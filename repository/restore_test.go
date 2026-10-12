@@ -2,12 +2,15 @@ package repository
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/redscaresu/fakeaws/models"
 )
 
 // restoreRepo opens dbPath with vpc-snap in its snapshot and vpc-live
@@ -112,4 +115,25 @@ func TestRestoreFailsUnlessCheckpointed(t *testing.T) {
 	assert.Contains(t, err.Error(), "checkpoint restored copy")
 	assert.ElementsMatch(t, []string{"vpc-snap", "vpc-live"}, vpcIDs(t, r), "the live db as it was")
 	assert.Empty(t, stagedFiles(t, dbPath))
+}
+
+// TestRestoreRefusesAnotherSchemaVersion: a snapshot at another schema
+// version is refused, with or without a prepare, before anything is
+// copied over the live db: its rows and version are as they were, it
+// still answers, and no .restore file is left.
+func TestRestoreRefusesAnotherSchemaVersion(t *testing.T) {
+	for name, prepare := range map[string]func(*Repository) error{"nil": nil, "addVPC": addVPC} {
+		t.Run(name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "state.db")
+			r := restoreRepo(t, dbPath)
+			execOnFile(t, dbPath+".snapshot", `UPDATE schema_version SET version = 1`)
+
+			err := r.Restore(prepare)
+			require.ErrorIs(t, err, models.ErrConflict)
+			assert.Contains(t, err.Error(), fmt.Sprintf("database schema version 1, fakeaws needs %d", dbSchemaVersion))
+			assert.ElementsMatch(t, []string{"vpc-snap", "vpc-live"}, vpcIDs(t, r), "the live db as it was")
+			assert.Equal(t, fmt.Sprint(dbSchemaVersion), storedVersion(t, r))
+			assert.Empty(t, stagedFiles(t, dbPath))
+		})
+	}
 }
