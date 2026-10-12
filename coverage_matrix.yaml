@@ -305,12 +305,39 @@ entries:
   # omitted: read surfaces, not generator resources.
   - aws_service: ec2
     aws_resource_type: aws_ami
-    working_exempt: true
-    working_exempt_reason: "Read-only AMI fixtures; fakeaws creates no images. DescribeImages by ImageId.N, Owner.N (Owner.1=self lists none of the fixtures) and imageFilters is pinned in TestEC2_DescribeImagesFixtures, TestRegressionSweepDescribeImagesOwnerSelf, TestEC2_DescribeImagesFilters and TestRegressionDescribeImagesNameFilter."
+    working_dir_name: ec2_data_sources
     misconfigured_dir_name: instance_unknown_ami
     updates_exempt: true
     updates_exempt_reason: "The fixtures are immutable."
     integration_test_func_name: "^(TestEC2_DescribeImagesFixtures|TestRegressionSweepDescribeImagesOwnerSelf|TestEC2_DescribeImagesFilters|TestRegressionDescribeImagesNameFilter)$"
+  # EC2 data sources, applied by working/ec2_data_sources: each read's
+  # postcondition fails the apply unless it resolves to the one resource
+  # it should. A filter fakeaws does not model is refused 501, proved
+  # from the provider to the request log in examples/filter_refused_test.go.
+  - aws_service: ec2
+    aws_resource_type: data.aws_vpc
+    working_dir_name: ec2_data_sources
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "fakeaws models no AWS refusal of this read; its own refusal of a filter it does not model is proved end to end in examples/filter_refused_test.go."
+    updates_exempt: true
+    updates_exempt_reason: "A data source has no update path."
+    integration_test_func_name: "^(TestEC2_DescribeVpcsFilters|TestRegressionNetworkDescribesHonourTagFilters)$"
+  - aws_service: ec2
+    aws_resource_type: data.aws_security_group
+    working_dir_name: ec2_data_sources
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "fakeaws models no AWS refusal of this read; its own refusal of a filter it does not model is proved end to end in examples/filter_refused_test.go."
+    updates_exempt: true
+    updates_exempt_reason: "A data source has no update path."
+    integration_test_func_name: "^(TestEC2_DescribeSecurityGroupsFilters|TestContract_ec2_sg_group_name_default_vpc_only)$"
+  - aws_service: ec2
+    aws_resource_type: data.aws_availability_zones
+    working_dir_name: ec2_data_sources
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "fakeaws models no AWS refusal of this read; its own refusal of a filter it does not model is proved end to end in examples/filter_refused_test.go."
+    updates_exempt: true
+    updates_exempt_reason: "A data source has no update path."
+    integration_test_func_name: "^(TestEC2_DescribeAvailabilityZones|TestRegressionDescribeAvailabilityZonesAnswered)$"
   - aws_service: ec2
     aws_resource_type: aws_network_interface
     working_exempt: true
