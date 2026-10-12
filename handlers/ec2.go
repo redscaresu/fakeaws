@@ -1704,7 +1704,9 @@ func (app *Application) ec2FindSecurityGroups(w http.ResponseWriter, account, re
 
 // sgFilters are the DescribeSecurityGroups filters fakeaws models: the
 // AWS names whose value a group answers and the tag filters. The
-// ip-permission.* and egress.ip-permission.* names stay refused.
+// ip-permission.* and egress.ip-permission.* names stay refused, as
+// does a group-name that matches default: every AWS VPC has a group
+// named default, and fakeaws's rows have none to answer with.
 var sgFilters = ec2FilterTable[ec2SecurityGroupXML]{
 	values: map[string]func(ec2SecurityGroupXML) []string{
 		"group-id":    func(g ec2SecurityGroupXML) []string { return []string{g.GroupId} },
@@ -1713,7 +1715,8 @@ var sgFilters = ec2FilterTable[ec2SecurityGroupXML]{
 		"description": func(g ec2SecurityGroupXML) []string { return []string{g.GroupDesc} },
 		"owner-id":    func(g ec2SecurityGroupXML) []string { return []string{g.OwnerId} },
 	},
-	tagID: func(g ec2SecurityGroupXML) string { return g.GroupId },
+	tagID:   func(g ec2SecurityGroupXML) string { return g.GroupId },
+	rowless: map[string]string{"group-name": "default"},
 }
 
 // ec2DescribeSecurityGroups answers the provider's GroupId.N lookup
@@ -1726,22 +1729,27 @@ var sgFilters = ec2FilterTable[ec2SecurityGroupXML]{
 // none and every GroupName.N answers 400 VPCIdNotSpecified, never a
 // group. A loaded database's account usually has a default VPC its
 // rows cannot show, so there GroupName.N is refused through ec2Refuse.
+// The loaded flag is read only for a request with GroupName.N; an
+// unreadable flag answers 500, neither.
 // UNVERIFIED(aws-code): VPCIdNotSpecified from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	loaded, err := app.repo.Loaded()
-	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-		return
-	}
 	reads := []string{"GroupId.N"}
-	if !loaded {
-		reads = append(reads, "GroupName.N")
+	groupNames := len(queryListValues(req.Params, "GroupName.")) > 0
+	if groupNames {
+		loaded, err := app.repo.Loaded()
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return
+		}
+		if !loaded {
+			reads = append(reads, "GroupName.N")
+		}
 	}
 	filters, ok := sgFilters.read(w, req, reads...)
 	if !ok {
 		return
 	}
-	if len(queryListValues(req.Params, "GroupName.")) > 0 {
+	if groupNames {
 		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "VPCIdNotSpecified",
 			"You have no default VPC in which to carry out the request. Specify a VPC ID or create a default VPC.")
 		return

@@ -128,22 +128,30 @@ func ec2IndexOrder(a, b string) int {
 // whose "" is a value (a tag's empty value: * and an empty value match
 // it). Setting tagID opts the table into tag:<Key>, tag-key and
 // tag-value, matched against the tags of the resource tagID(row) names.
+// rowless maps a name to a value AWS always has but the rows cannot
+// show (group-name's default): a Filter.N whose values match it is
+// refused by name, since an empty answer would be wrong.
 type ec2FilterTable[R any] struct {
 	values       map[string]func(R) []string
 	emptyIsValue []string
 	tagID        func(R) string
+	rowless      map[string]string
 }
 
 // unmodelled lists what t cannot honour in filters: each name it
-// lacks, and as Filter.<N> each Filter.N with no Name, no Value or
-// anything unreadable, since there may be no name to print.
+// lacks or whose values match its rowless value, and as Filter.<N>
+// each Filter.N with no Name, no Value or anything unreadable, since
+// there may be no name to print.
 func (t ec2FilterTable[R]) unmodelled(filters []ec2Filter) []string {
 	var out []string
 	for _, f := range filters {
+		rowless, hasRowless := t.rowless[f.name]
 		switch {
 		case f.name == "" || len(f.values) == 0 || f.unreadable:
 			out = append(out, "Filter."+f.n)
 		case t.valuesFor(f.name) == nil:
+			out = append(out, f.name)
+		case hasRowless && slices.ContainsFunc(f.values, func(re *regexp.Regexp) bool { return re.MatchString(rowless) }):
 			out = append(out, f.name)
 		}
 	}

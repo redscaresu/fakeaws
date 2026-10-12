@@ -2453,7 +2453,8 @@ func TestEC2_DescribeRouteTablesLookupFilters(t *testing.T) {
 // TestEC2_DescribeSecurityGroupsFilters: a group name is unique only
 // within a VPC, so group-name is read with vpc-id; infrafactory's
 // absent-name lookup sends group-name with tag-key and wants an empty
-// set, not a 501.
+// set, not a 501. aws_default_security_group's group-name=default is
+// refused: every AWS VPC has that group and the rows have none.
 func TestEC2_DescribeSecurityGroupsFilters(t *testing.T) {
 	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
 	a, b := tagVPC(t, srv), tagVPC(t, srv)
@@ -2477,17 +2478,27 @@ func TestEC2_DescribeSecurityGroupsFilters(t *testing.T) {
 		{[]string{"group-id", webB}, []string{webB}},
 		{[]string{"description", "web in *"}, []string{webA, webB}},
 		{[]string{"owner-id", "000000000000", "group-name", "web"}, []string{webA, webB}},
-		{[]string{"group-name", "default"}, nil},
+		{[]string{"group-name", "w?b", "vpc-id", b}, []string{webB}},
 	} {
 		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeSecurityGroups", ec2FilterParams(tc.kv...)).SecurityGroups, "%v", tc.kv)
 	}
 
-	resp, body := ec2Call(t, srv, tagRegion, "DescribeSecurityGroups",
-		ec2FilterParams("ip-permission.from-port", "22", "egress.ip-permission.cidr", "0.0.0.0/0"))
-	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
-	assert.Equal(t, "DescribeSecurityGroups: not modelled by fakeaws: egress.ip-permission.cidr, ip-permission.from-port",
-		extractEC2Tag(body, "Message"))
-	assert.Equal(t, "filter-refused", lastClass(t, srv))
+	for _, tc := range []struct {
+		params url.Values
+		want   string
+	}{
+		{ec2FilterParams("group-name", "default", "vpc-id", a), "group-name"},
+		{ec2FilterParams("group-name", "def*"), "group-name"},
+		{ec2FilterParams("group-name", "*", "vpc-id", a), "group-name"},
+		{url.Values{"Filter.1.Name": {"group-name"}, "Filter.1.Value.1": {"web"}, "Filter.1.Value.2": {"default"}}, "group-name"},
+		{ec2FilterParams("ip-permission.from-port", "22", "egress.ip-permission.cidr", "0.0.0.0/0", "group-name", "default"),
+			"egress.ip-permission.cidr, group-name, ip-permission.from-port"},
+	} {
+		resp, body := ec2Call(t, srv, tagRegion, "DescribeSecurityGroups", tc.params)
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%v: %s", tc.params, body)
+		assert.Equal(t, "DescribeSecurityGroups: not modelled by fakeaws: "+tc.want, extractEC2Tag(body, "Message"), "%v", tc.params)
+		assert.Equal(t, "filter-refused", lastClass(t, srv), "%v", tc.params)
+	}
 }
 
 // UNVERIFIED(aws-code): VPCIdNotSpecified from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
@@ -2515,4 +2526,18 @@ func TestContract_ec2_sg_group_name_default_vpc_only(t *testing.T) {
 	assert.Equal(t, "NotImplemented", extractEC2Tag(body, "Code"), "loaded")
 	assert.Equal(t, "DescribeSecurityGroups: not modelled by fakeaws: GroupName.N", extractEC2Tag(body, "Message"), "loaded")
 	assert.Equal(t, "filter-refused", lastClass(t, srv), "loaded")
+
+	// An unreadable flag is 500 for GroupName.N, never either branch,
+	// and a GroupId.N lookup does not read it.
+	app, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	_, err := app.Repository().DB().Exec(`ALTER TABLE identity DROP COLUMN loaded`)
+	require.NoError(t, err)
+	resp, body = groupName(srv)
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "unreadable flag: %s", body)
+	assert.NotContains(t, string(body), "<groupId>", "unreadable flag")
+	sg := createOK(t, srv, "CreateSecurityGroup", "groupId", url.Values{
+		"GroupName": {"db"}, "GroupDescription": {"db"}, "VpcId": {tagVPC(t, srv)},
+	})
+	assert.Equal(t, []string{sg}, describeIDs(t, srv, "DescribeSecurityGroups", url.Values{"GroupId.1": {sg}}).SecurityGroups,
+		"GroupId.N with an unreadable flag")
 }
