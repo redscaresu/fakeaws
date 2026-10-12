@@ -288,11 +288,37 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 // refuses every Filter.N, by name.
 var ec2NoFilters ec2FilterTable[any]
 
+// vpcIsDefault is false for every VPC: fakeaws has no default VPC.
+func vpcIsDefault(v ec2VpcXML) []string { return []string{strconv.FormatBool(v.IsDefault)} }
+
+// vpcFilters are the DescribeVpcs filters fakeaws models: the AWS
+// names whose value a VPC answers, isDefault (data.aws_vpc's spelling
+// of is-default) and the tag filters.
+var vpcFilters = ec2FilterTable[ec2VpcXML]{
+	values: map[string]func(ec2VpcXML) []string{
+		"vpc-id":   func(v ec2VpcXML) []string { return []string{v.VpcId} },
+		"cidr":     func(v ec2VpcXML) []string { return []string{v.CidrBlock} },
+		"state":    func(v ec2VpcXML) []string { return []string{v.State} },
+		"owner-id": func(v ec2VpcXML) []string { return []string{v.OwnerId} },
+		"cidr-block-association.cidr-block": func(v ec2VpcXML) []string {
+			var out []string
+			for _, a := range v.CidrBlockAssociationSet {
+				out = append(out, a.CidrBlock)
+			}
+			return out
+		},
+		"is-default": vpcIsDefault,
+		"isDefault":  vpcIsDefault,
+	},
+	tagID: func(v ec2VpcXML) string { return v.VpcId },
+}
+
 // ec2DescribeVpcs answers VpcId.N with exactly those VPCs: the
 // provider's lookup by id wants one result, so listing every VPC in
 // the region breaks it as soon as a second VPC exists.
 func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if _, ok := ec2NoFilters.read(w, req, "VpcId.N"); !ok {
+	filters, ok := vpcFilters.read(w, req, "VpcId.N")
+	if !ok {
 		return
 	}
 	var vpcs []*repository.EC2VPC
@@ -326,7 +352,9 @@ func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region s
 	for _, v := range vpcs {
 		x := ec2VpcToXML(account, v)
 		x.TagSet = tags[v.ID]
-		out.VpcSet = append(out.VpcSet, x)
+		if vpcFilters.matches(x, filters, tags) {
+			out.VpcSet = append(out.VpcSet, x)
+		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeVpcs", &out)
 }
@@ -493,15 +521,41 @@ func subnetCIDRInRange(vpcCIDR, cidr string) bool {
 	return sub.Bits() >= 16 && sub.Bits() <= 28 && sub.Bits() >= vpc.Bits() && vpc.Contains(sub.Addr())
 }
 
-// subnetFilters are the DescribeSubnets filters fakeaws models.
-var subnetFilters = ec2FilterTable[*repository.EC2Subnet]{values: map[string]func(*repository.EC2Subnet) []string{
-	"vpc-id": func(s *repository.EC2Subnet) []string { return []string{s.VPCID} },
-}}
+func subnetCidrBlock(s ec2SubnetXML) []string    { return []string{s.CidrBlock} }
+func subnetAZ(s ec2SubnetXML) []string           { return []string{s.AvailabilityZone} }
+func subnetAZID(s ec2SubnetXML) []string         { return []string{s.AvailabilityZoneId} }
+func subnetDefaultForAz(s ec2SubnetXML) []string { return []string{strconv.FormatBool(s.DefaultForAz)} }
+
+// subnetFilters are the DescribeSubnets filters fakeaws models: the AWS
+// names whose value a subnet answers, each camelCase alias AWS
+// documents and data.aws_subnet sends, and the tag filters.
+// default-for-az is false for every subnet: fakeaws has no default VPC.
+var subnetFilters = ec2FilterTable[ec2SubnetXML]{
+	values: map[string]func(ec2SubnetXML) []string{
+		"subnet-id":            func(s ec2SubnetXML) []string { return []string{s.SubnetId} },
+		"vpc-id":               func(s ec2SubnetXML) []string { return []string{s.VpcId} },
+		"state":                func(s ec2SubnetXML) []string { return []string{s.State} },
+		"owner-id":             func(s ec2SubnetXML) []string { return []string{s.OwnerId} },
+		"cidr-block":           subnetCidrBlock,
+		"cidr":                 subnetCidrBlock,
+		"cidrBlock":            subnetCidrBlock,
+		"availability-zone":    subnetAZ,
+		"availabilityZone":     subnetAZ,
+		"availability-zone-id": subnetAZID,
+		"availabilityZoneId":   subnetAZID,
+		"default-for-az":       subnetDefaultForAz,
+		"defaultForAz":         subnetDefaultForAz,
+		"map-public-ip-on-launch": func(s ec2SubnetXML) []string {
+			return []string{strconv.FormatBool(s.MapPublicIpOnLaunch)}
+		},
+	},
+	tagID: func(s ec2SubnetXML) string { return s.SubnetId },
+}
 
 // ec2DescribeSubnets answers SubnetId.N, the direct-by-id lookup the
 // provider's Read sends to find exactly the subnet it created (a wrong
-// match count loops its wait until "couldn't find resource"), and the
-// vpc-id filter.
+// match count loops its wait until "couldn't find resource"), and
+// subnetFilters.
 func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	filters, ok := subnetFilters.read(w, req, "SubnetId.N")
 	if !ok {
@@ -519,11 +573,11 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 	}
 	out := ec2DescribeSubnetsResult{SubnetSet: make([]ec2SubnetXML, 0, len(subnets))}
 	for _, s := range subnets {
-		if len(ids) > 0 && !slices.Contains(ids, s.ID) || !subnetFilters.matches(s, filters, tags) {
-			continue
-		}
 		x := ec2SubnetToXML(account, s)
 		x.TagSet = tags[s.ID]
+		if len(ids) > 0 && !slices.Contains(ids, s.ID) || !subnetFilters.matches(x, filters, tags) {
+			continue
+		}
 		out.SubnetSet = append(out.SubnetSet, x)
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeSubnets", &out)
@@ -699,10 +753,36 @@ func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account,
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateInternetGateway", &ec2CreateIgwResult{InternetGateway: ec2IgwToXML(account, igw)})
 }
 
+// igwFilters are the DescribeInternetGateways filters fakeaws models:
+// the AWS names whose value a gateway answers and the tag filters. A
+// detached gateway has no attachment.vpc-id or attachment.state.
+var igwFilters = ec2FilterTable[ec2IgwXML]{
+	values: map[string]func(ec2IgwXML) []string{
+		"internet-gateway-id": func(g ec2IgwXML) []string { return []string{g.InternetGatewayId} },
+		"owner-id":            func(g ec2IgwXML) []string { return []string{g.OwnerId} },
+		"attachment.vpc-id": func(g ec2IgwXML) []string {
+			var out []string
+			for _, a := range g.Attachments {
+				out = append(out, a.VpcId)
+			}
+			return out
+		},
+		"attachment.state": func(g ec2IgwXML) []string {
+			var out []string
+			for _, a := range g.Attachments {
+				out = append(out, a.State)
+			}
+			return out
+		},
+	},
+	tagID: func(g ec2IgwXML) string { return g.InternetGatewayId },
+}
+
 // ec2DescribeInternetGateways answers InternetGatewayId.N with exactly
 // those gateways, as ec2DescribeVpcs does VpcId.N.
 func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if _, ok := ec2NoFilters.read(w, req, "InternetGatewayId.N"); !ok {
+	filters, ok := igwFilters.read(w, req, "InternetGatewayId.N")
+	if !ok {
 		return
 	}
 	var igws []*repository.EC2InternetGateway
@@ -736,7 +816,9 @@ func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, accou
 	for _, igw := range igws {
 		x := ec2IgwToXML(account, igw)
 		x.TagSet = tags[igw.ID]
-		out.InternetGatewaySet = append(out.InternetGatewaySet, x)
+		if igwFilters.matches(x, filters, tags) {
+			out.InternetGatewaySet = append(out.InternetGatewaySet, x)
+		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInternetGateways", &out)
 }
@@ -878,11 +960,19 @@ type ec2DescribeRouteTablesResult struct {
 }
 
 // rtFilterValues are the DescribeRouteTables filters fakeaws models:
-// the ones the provider's lookups by VPC and by association id send.
-// fakeaws models no main route table, so every association is
-// main=false.
+// the ones the provider's lookups by VPC, by association id and
+// data.aws_route_table send. fakeaws models no main route table, so
+// every association is main=false.
 var rtFilterValues = map[string]func(rt ec2RouteTableXML) []string{
-	"vpc-id": func(rt ec2RouteTableXML) []string { return []string{rt.VpcId} },
+	"route-table-id": func(rt ec2RouteTableXML) []string { return []string{rt.RouteTableId} },
+	"vpc-id":         func(rt ec2RouteTableXML) []string { return []string{rt.VpcId} },
+	"association.subnet-id": func(rt ec2RouteTableXML) []string {
+		var ids []string
+		for _, a := range rt.Associations {
+			ids = append(ids, a.SubnetId)
+		}
+		return ids
+	},
 	"association.route-table-association-id": func(rt ec2RouteTableXML) []string {
 		var ids []string
 		for _, a := range rt.Associations {
@@ -898,7 +988,10 @@ var rtFilterValues = map[string]func(rt ec2RouteTableXML) []string{
 	},
 }
 
-var rtFilters = ec2FilterTable[ec2RouteTableXML]{values: rtFilterValues}
+var rtFilters = ec2FilterTable[ec2RouteTableXML]{
+	values: rtFilterValues,
+	tagID:  func(rt ec2RouteTableXML) string { return rt.RouteTableId },
+}
 
 func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	filters, ok := rtFilters.read(w, req, "RouteTableId.N")

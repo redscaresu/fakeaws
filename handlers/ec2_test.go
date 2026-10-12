@@ -1815,23 +1815,14 @@ func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 	subnet := createOK(t, srv, "CreateSubnet", "subnetId", url.Values{"VpcId": {vpcs[0]}, "CidrBlock": {"10.0.1.0/24"}})
 	assoc := createOK(t, srv, "AssociateRouteTable", "associationId", url.Values{"RouteTableId": {rts[0]}, "SubnetId": {subnet}})
 
-	filter := func(kv ...string) url.Values {
-		p := url.Values{}
-		for i := 0; i < len(kv); i += 2 {
-			n := strconv.Itoa(i/2 + 1)
-			p.Set("Filter."+n+".Name", kv[i])
-			p.Set("Filter."+n+".Value.1", kv[i+1])
-		}
-		return p
-	}
 	for name, tc := range map[string]struct {
 		params url.Values
 		want   []string
 	}{
 		"no filter":      {nil, rts},
-		"by association": {filter("association.route-table-association-id", assoc), rts[:1]},
-		"by vpc":         {filter("vpc-id", vpcs[1]), rts[1:]},
-		"main of a vpc":  {filter("association.main", "true", "vpc-id", vpcs[0]), nil},
+		"by association": {ec2FilterParams("association.route-table-association-id", assoc), rts[:1]},
+		"by vpc":         {ec2FilterParams("vpc-id", vpcs[1]), rts[1:]},
+		"main of a vpc":  {ec2FilterParams("association.main", "true", "vpc-id", vpcs[0]), nil},
 	} {
 		resp, body := ec2Call(t, srv, tagRegion, "DescribeRouteTables", tc.params)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", name, body)
@@ -1840,7 +1831,7 @@ func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 		}
 	}
 
-	resp, _ := ec2Call(t, srv, tagRegion, "DescribeRouteTables", filter("route.gateway-id", "igw-1"))
+	resp, _ := ec2Call(t, srv, tagRegion, "DescribeRouteTables", ec2FilterParams("route.gateway-id", "igw-1"))
 	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "an unmodelled filter is refused, not ignored")
 }
 
@@ -2299,4 +2290,158 @@ func TestAMIFixtures_UnreadableLoadedFlagSeedsNothing(t *testing.T) {
 	require.NoError(t, repo.Close())
 	_, err = handlers.NewApplication(handlers.Options{DBPath: dbPath})
 	assert.ErrorContains(t, err, "read loaded flag")
+}
+
+// ec2FilterParams sends each name/value pair as its own Filter.N.
+func ec2FilterParams(kv ...string) url.Values {
+	p := url.Values{}
+	for i := 0; i < len(kv); i += 2 {
+		n := strconv.Itoa(i/2 + 1)
+		p.Set("Filter."+n+".Name", kv[i])
+		p.Set("Filter."+n+".Value.1", kv[i+1])
+	}
+	return p
+}
+
+// describedIDs are the ids a VPC, subnet, internet gateway or route
+// table Describe answers, each from its own set.
+type describedIDs struct {
+	Vpcs        []string `xml:"vpcSet>item>vpcId"`
+	Subnets     []string `xml:"subnetSet>item>subnetId"`
+	Gateways    []string `xml:"internetGatewaySet>item>internetGatewayId"`
+	RouteTables []string `xml:"routeTableSet>item>routeTableId"`
+}
+
+func describeIDs(t *testing.T, srv *httptest.Server, action string, params url.Values) describedIDs {
+	t.Helper()
+	resp, body := ec2Call(t, srv, tagRegion, action, params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s %v: %s", action, params, body)
+	var out describedIDs
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	return out
+}
+
+// TestEC2_DescribeVpcsFilters: infrafactory's filtered read finds its
+// run's VPC by tag-key, and data.aws_vpc sends cidr, isDefault and
+// tag:<Key>; each must select, not 501 and not list every VPC.
+func TestEC2_DescribeVpcsFilters(t *testing.T) {
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	a := createOK(t, srv, "CreateVpc", "vpcId", withTagSpec(url.Values{"CidrBlock": {"10.0.0.0/16"}}, 1, "vpc",
+		"infrafactory-run-id", "run-1", "Name", "a"))
+	b := createOK(t, srv, "CreateVpc", "vpcId", withTagSpec(url.Values{"CidrBlock": {"10.1.0.0/16"}}, 1, "vpc", "Name", "b"))
+
+	for _, tc := range []struct {
+		kv   []string
+		want []string
+	}{
+		{[]string{"tag-key", "infrafactory-run-id"}, []string{a}},
+		{[]string{"tag:Name", "b"}, []string{b}},
+		{[]string{"tag-value", "run-1"}, []string{a}},
+		{[]string{"cidr", "10.1.0.0/16"}, []string{b}},
+		{[]string{"cidr-block-association.cidr-block", "10.0.0.0/16"}, []string{a}},
+		{[]string{"vpc-id", b, "state", "available"}, []string{b}},
+		{[]string{"owner-id", "000000000000"}, []string{a, b}},
+		{[]string{"is-default", "false"}, []string{a, b}},
+		{[]string{"isDefault", "true"}, nil},
+		{[]string{"tag:Name", "matches-nothing"}, nil},
+	} {
+		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeVpcs", ec2FilterParams(tc.kv...)).Vpcs, "%v", tc.kv)
+	}
+
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeVpcs", ec2FilterParams("dhcp-options-id", "dopt-fakeaws-default"))
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
+	assert.Equal(t, "DescribeVpcs: not modelled by fakeaws: dhcp-options-id", extractEC2Tag(body, "Message"))
+	assert.Equal(t, "filter-refused", lastClass(t, srv))
+}
+
+// TestEC2_DescribeSubnetsFilters: data.aws_subnet sends vpc-id with
+// availabilityZone, cidrBlock and tag:<Key>, and wants one subnet.
+func TestEC2_DescribeSubnetsFilters(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	vpc1, vpc2 := tagVPC(t, srv), tagVPC(t, srv)
+	subnet := func(vpc, cidr, az, name string) string {
+		return createOK(t, srv, "CreateSubnet", "subnetId", withTagSpec(url.Values{
+			"VpcId": {vpc}, "CidrBlock": {cidr}, "AvailabilityZone": {az},
+		}, 1, "subnet", "Name", name))
+	}
+	s1 := subnet(vpc1, "10.0.1.0/24", "us-east-1a", "one")
+	s2 := subnet(vpc1, "10.0.2.0/24", "us-east-1b", "two")
+	s3 := subnet(vpc2, "10.0.1.0/24", "us-east-1a", "three")
+	all := []string{s1, s2, s3}
+
+	for _, tc := range []struct {
+		kv   []string
+		want []string
+	}{
+		{[]string{"vpc-id", vpc1, "availability-zone", "us-east-1a"}, []string{s1}},
+		{[]string{"vpc-id", vpc1, "availabilityZone", "us-east-1b"}, []string{s2}},
+		{[]string{"tag:Name", "three"}, []string{s3}},
+		{[]string{"cidr-block", "10.0.2.0/24"}, []string{s2}},
+		{[]string{"cidrBlock", "10.0.2.0/24"}, []string{s2}},
+		{[]string{"cidr", "10.0.2.0/24"}, []string{s2}},
+		{[]string{"availability-zone-id", "us-east-1b-az1"}, []string{s2}},
+		{[]string{"availabilityZoneId", "us-east-1a-az1"}, []string{s1, s3}},
+		{[]string{"subnet-id", s3}, []string{s3}},
+		{[]string{"default-for-az", "true"}, nil},
+		{[]string{"defaultForAz", "false", "state", "available", "owner-id", "000000000000"}, all},
+		{[]string{"map-public-ip-on-launch", "false"}, all},
+	} {
+		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeSubnets", ec2FilterParams(tc.kv...)).Subnets, "%v", tc.kv)
+	}
+}
+
+// TestEC2_DescribeInternetGatewaysFilters: a VPC's gateway is found by
+// attachment.vpc-id, and attachment.state=available leaves out a
+// detached gateway, which has no attachment.
+func TestEC2_DescribeInternetGatewaysFilters(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	vpcA, vpcB := tagVPC(t, srv), tagVPC(t, srv)
+	igw := func(vpc, name string) string {
+		id := createOK(t, srv, "CreateInternetGateway", "internetGatewayId", withTagSpec(url.Values{}, 1, "internet-gateway", "Name", name))
+		if vpc != "" {
+			resp, body := ec2Call(t, srv, tagRegion, "AttachInternetGateway", url.Values{"InternetGatewayId": {id}, "VpcId": {vpc}})
+			require.Equal(t, http.StatusOK, resp.StatusCode, "AttachInternetGateway: %s", body)
+		}
+		return id
+	}
+	igwA, igwB, detached := igw(vpcA, "a"), igw(vpcB, "b"), igw("", "detached")
+
+	for _, tc := range []struct {
+		kv   []string
+		want []string
+	}{
+		{[]string{"attachment.vpc-id", vpcA}, []string{igwA}},
+		{[]string{"attachment.state", "available"}, []string{igwA, igwB}},
+		{[]string{"internet-gateway-id", detached}, []string{detached}},
+		{[]string{"tag:Name", "b"}, []string{igwB}},
+		{[]string{"owner-id", "000000000000"}, []string{igwA, igwB, detached}},
+	} {
+		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeInternetGateways", ec2FilterParams(tc.kv...)).Gateways, "%v", tc.kv)
+	}
+}
+
+// TestEC2_DescribeRouteTablesLookupFilters: data.aws_route_table sends
+// route-table-id, vpc-id, association.subnet-id and tag:<Key>.
+func TestEC2_DescribeRouteTablesLookupFilters(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	vpc := tagVPC(t, srv)
+	rt := func(name string) string {
+		return createOK(t, srv, "CreateRouteTable", "routeTableId", withTagSpec(url.Values{"VpcId": {vpc}}, 1, "route-table", "Name", name))
+	}
+	public, private := rt("public"), rt("private")
+	other := createOK(t, srv, "CreateRouteTable", "routeTableId", withTagSpec(url.Values{"VpcId": {tagVPC(t, srv)}}, 1, "route-table", "Name", "public"))
+	subnet := createOK(t, srv, "CreateSubnet", "subnetId", url.Values{"VpcId": {vpc}, "CidrBlock": {"10.0.1.0/24"}})
+	createOK(t, srv, "AssociateRouteTable", "associationId", url.Values{"RouteTableId": {private}, "SubnetId": {subnet}})
+
+	for _, tc := range []struct {
+		kv   []string
+		want []string
+	}{
+		{[]string{"vpc-id", vpc, "tag:Name", "public"}, []string{public}},
+		{[]string{"tag:Name", "public"}, []string{public, other}},
+		{[]string{"route-table-id", private}, []string{private}},
+		{[]string{"association.subnet-id", subnet}, []string{private}},
+	} {
+		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeRouteTables", ec2FilterParams(tc.kv...)).RouteTables, "%v", tc.kv)
+	}
 }

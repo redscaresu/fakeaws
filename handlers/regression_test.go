@@ -1320,3 +1320,32 @@ func TestRegressionDescribeLiteralNIndexRefused(t *testing.T) {
 		assert.Equal(t, action+": not modelled by fakeaws: "+key, extractEC2Tag(body, "Message"), action)
 	}
 }
+
+// TestRegressionNetworkDescribesHonourTagFilters: DescribeVpcs and
+// DescribeInternetGateways refused every Filter.N, and DescribeSubnets
+// and DescribeRouteTables refused tag:<Key>, so infrafactory's filtered
+// read of its own run's network got 501. Each now selects by tag.
+func TestRegressionNetworkDescribesHonourTagFilters(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	kinds := map[string]taggedKind{}
+	for _, k := range taggedKinds {
+		kinds[k.resourceType] = k
+	}
+	for _, tc := range []struct {
+		kind string
+		ids  func(describedIDs) []string
+	}{
+		{"vpc", func(d describedIDs) []string { return d.Vpcs }},
+		{"subnet", func(d describedIDs) []string { return d.Subnets }},
+		{"internet-gateway", func(d describedIDs) []string { return d.Gateways }},
+		{"route-table", func(d describedIDs) []string { return d.RouteTables }},
+	} {
+		kind, ok := kinds[tc.kind]
+		require.True(t, ok, "no taggedKinds entry for %s", tc.kind)
+		picked := kind.create(t, srv, "Name", "picked")
+		kind.create(t, srv, "Name", "other")
+		action, _ := kind.describe(picked)
+		got := tc.ids(describeIDs(t, srv, action, ec2FilterParams("tag:Name", "picked")))
+		assert.Equal(t, []string{picked}, got, action)
+	}
+}
