@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"cmp"
-	"fmt"
 	"maps"
 	"net/http"
 	"net/url"
@@ -30,9 +29,12 @@ type ec2Filter struct {
 // parseEC2Filters reads Filter.N.Name / Filter.N.Value.M into one
 // ec2Filter per N, in N order. A name repeated across Filter.N stays
 // separate filters, and every index is read, so a gap in N or M drops
-// nothing (unlike queryListValues, which stops at the first gap). A
-// Filter.N fakeaws cannot read is marked, never dropped, so refuse
-// names it.
+// nothing. A Filter.N fakeaws cannot read is marked, never dropped, so
+// refuse names it.
+//
+// MUST[ec2-filter-and-across-or-within]: a row passes when it matches
+// every Filter.N (AND), each by any of its Value.M (OR); the same name
+// in two Filter.N is two filters, never one merged list of values.
 func parseEC2Filters(p url.Values) []ec2Filter {
 	byN := map[string]*ec2Filter{}
 	for k, vs := range p {
@@ -63,9 +65,7 @@ func parseEC2Filters(p url.Values) []ec2Filter {
 			f.unreadable = true
 		}
 	}
-	ns := slices.SortedFunc(maps.Keys(byN), func(a, b string) int {
-		return cmp.Or(cmp.Compare(len(a), len(b)), strings.Compare(a, b))
-	})
+	ns := slices.SortedFunc(maps.Keys(byN), ec2IndexOrder)
 	out := make([]ec2Filter, len(ns))
 	for i, n := range ns {
 		out[i] = *byN[n]
@@ -75,8 +75,12 @@ func parseEC2Filters(p url.Values) []ec2Filter {
 
 // ec2Wildcard compiles an AWS filter value: * matches any run of
 // characters, / included, ? zero or one, and a backslash makes the
-// next character literal. Not path.Match, whose * stops at /. It
-// errors on a value too large to compile (millions of *).
+// next character literal. It errors on a value too large to compile
+// (millions of *).
+//
+// MUST[ec2-filter-wildcard-crosses-slash]: * matches across /, so
+// ubuntu/images/* matches ubuntu/images/hvm-ssd/x, as AWS's image
+// names need. Not path.Match, whose * stops at /.
 func ec2Wildcard(value string) (*regexp.Regexp, error) {
 	var b strings.Builder
 	b.WriteString(`(?s)^`)
@@ -112,15 +116,22 @@ func ec2IsIndex(s string) bool {
 	return s != "" && strings.Trim(s, "0123456789") == ""
 }
 
+// ec2IndexOrder orders list indexes numerically: 2 before 10.
+func ec2IndexOrder(a, b string) int {
+	return cmp.Or(cmp.Compare(len(a), len(b)), strings.Compare(a, b))
+}
+
 // ec2FilterTable is what one Describe honours: values maps each
 // filter name to a row's values for it, "" meaning the row lacks the
 // attribute, so it matches no value, * and ? included (an unattached
-// ENI's attachment.instance-id). Setting tagID opts the table
-// into tag:<Key>, tag-key and tag-value, matched against the tags of
-// the resource tagID(row) names.
+// ENI's attachment.instance-id), but for the names in emptyIsValue,
+// whose "" is a value (a tag's empty value: * and an empty value match
+// it). Setting tagID opts the table into tag:<Key>, tag-key and
+// tag-value, matched against the tags of the resource tagID(row) names.
 type ec2FilterTable[R any] struct {
-	values map[string]func(R) []string
-	tagID  func(R) string
+	values       map[string]func(R) []string
+	emptyIsValue []string
+	tagID        func(R) string
 }
 
 // unmodelled lists what t cannot honour in filters: each name it
@@ -159,6 +170,9 @@ func (t ec2FilterTable[R]) matches(row R, filters []ec2Filter, tags map[string][
 // tag's value is kept even when "": tag-value=* matches it.
 func (t ec2FilterTable[R]) valuesFor(name string) func(R, map[string][]ec2ResourceTagXML) []string {
 	if get := t.values[name]; get != nil {
+		if slices.Contains(t.emptyIsValue, name) {
+			return func(row R, _ map[string][]ec2ResourceTagXML) []string { return get(row) }
+		}
 		return func(row R, _ map[string][]ec2ResourceTagXML) []string {
 			// Clone first: get may hand back the row's own slice.
 			return slices.DeleteFunc(slices.Clone(get(row)), func(v string) bool { return v == "" })
@@ -189,12 +203,35 @@ func (t ec2FilterTable[R]) valuesFor(name string) func(R, map[string][]ec2Resour
 	}
 }
 
-// refuse answers action with one 501 NotImplemented naming, deduped
-// and sorted bytewise, all that t cannot honour in filters and each
-// param the caller did not read (unread holds raw param keys), and
-// reports whether it wrote. 501 is fakeaws's own refusal, not a claim
-// about AWS: AWS answers an unknown filter name 400
-// InvalidParameterValue, which would blame valid HCL.
+// read parses req's Filter.N and refuses, in one answer, each filter t
+// cannot honour and each other param whose name (ec2ParamName) is not
+// in reads, but MaxResults and NextToken: fakeaws answers every
+// Describe in one page. A key with a literal N segment (VpcId.N itself)
+// is refused too: its name would equal the declared VpcId.N, but
+// queryListValues reads only digit indexes and would drop it. It
+// reports false when it refused.
+func (t ec2FilterTable[R]) read(w http.ResponseWriter, req awsproto.QueryRPCRequest, reads ...string) ([]ec2Filter, bool) {
+	var unread []string
+	for k := range req.Params {
+		if strings.HasPrefix(k, "Filter.") || k == "MaxResults" || k == "NextToken" {
+			continue
+		}
+		if !slices.Contains(reads, ec2ParamName(k)) || slices.Contains(strings.Split(k, "."), "N") {
+			unread = append(unread, k)
+		}
+	}
+	filters := parseEC2Filters(req.Params)
+	return filters, !t.refuse(w, req.Action, filters, unread)
+}
+
+// refuse answers action through ec2Refuse naming all that t cannot
+// honour in filters and each param the caller did not read (unread
+// holds raw param keys), and reports whether it wrote.
+//
+// MUST[ec2-filter-refusal-names-every-name-sorted]: one answer names
+// every filter and param refused, each once, sorted bytewise, after
+// "<action>: not modelled by fakeaws: ", so the same request always
+// reads the same refusal.
 func (t ec2FilterTable[R]) refuse(w http.ResponseWriter, action string, filters []ec2Filter, unread []string) bool {
 	names := t.unmodelled(filters)
 	for _, k := range unread {
@@ -203,9 +240,7 @@ func (t ec2FilterTable[R]) refuse(w http.ResponseWriter, action string, filters 
 	if len(names) == 0 {
 		return false
 	}
-	slices.Sort(names)
-	awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusNotImplemented, "NotImplemented",
-		fmt.Sprintf("%s: %s: %s", action, ec2NotModelled, strings.Join(slices.Compact(names), ", ")))
+	ec2Refuse(w, action, names...)
 	return true
 }
 

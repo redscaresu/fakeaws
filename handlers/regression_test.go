@@ -1258,3 +1258,65 @@ func TestRegressionSubnetCIDROutsideVPCRefused(t *testing.T) {
 	assertEC2Error(t, createSubnet("10.80.0.0/29"), "InvalidSubnet.Range", "smaller than /28")
 	assert.NoError(t, createSubnet("10.80.1.0/24"), "inside the VPC")
 }
+
+// TestRegressionDescribeTagsValueMatchesEmptyValue: wiring DescribeTags
+// through the filter evaluator read a tag's empty value as absent, so an
+// empty value stopped matching Env="" (it did on main, which matched
+// exactly) and value=* did not match it either, though AWS's * matches
+// an empty value.
+func TestRegressionDescribeTagsValueMatchesEmptyValue(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	vpc := tagVPC(t, srv)
+	resp, body := ec2Call(t, srv, tagRegion, "CreateTags", tagParams(url.Values{"ResourceId.1": {vpc}}, "Tag.", "Env", "", "Name", "web"))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateTags: %s", body)
+
+	keys := func(value string) []string {
+		var out []string
+		for _, tag := range describeTags(t, srv, tagRegion, url.Values{"Filter.1.Name": {"value"}, "Filter.1.Value.1": {value}}) {
+			out = append(out, tag.Key)
+		}
+		return out
+	}
+	assert.ElementsMatch(t, []string{"Env", "Name"}, keys("*"), "value=* matches the empty value too")
+	assert.Equal(t, []string{"Env"}, keys(""), "an empty value matches the empty value")
+}
+
+// TestRegressionQueryListReadsEveryIndex: queryListValues, shared by
+// EC2, IAM and RDS, stopped at the first gap in a list's indexes, so
+// VpcSecurityGroupId.3 after .1 with no .2 was dropped. Every index is
+// read now.
+func TestRegressionQueryListReadsEveryIndex(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	const region = "us-east-1"
+	resp, body := rdsCall(t, srv, region, "CreateDBCluster", url.Values{
+		"DBClusterIdentifier": {"gap"}, "Engine": {"aurora-postgresql"},
+		"VpcSecurityGroupIds.VpcSecurityGroupId.1": {"sg-first"},
+		"VpcSecurityGroupIds.VpcSecurityGroupId.3": {"sg-third"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateDBCluster: %s", body)
+	resp, body = rdsCall(t, srv, region, "DescribeDBClusters", url.Values{"DBClusterIdentifier": {"gap"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeDBClusters: %s", body)
+	for _, sg := range []string{"sg-first", "sg-third"} {
+		assert.Contains(t, string(body), "<VpcSecurityGroupId>"+sg+"</VpcSecurityGroupId>", "stored")
+	}
+}
+
+// TestRegressionDescribeLiteralNIndexRefused: read compared a raw key's
+// ec2ParamName with the declared names, and a key spelled with a literal
+// N (VpcId.N=x) equals the declared VpcId.N, so it was accepted while
+// queryListValues, reading only digit indexes, dropped it: DescribeVpcs
+// answered 200 with every VPC. A literal N is refused, named.
+func TestRegressionDescribeLiteralNIndexRefused(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	tagVPC(t, srv)
+	for action, key := range map[string]string{
+		"DescribeVpcs":      "VpcId.N",
+		"DescribeInstances": "InstanceId.N",
+		"DescribeImages":    "Owner.N",
+		"DescribeSnapshots": "Owner.N",
+	} {
+		resp, body := ec2Call(t, srv, tagRegion, action, url.Values{key: {"x"}})
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s %s: %s", action, key, body)
+		assert.Equal(t, action+": not modelled by fakeaws: "+key, extractEC2Tag(body, "Message"), action)
+	}
+}

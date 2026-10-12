@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -101,8 +103,8 @@ func TestEC2_CreateDescribeDeleteVPC(t *testing.T) {
 func TestEC2_CreateVPC_MissingCidr(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, _ := ec2Call(t, srv, "us-east-1", "CreateVpc", nil)
-	// Missing required CidrBlock surfaces as ErrConflict → 409.
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateVpc with no CidrBlock")
+	// No CidrBlock is refused as unmodelled: AWS also takes Ipv4IpamPoolId.
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "CreateVpc with no CidrBlock")
 }
 
 func TestEC2_SubnetCRUDAndFK(t *testing.T) {
@@ -1071,7 +1073,7 @@ func TestEC2_TerminateInstancesDeletesENI(t *testing.T) {
 	resp, _ := ec2Call(t, srv, region, "DescribeNetworkInterfaces", url.Values{
 		"Filter.1.Name": {"description"}, "Filter.1.Value.1": {"x"},
 	})
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "unsupported filter is refused, not ignored")
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "unsupported filter is refused, not ignored")
 
 	state := instanceState(t, srv)
 	require.Len(t, state.Instances, 1)
@@ -1174,7 +1176,7 @@ func TestEC2_EIPLifecycle(t *testing.T) {
 
 	// Domain=standard rejected (v1 supports vpc only).
 	resp, _ = ec2Call(t, srv, region, "AllocateAddress", url.Values{"Domain": {"standard"}})
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AllocateAddress Domain=standard")
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "AllocateAddress Domain=standard")
 
 	// DescribeAddresses with allocationId filter.
 	params := url.Values{}
@@ -1515,7 +1517,7 @@ func TestEC2_TagsNetworkInterfaceSpecAndFilters(t *testing.T) {
 	assert.Empty(t, describeTags(t, srv, "eu-west-1", nil), "other region")
 
 	resp, _ := ec2Call(t, srv, tagRegion, "DescribeTags", url.Values{"Filter.1.Name": {"tag:Name"}, "Filter.1.Value.1": {"web"}})
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "unsupported filter is refused, not ignored")
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "unsupported filter is refused, not ignored")
 
 	resp, body := ec2Call(t, srv, tagRegion, "TerminateInstances", url.Values{"InstanceId.1": {id}})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "TerminateInstances: %s", body)
@@ -1534,13 +1536,17 @@ func TestEC2_TagsUnknownResource(t *testing.T) {
 		"sg-doesnotexist":     "InvalidGroup.NotFound",
 		"i-doesnotexist":      "InvalidInstanceID.NotFound",
 		"eni-doesnotexist":    "InvalidNetworkInterfaceID.NotFound",
-		"vol-0123":            "InvalidID",
 	} {
 		for _, action := range []string{"CreateTags", "DeleteTags"} {
 			resp, body := ec2Call(t, srv, tagRegion, action, tagParams(url.Values{"ResourceId.1": {id}}, "Tag.", "k", "v"))
 			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s %s: %s", action, id, body)
 			assert.Equal(t, code, extractEC2Tag(body, "Code"), "%s %s: %s", action, id, body)
 		}
+	}
+	for _, action := range []string{"CreateTags", "DeleteTags"} {
+		resp, body := ec2Call(t, srv, tagRegion, action, tagParams(url.Values{"ResourceId.1": {"vol-0123"}}, "Tag.", "k", "v"))
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s on a type fakeaws does not tag: %s", action, body)
+		assert.Equal(t, action+": not modelled by fakeaws: tags on vol-0123", extractEC2Tag(body, "Message"), action)
 	}
 
 	// A known VPC alongside an unknown one tags neither.
@@ -1615,12 +1621,12 @@ func sweepClient(srv *httptest.Server) *ec2.Client {
 // sweepFilter is a Filter.N none of the sweep's Describes model.
 var sweepFilter = []ec2types.Filter{{Name: aws.String("tag:Owner"), Values: []string{"sweep"}}}
 
-// assertRefused asserts err is fakeaws's 409 for an unmodelled param.
+// assertRefused asserts err is fakeaws's 501 for an unmodelled param.
 func assertRefused(t *testing.T, err error, msg string) {
 	t.Helper()
 	var re *awshttp.ResponseError
 	if assert.ErrorAs(t, err, &re, msg) {
-		assert.Equal(t, http.StatusConflict, re.HTTPStatusCode(), msg)
+		assert.Equal(t, http.StatusNotImplemented, re.HTTPStatusCode(), msg)
 	}
 }
 
@@ -1835,7 +1841,187 @@ func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 	}
 
 	resp, _ := ec2Call(t, srv, tagRegion, "DescribeRouteTables", filter("route.gateway-id", "igw-1"))
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "an unmodelled filter is refused, not ignored")
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "an unmodelled filter is refused, not ignored")
+}
+
+// ec2DescribeArms are the Describe names in handleEC2's case arms at
+// fakeaws 1993583, ec2DescribeExempt the three among them that take no
+// Filter in the AWS API.
+var (
+	ec2DescribeArms = []string{
+		"DescribeVpcs", "DescribeVpcAttribute", "DescribeSubnets", "DescribeNetworkInterfaces",
+		"DescribeInternetGateways", "DescribeRouteTables", "DescribeAddresses", "DescribeAddressesAttribute",
+		"DescribeInstances", "DescribeKeyPairs", "DescribeImages", "DescribeVolumes", "DescribeNatGateways",
+		"DescribeSnapshots", "DescribeLaunchTemplates", "DescribeInstanceTypes", "DescribeTags",
+		"DescribeInstanceAttribute", "DescribeSecurityGroups",
+	}
+	ec2DescribeExempt = []string{"DescribeVpcAttribute", "DescribeInstanceAttribute", "DescribeAddressesAttribute"}
+)
+
+// handleEC2DescribeNames scans every case arm of handleEC2 in ec2.go
+// and returns every Describe name on each case line.
+func handleEC2DescribeNames(t *testing.T) []string {
+	t.Helper()
+	src, err := os.ReadFile("ec2.go")
+	require.NoError(t, err)
+	_, body, found := strings.Cut(string(src), "func (app *Application) handleEC2(")
+	require.True(t, found, "no handleEC2 in ec2.go")
+	body, _, _ = strings.Cut(body, "\n}\n")
+	var names []string
+	for _, line := range regexp.MustCompile(`(?m)^\s*case\s+(.+):`).FindAllStringSubmatch(body, -1) {
+		for _, m := range regexp.MustCompile(`"(Describe\w*)"`).FindAllStringSubmatch(line[1], -1) {
+			names = append(names, m[1])
+		}
+	}
+	return names
+}
+
+func TestContract_ec2_describe_filter_never_ignored(t *testing.T) {
+	scanned := handleEC2DescribeNames(t)
+	require.ElementsMatch(t, ec2DescribeArms, scanned, "handleEC2's Describe arms")
+	for _, name := range ec2DescribeExempt {
+		require.Contains(t, scanned, name, "exemption %s is no longer an arm", name)
+	}
+
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	probes := []struct {
+		name   string
+		params url.Values
+	}{
+		{"fakeaws-no-such-filter", url.Values{"Filter.1.Name": {"fakeaws-no-such-filter"}, "Filter.1.Value.1": {"x"}}},
+		{"FakeawsNoSuchParam.N", url.Values{"FakeawsNoSuchParam.1": {"x"}}},
+	}
+	for _, action := range ec2DescribeArms {
+		if slices.Contains(ec2DescribeExempt, action) {
+			continue
+		}
+		for _, probe := range probes {
+			resp, body := ec2Call(t, srv, tagRegion, action, probe.params)
+			assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s %s: %s", action, probe.name, body)
+			assert.Equal(t, "NotImplemented", extractEC2Tag(body, "Code"), "%s %s", action, probe.name)
+			assert.Equal(t, action+": not modelled by fakeaws: "+probe.name, extractEC2Tag(body, "Message"), "%s %s", action, probe.name)
+			assert.Equal(t, "filter-refused", lastClass(t, srv), "%s %s", action, probe.name)
+		}
+	}
+}
+
+func TestContract_ec2_filter_and_across_or_within(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	a, b := tagVPC(t, srv), tagVPC(t, srv)
+	rtA := createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {a}})
+	rtB := createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {b}})
+	subnet := createOK(t, srv, "CreateSubnet", "subnetId", url.Values{"VpcId": {b}, "CidrBlock": {"10.0.1.0/24"}})
+
+	routeTables := func(params url.Values) []string {
+		resp, body := ec2Call(t, srv, tagRegion, "DescribeRouteTables", params)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%v: %s", params, body)
+		var out struct {
+			IDs []string `xml:"routeTableSet>item>routeTableId"`
+		}
+		require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+		return out.IDs
+	}
+	assert.Empty(t, routeTables(url.Values{
+		"Filter.1.Name": {"vpc-id"}, "Filter.1.Value.1": {a},
+		"Filter.2.Name": {"vpc-id"}, "Filter.2.Value.1": {b},
+	}), "vpc-id A in Filter.1 and B in Filter.2: no table is in both")
+	assert.ElementsMatch(t, []string{rtA, rtB}, routeTables(url.Values{
+		"Filter.1.Name": {"vpc-id"}, "Filter.1.Value.1": {a}, "Filter.1.Value.2": {b},
+	}), "Value.1 A and Value.2 B in one Filter.N: either")
+
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeSubnets", url.Values{
+		"Filter.1.Name": {"vpc-id"}, "Filter.1.Value.1": {"vpc-matches-nothing"}, "Filter.1.Value.2": {b},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeSubnets: %s", body)
+	var subnets struct {
+		IDs []string `xml:"subnetSet>item>subnetId"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &subnets), "%s", body)
+	assert.Equal(t, []string{subnet}, subnets.IDs, "a Value.2 that matches is read")
+}
+
+func TestContract_ec2_filter_wildcard_crosses_slash(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const name = "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04"
+	resp, body := ec2Call(t, srv, tagRegion, "CreateTags", tagParams(url.Values{"ResourceId.1": {tagVPC(t, srv)}}, "Tag.", "Name", name))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateTags: %s", body)
+
+	for pattern, want := range map[string]bool{
+		"ubuntu/images/*":      true,
+		"ubuntu/*-22.0?":       true,
+		"*/hvm-ssd/*":          true,
+		"ubuntu/other/*":       false,
+		"ubuntu/images/hvm-ss": false,
+	} {
+		tags := describeTags(t, srv, tagRegion, url.Values{"Filter.1.Name": {"value"}, "Filter.1.Value.1": {pattern}})
+		assert.Equal(t, want, len(tags) == 1 && tags[0].Value == name, "%s: %v", pattern, tags)
+	}
+}
+
+// TestEC2_DescribeRefusesUnreadParams: a Describe param fakeaws does
+// not read is refused by name, never ignored.
+func TestEC2_DescribeRefusesUnreadParams(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	for _, c := range []struct {
+		action, param, name string
+	}{
+		{"DescribeImages", "ExecutableBy.1", "ExecutableBy.N"},
+		{"DescribeKeyPairs", "KeyPairId.1", "KeyPairId.N"},
+		{"DescribeSecurityGroups", "GroupName.1", "GroupName.N"},
+		{"DescribeAddresses", "PublicIp.1", "PublicIp.N"},
+		{"DescribeSubnets", "SubnetId.x", "SubnetId.x"},
+	} {
+		resp, body := ec2Call(t, srv, tagRegion, c.action, url.Values{c.param: {"all"}})
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s %s: %s", c.action, c.param, body)
+		assert.Equal(t, c.action+": not modelled by fakeaws: "+c.name, extractEC2Tag(body, "Message"), c.action)
+	}
+}
+
+// TestEC2_DescribeImagesReadsIncludeDeprecated: data.aws_ami always
+// sends IncludeDeprecated; no image is deprecated, so it is read, not
+// refused.
+func TestEC2_DescribeImagesReadsIncludeDeprecated(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeImages", url.Values{"Owner.1": {"099720109477"}, "IncludeDeprecated": {"false"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	var out struct {
+		IDs []string `xml:"imagesSet>item>imageId"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	assert.ElementsMatch(t, []string{"ami-0ubuntu2004", "ami-0ubuntu2204"}, out.IDs)
+}
+
+// TestEC2_DescribeIdListReadsEveryIndex: VpcId.1 and VpcId.3 with no
+// VpcId.2 look up both.
+func TestEC2_DescribeIdListReadsEveryIndex(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	a, b := tagVPC(t, srv), tagVPC(t, srv)
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeVpcs", url.Values{"VpcId.1": {a}, "VpcId.3": {b}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	var out struct {
+		IDs []string `xml:"vpcSet>item>vpcId"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	assert.Equal(t, []string{a, b}, out.IDs)
+}
+
+func TestContract_ec2_filter_refusal_names_every_name_sorted(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	params := url.Values{
+		"Filter.1.Name": {"zz"}, "Filter.1.Value.1": {"x"},
+		"Filter.2.Name": {"aa"}, "Filter.2.Value.1": {"x"},
+		"Filter.3.Name": {"zz"}, "Filter.3.Value.1": {"x"},
+		"Filter.4.Name": {"vpc-id"}, "Filter.4.Value.1": {"vpc-1"},
+		"GroupName.2": {"web"}, "GroupName.1": {"db"}, "AllowReassociation": {"true"},
+	}
+	resp, first := ec2Call(t, srv, tagRegion, "DescribeRouteTables", params)
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", first)
+	assert.Equal(t, "NotImplemented", extractEC2Tag(first, "Code"))
+	assert.Equal(t, "DescribeRouteTables: not modelled by fakeaws: AllowReassociation, GroupName.N, aa, zz", extractEC2Tag(first, "Message"))
+	for range 20 {
+		_, body := ec2Call(t, srv, tagRegion, "DescribeRouteTables", params)
+		assert.Equal(t, string(first), string(body), "the same request reads the same refusal")
+	}
 }
 
 // TestEC2_AnswersStoredAccount: under a stored account every ownerId,

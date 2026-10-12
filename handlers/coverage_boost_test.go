@@ -346,41 +346,42 @@ func TestCoverage_EC2ErrorPaths(t *testing.T) {
 	resp, _ = ec2Call(t, srv, region, "DeleteKeyPair", url.Values{"KeyName": {"missing"}})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteKeyPair missing")
 
-	// DescribeSecurityGroups with an unmodelled Filter.N → 409.
+	// DescribeSecurityGroups with an unmodelled Filter.N → 501.
 	resp, _ = ec2Call(t, srv, region, "DescribeSecurityGroups", url.Values{"Filter.1.Name": {"group-name"}, "Filter.1.Value.1": {"default"}})
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DescribeSecurityGroups Filter.N")
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "DescribeSecurityGroups Filter.N")
 
-	// Authorize on missing GroupId → 409 (no body).
+	// Authorize on missing GroupId → 501 (AWS also takes GroupName).
 	resp, _ = ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", nil)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AuthorizeSecurityGroupIngress no GroupId")
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "AuthorizeSecurityGroupIngress no GroupId")
 
-	// Authorize with no IpPermissions → 409.
+	// Authorize with no IpPermissions → 501 (AWS also takes the legacy form).
 	resp, _ = ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{"GroupId": {"sg-x"}})
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "Authorize no rules")
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "Authorize no rules")
 
 	// CreateRouteTable missing VpcId → 409.
 	resp, _ = ec2Call(t, srv, region, "CreateRouteTable", nil)
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateRouteTable no vpc")
 
-	// AssociateRouteTable missing args → 409.
+	// AssociateRouteTable missing args → 501 (AWS also takes GatewayId).
 	resp, _ = ec2Call(t, srv, region, "AssociateRouteTable", nil)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AssociateRouteTable no args")
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "AssociateRouteTable no args")
 
 	// DisassociateRouteTable missing → 404.
 	resp, _ = ec2Call(t, srv, region, "DisassociateRouteTable", url.Values{"AssociationId": {"missing"}})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DisassociateRouteTable missing")
 
-	// AllocateAddress with bad domain → 409.
+	// AllocateAddress with a classic domain → 501.
 	resp, _ = ec2Call(t, srv, region, "AllocateAddress", url.Values{"Domain": {"standard"}})
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AllocateAddress bad domain")
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "AllocateAddress bad domain")
 
 	// ReleaseAddress missing → 400 InvalidAllocationID.NotFound, as EC2.
 	resp, _ = ec2Call(t, srv, region, "ReleaseAddress", url.Values{"AllocationId": {"missing"}})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "ReleaseAddress missing")
 
-	// RunInstances missing required fields → 409.
+	// RunInstances missing SubnetId, ImageId, InstanceType → 501 (AWS
+	// defaults the subnet and InstanceType).
 	resp, _ = ec2Call(t, srv, region, "RunInstances", nil)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "RunInstances no args")
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "RunInstances no args")
 
 	// TerminateInstances missing InstanceId.<n> → 409.
 	resp, _ = ec2Call(t, srv, region, "TerminateInstances", nil)

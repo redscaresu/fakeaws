@@ -362,22 +362,17 @@ func (r *Repository) GetSubnet(account, region, id string) (*EC2Subnet, error) {
 	return &s, nil
 }
 
-// ListSubnets returns the account's subnets, optionally filtered by
-// region and/or VPC. Empty region = all regions (state-gather path);
-// non-empty region scopes results to a single region (Codex pass 8
-// BLOCKING #1 — DescribeSubnets must not leak across regions).
-func (r *Repository) ListSubnets(account, region, vpcID string) ([]*EC2Subnet, error) {
+// ListSubnets returns the account's subnets. Empty region = all
+// regions (state-gather path); non-empty region scopes results to a
+// single region (Codex pass 8 BLOCKING #1 — DescribeSubnets must not
+// leak across regions).
+func (r *Repository) ListSubnets(account, region string) ([]*EC2Subnet, error) {
 	var rows *sql.Rows
 	var err error
-	switch {
-	case region == "" && vpcID == "":
+	if region == "" {
 		rows, err = r.db.Query(`SELECT data FROM ec2_subnets WHERE account_id = ? ORDER BY id`, account)
-	case region == "" && vpcID != "":
-		rows, err = r.db.Query(`SELECT data FROM ec2_subnets WHERE account_id = ? AND vpc_id = ? ORDER BY id`, account, vpcID)
-	case region != "" && vpcID == "":
+	} else {
 		rows, err = r.db.Query(`SELECT data FROM ec2_subnets WHERE account_id = ? AND region = ? ORDER BY id`, account, region)
-	default:
-		rows, err = r.db.Query(`SELECT data FROM ec2_subnets WHERE account_id = ? AND region = ? AND vpc_id = ? ORDER BY id`, account, region, vpcID)
 	}
 	if err != nil {
 		return nil, err
