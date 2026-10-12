@@ -190,18 +190,13 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 	case "ListRolePolicies":
 		app.iamListRolePolicies(w, account, req)
 	case "PutRolePolicy":
-		// Inline policy attachment. terraform-provider-aws's
-		// aws_iam_role_policy resource uses this. We don't persist
-		// inline policies (no scenario reads them back); a 200 envelope
-		// is enough to unblock the apply.
-		app.iamNoOpSuccess(w, "PutRolePolicy")
+		// Inline role policies (aws_iam_role_policy), backed by
+		// role_inline_policies.
+		app.iamPutRolePolicy(w, account, req)
 	case "DeleteRolePolicy":
-		// Companion to PutRolePolicy on destroy. Idempotent no-op.
-		app.iamNoOpSuccess(w, "DeleteRolePolicy")
+		app.iamDeleteRolePolicy(w, account, req)
 	case "GetRolePolicy":
-		// Refresh-path read. With no persisted inline state, return
-		// an empty document.
-		app.iamGetRolePolicyEmpty(w, account, req)
+		app.iamGetRolePolicy(w, account, req)
 	case "ListRoleTags", "ListUserTags", "ListPolicyTags", "ListInstanceProfileTags":
 		app.iamListTags(w, account, req, iamTaggedKinds[strings.TrimSuffix(strings.TrimPrefix(req.Action, "List"), "Tags")])
 	case "TagRole", "TagUser", "TagPolicy", "TagInstanceProfile":
@@ -445,8 +440,19 @@ func (app *Application) iamUpdateRole(w http.ResponseWriter, account string, req
 	awsproto.WriteQueryRPCResponse(w, "UpdateRole", nil)
 }
 
+// iamDeleteRole answers DeleteConflict while an inline policy or an
+// instance profile still holds the role, as IAM does; the provider
+// retries DeleteRole on that code.
+// UNVERIFIED(aws-code): DeleteConflict is from the IAM API reference's
+// DeleteRole errors, not a recording.
 func (app *Application) iamDeleteRole(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteRole(account, req.Params.Get("RoleName")); err != nil {
+	name := req.Params.Get("RoleName")
+	if err := app.repo.DeleteRole(account, name); err != nil {
+		if errors.Is(err, models.ErrInUse) {
+			awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusConflict,
+				"DeleteConflict", "Cannot delete entity, must remove inline policies and instance profiles first: role "+name)
+			return
+		}
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
@@ -1069,13 +1075,6 @@ func (app *Application) iamAttachRolePolicy(w http.ResponseWriter, account strin
 	awsproto.WriteQueryRPCResponse(w, "AttachRolePolicy", nil)
 }
 
-// iamNoOpSuccess returns a minimal 200 for IAM actions we accept but
-// don't persist (PutRolePolicy / DeleteRolePolicy). Real AWS returns
-// an action-named envelope; the provider just needs successful parse.
-func (app *Application) iamNoOpSuccess(w http.ResponseWriter, action string) {
-	awsproto.WriteQueryRPCResponse(w, action, nil)
-}
-
 // iamAttachUserPolicy attaches a managed policy to a user. Auto-seeds
 // AWS-managed policy ARNs the same way AttachRolePolicy does and
 // persists into user_policy_attachments so subsequent
@@ -1163,20 +1162,61 @@ type iamGetUserPolicyResult struct {
 	PolicyDocument string `xml:"PolicyDocument"`
 }
 
-// iamGetRolePolicyEmpty returns an empty inline-policy document for
-// the refresh path. Since PutRolePolicy is a no-op, there's nothing
-// to read back; the empty document avoids a 404 that would break the
-// provider's refresh.
-func (app *Application) iamGetRolePolicyEmpty(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	awsproto.WriteQueryRPCResponse(w, "GetRolePolicy", &struct {
-		RoleName       string `xml:"RoleName"`
-		PolicyName     string `xml:"PolicyName"`
-		PolicyDocument string `xml:"PolicyDocument"`
-	}{
-		RoleName:       req.Params.Get("RoleName"),
-		PolicyName:     req.Params.Get("PolicyName"),
-		PolicyDocument: `{"Version":"2012-10-17","Statement":[]}`,
+// iamPutRolePolicy stores a role's inline policy verbatim; a second
+// Put of the same name replaces it.
+func (app *Application) iamPutRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	p := req.Params
+	if err := app.repo.PutRolePolicy(account, p.Get("RoleName"), p.Get("PolicyName"), p.Get("PolicyDocument")); err != nil {
+		iamWriteRolePolicyError(w, p.Get("RoleName"), err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "PutRolePolicy", nil)
+}
+
+// iamDeleteRolePolicy removes a role's inline policy. An absent one is
+// NoSuchEntity, which the provider's destroy reads as already gone.
+func (app *Application) iamDeleteRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	p := req.Params
+	if err := app.repo.DeleteRolePolicy(account, p.Get("RoleName"), p.Get("PolicyName")); err != nil {
+		iamWriteRolePolicyError(w, p.Get("RoleName"), err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "DeleteRolePolicy", nil)
+}
+
+// iamGetRolePolicy reads back a role's inline policy, its document
+// URL-encoded as IAM sends it (the provider URL-decodes it).
+func (app *Application) iamGetRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	role, name := req.Params.Get("RoleName"), req.Params.Get("PolicyName")
+	doc, err := app.repo.GetRolePolicy(account, role, name)
+	if err != nil {
+		iamWriteRolePolicyError(w, role, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "GetRolePolicy", &iamGetRolePolicyResult{
+		RoleName:       role,
+		PolicyName:     name,
+		PolicyDocument: url.QueryEscape(doc),
 	})
+}
+
+// iamGetRolePolicyResult — named for the same reason as
+// iamGetUserPolicyResult.
+type iamGetRolePolicyResult struct {
+	RoleName       string `xml:"RoleName"`
+	PolicyName     string `xml:"PolicyName"`
+	PolicyDocument string `xml:"PolicyDocument"`
+}
+
+// iamWriteRolePolicyError writes an inline role policy call's failure,
+// NoSuchEntity for a missing role or policy as IAM does.
+func iamWriteRolePolicyError(w http.ResponseWriter, role string, err error) {
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
+			"NoSuchEntity", "The role policy or role with name "+role+" cannot be found.")
+		return
+	}
+	awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 }
 
 func (app *Application) iamDetachRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
@@ -1246,20 +1286,23 @@ type iamListAttachedRolePoliciesResult struct {
 	IsTruncated      bool                `xml:"IsTruncated"`
 }
 
-// iamListRolePolicies returns the inline-policy names attached to a
-// role. terraform-provider-aws calls this as part of the aws_iam_role
-// Read flow after CreateRole; returning the default unsupported-action
-// 404 made the provider conclude the role didn't exist. We model the
-// real IAM behavior: 404 ResourceNotFoundException when the role is
-// missing, otherwise an empty PolicyNames list (no inline-policy
-// storage in fakeaws yet — separate handler when needed).
+// iamListRolePolicies returns the inline-policy names on a role from
+// role_inline_policies. terraform-provider-aws calls this as part of
+// the aws_iam_role Read flow after CreateRole; returning the default
+// unsupported-action 404 made the provider conclude the role didn't
+// exist. A missing role is 404 ResourceNotFoundException.
 func (app *Application) iamListRolePolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("RoleName")
 	if _, err := app.repo.GetRole(account, name); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "ListRolePolicies", &iamListRolePoliciesResult{PolicyNames: []string{}})
+	names, err := app.repo.ListRolePolicies(account, name)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "ListRolePolicies", &iamListRolePoliciesResult{PolicyNames: names})
 }
 
 // iamTaggedKind is how IAM's Tag<Kind> / Untag<Kind> / List<Kind>Tags

@@ -61,6 +61,14 @@ entries:
     updates_exempt: true
     updates_exempt_reason: "Attachments are not patchable — they're delete + recreate. Tested via the misconfigured example."
     integration_test_func_name: "^TestIAM_AttachDetachRolePolicy$"
+  - aws_service: iam
+    aws_resource_type: aws_iam_role_policy
+    working_dir_name: iam_role_inline_policy
+    misconfigured_exempt: true
+    misconfigured_exempt_reason: "The one FK gate, PutRolePolicy on a missing role answering NoSuchEntity, is pinned in TestIAM_RoleInlinePolicyLifecycle; iam_attachment_missing_role already shows a missing-role apply failing."
+    updates_exempt: true
+    updates_exempt_reason: "A changed document is the same PutRolePolicy as Create (a second Put replaces it), pinned in TestIAM_RoleInlinePolicyLifecycle; a v1→v2 example would repeat the working one."
+    integration_test_func_name: "^TestIAM_RoleInlinePolicyLifecycle$"
 
   # S3 (S43-T8 handlers, S43-T14 e2e + this matrix entry).
   # Per concepts.md "Resolved decisions" item / examples/README.md:

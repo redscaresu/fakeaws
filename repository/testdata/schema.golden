@@ -477,6 +477,16 @@ CREATE TABLE resource_tags (
 		PRIMARY KEY (account_id, arn, key)
 	)
 
+=== table role_inline_policies
+CREATE TABLE role_inline_policies (
+		account_id TEXT NOT NULL,
+		role_name  TEXT NOT NULL,
+		name       TEXT NOT NULL,
+		document   TEXT NOT NULL,
+		PRIMARY KEY (account_id, role_name, name),
+		FOREIGN KEY (account_id, role_name) REFERENCES iam_roles(account_id, name) ON DELETE RESTRICT
+	)
+
 === table role_policy_attachments
 CREATE TABLE role_policy_attachments (
 		account_id TEXT NOT NULL,
