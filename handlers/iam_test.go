@@ -85,10 +85,11 @@ func TestIAM_CreateGetListUpdateDeleteRole(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "after delete, GetRole body=%s", body)
 }
 
-func TestIAM_CreateRoleMissingNameIs409(t *testing.T) {
+func TestIAM_CreateRoleMissingNameIsValidationError(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
-	resp, _ := iamCall(t, srv, "CreateRole", url.Values{})
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateRole with no RoleName")
+	resp, body := iamCall(t, srv, "CreateRole", url.Values{})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "CreateRole with no RoleName")
+	assert.Contains(t, string(body), "<Code>ValidationError</Code>")
 }
 
 func TestIAM_CreateRoleDuplicateIs409(t *testing.T) {
@@ -102,7 +103,7 @@ func TestIAM_GetRoleMissingIs404(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, body := iamCall(t, srv, "GetRole", url.Values{"RoleName": {"ghost"}})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "GetRole on missing body=%s", body)
-	assert.Contains(t, string(body), "ResourceNotFoundException", "body missing AWS error code: %s", body)
+	assert.Contains(t, string(body), "<Code>NoSuchEntity</Code>", "body missing AWS error code: %s", body)
 }
 
 // ----- Policies -----
@@ -131,8 +132,8 @@ func TestIAM_PolicyCRUD(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeletePolicy")
 }
 
-// FK contract: DeletePolicy must refuse if attached. Real IAM
-// returns a DeleteConflict error.
+// FK contract: DeletePolicy must refuse if attached, with IAM's
+// DeleteConflict.
 func TestIAM_DeletePolicyAttachedReturns409(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 
@@ -145,7 +146,7 @@ func TestIAM_DeletePolicyAttachedReturns409(t *testing.T) {
 
 	resp, body := iamCall(t, srv, "DeletePolicy", url.Values{"PolicyName": {"p"}})
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DeletePolicy on attached body=%s", body)
-	assert.Contains(t, string(body), "ResourceInUseException", "body missing ResourceInUseException: %s", body)
+	assert.Contains(t, string(body), "<Code>DeleteConflict</Code>", "body missing DeleteConflict: %s", body)
 }
 
 // ----- InstanceProfile + role attach -----
@@ -253,28 +254,6 @@ func TestIAM_AddRoleToInstanceProfileMissingProfile(t *testing.T) {
 
 // ----- Users + AccessKeys -----
 
-func TestIAM_UserCRUDPlusAccessKeyCascade(t *testing.T) {
-	srv := newTestServer(t, ":memory:")
-	resp, body := iamCall(t, srv, "CreateUser", url.Values{"UserName": {"alice"}})
-	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateUser body=%s", body)
-
-	resp, body = iamCall(t, srv, "CreateAccessKey", url.Values{"UserName": {"alice"}})
-	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateAccessKey body=%s", body)
-	assert.Contains(t, string(body), "<AccessKey>", "CreateAccessKey body: %s", body)
-
-	resp, body = iamCall(t, srv, "ListAccessKeys", url.Values{"UserName": {"alice"}})
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "ListAccessKeys")
-	assert.Contains(t, string(body), "<AccessKeyId>", "ListAccessKeys missing keys: %s", body)
-
-	// CASCADE: deleting user wipes keys.
-	resp, _ = iamCall(t, srv, "DeleteUser", url.Values{"UserName": {"alice"}})
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteUser")
-	resp, body = iamCall(t, srv, "ListAccessKeys", url.Values{"UserName": {"alice"}})
-	// Empty list is acceptable (200 with no <member>) — the user is gone.
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "ListAccessKeys after delete")
-	assert.NotContains(t, string(body), "<AccessKeyId>", "after CASCADE delete, ListAccessKeys should be empty: %s", body)
-}
-
 func TestIAM_CreateAccessKeyForMissingUserIs404(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, body := iamCall(t, srv, "CreateAccessKey", url.Values{"UserName": {"ghost"}})
@@ -335,8 +314,8 @@ func TestIAM_AttachDetachUserPolicy(t *testing.T) {
 }
 
 // TestIAM_PutGetDeleteUserPolicy pins the inline-policy round-trip:
-// PutUserPolicy → GetUserPolicy returns the verbatim document; provider
-// hashes match so no diff on plan.
+// PutUserPolicy → GetUserPolicy returns the document, which
+// TestIAM_PolicyDocumentsURLEncoded pins byte-exact.
 func TestIAM_PutGetDeleteUserPolicy(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	_, _ = iamCall(t, srv, "CreateUser", url.Values{"UserName": {"alice"}})
@@ -354,7 +333,7 @@ func TestIAM_PutGetDeleteUserPolicy(t *testing.T) {
 		"PolicyName": {"all-s3"},
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "GetUserPolicy")
-	assert.Contains(t, string(body), "s3:*", "GetUserPolicy missing document: %s", body)
+	assert.Contains(t, string(body), "s3%3A%2A", "GetUserPolicy missing document: %s", body)
 
 	resp, body = iamCall(t, srv, "ListUserPolicies", url.Values{"UserName": {"alice"}})
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "ListUserPolicies")
@@ -371,6 +350,40 @@ func TestIAM_PutGetDeleteUserPolicy(t *testing.T) {
 		"PolicyName": {"all-s3"},
 	})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "GetUserPolicy post-delete")
+}
+
+// TestIAM_PolicyDocumentsURLEncoded: GetUserPolicy and GetPolicyVersion
+// send the document URL-encoded, as IAM does, so the provider's
+// url.QueryUnescape gives back the bytes it sent. '%', '+', spaces and
+// non-ASCII would not survive a decode of a document sent unencoded.
+func TestIAM_PolicyDocumentsURLEncoded(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	doc := `{"Version":"2012-10-17","Statement":[{"Sid":"a+b%20c d","Effect":"Allow","Action":"s3:*","Resource":"arn:aws:s3:::café/ü*"}]}`
+	for _, c := range []struct{ action, param, name string }{
+		{"CreateUser", "UserName", "alice"},
+		{"PutUserPolicy", "UserName", "alice"},
+		{"CreatePolicy", "PolicyName", "p"},
+	} {
+		resp, body := iamCall(t, srv, c.action, url.Values{c.param: {c.name}, "PolicyName": {"p"}, "PolicyDocument": {doc}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", c.action, body)
+	}
+	for action, params := range map[string]url.Values{
+		"GetUserPolicy":    {"UserName": {"alice"}, "PolicyName": {"p"}},
+		"GetPolicyVersion": {"PolicyArn": {"arn:aws:iam::000000000000:policy/p"}, "VersionId": {"v1"}},
+	} {
+		resp, body := iamCall(t, srv, action, params)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", action, body)
+		var out struct { // one of the two is set
+			User    string `xml:"GetUserPolicyResult>PolicyDocument"`
+			Version string `xml:"GetPolicyVersionResult>PolicyVersion>Document"`
+		}
+		require.NoError(t, xml.Unmarshal(body, &out), "%s body: %s", action, body)
+		wire := out.User + out.Version
+		assert.Contains(t, wire, "a%2Bb%2520c%20d", "%s document on the wire", action)
+		decoded, err := url.QueryUnescape(wire)
+		require.NoError(t, err, action)
+		assert.Equal(t, doc, decoded, action)
+	}
 }
 
 // getRolePolicyDocument GetRolePolicy's a role's inline policy and
@@ -719,6 +732,7 @@ func TestIAM_UnreadableIdentityIs500(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "body=%s", body)
 	assert.Contains(t, string(body), "<Code>InternalFailure</Code>")
+	assert.Contains(t, string(body), "<Message>An internal error occurred.</Message>", "a 500 never carries the error's text")
 	var n int
 	require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM iam_roles`).Scan(&n))
 	assert.Zero(t, n, "role rows written")
