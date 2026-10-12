@@ -125,6 +125,7 @@ func (app *Application) handleRDS(w http.ResponseWriter, r *http.Request) {
 		awsproto.WriteQueryRPCResponse(w, "DescribeDBParameters", &rdsDescribeDBParametersResult{Parameters: []rdsParameterXML{}})
 
 	default:
+		markClass(w, classNotModelled404)
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
 			fmt.Errorf("RDS action %q not yet implemented in fakeaws v1: %w", req.Action, models.ErrNotFound))
 	}
@@ -169,6 +170,7 @@ func rdsTagTarget(w http.ResponseWriter, req awsproto.QueryRPCRequest) (rdsTagge
 			return kind, arn, true
 		}
 	}
+	markClass(w, classFilterRefused)
 	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusBadRequest,
 		"InvalidParameterValue", fmt.Sprintf("fakeaws does not tag the RDS resource %q", arn))
 	return rdsTaggedKind{}, "", false

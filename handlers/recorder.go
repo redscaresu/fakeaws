@@ -15,6 +15,32 @@ type requestClass string
 const (
 	classAnsweredFromRows requestClass = "answered-from-rows"
 	classUnimplemented    requestClass = "unimplemented-501"
+
+	// Not every gap is marked: concepts.md item 7 states which gaps never
+	// are (an ignored parameter, a 200 that stores nothing, an always-empty
+	// or always-404 answer), with examples; they record answered-from-rows.
+
+	// CRITICAL[request-log-not-modelled-404]: the default arm of EC2,
+	// IAM, RDS, DynamoDB, SQS, Secrets Manager and KMS marks an
+	// unknown action not-modelled-404. Its 404 ResourceNotFoundException
+	// is wire-identical to a missing row's, so only the mark tells them
+	// apart. A modelled action that stores nothing is not marked.
+	classNotModelled404 requestClass = "not-modelled-404"
+
+	// CRITICAL[request-log-filter-refused]: a site that refuses what real
+	// AWS would accept but fakeaws does not model (a filter, a parameter,
+	// a tag resource type, or a required-parameter check stricter than
+	// AWS's) marks filter-refused and answers as before (EC2 409 or 400,
+	// RDS and Route53 400, SSM 501). A refusal AWS makes too, a modelled
+	// 409 and a filter or parameter fakeaws ignores rather than refuses
+	// stay answered-from-rows.
+	classFilterRefused requestClass = "filter-refused"
+
+	// CRITICAL[request-log-empty-collection]: only ec2DescribeNone, the
+	// Describe of a resource fakeaws never creates, marks
+	// empty-collection. Other always-empty answers, and an empty answer
+	// read from rows, stay answered-from-rows.
+	classEmptyCollection requestClass = "empty-collection"
 )
 
 // requestEntry is one recorded provider request, as GET /mock/requests
@@ -119,9 +145,10 @@ func (w *recordingWriter) Write(b []byte) (int, error) {
 // status of 500 or more and answered-from-rows for anything else.
 //
 // CRITICAL[request-log-unimplemented-501]: the router's NotFound and
-// MethodNotAllowed and every writeUnimplemented record unimplemented-501,
-// as does an unmarked 5xx; a 5xx is never answered-from-rows. A marked
-// class wins over the status, and the last mark wins.
+// MethodNotAllowed and every writeUnimplemented record unimplemented-501
+// (unless the site marks again after it), as does an unmarked 5xx; a 5xx
+// is never answered-from-rows. A marked class wins over the status, and
+// the last mark wins.
 func (w *recordingWriter) classification() requestClass {
 	switch {
 	case w.class != "":

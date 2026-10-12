@@ -72,6 +72,7 @@ func (app *Application) handleSQS(w http.ResponseWriter, r *http.Request) {
 	case "SetQueueAttributes":
 		app.sqsSetQueueAttributes(w, account, region, req)
 	default:
+		markClass(w, classNotModelled404)
 		awsproto.WriteAWSError(w, awsproto.ShapeJSON10,
 			fmt.Errorf("SQS operation %q not yet implemented in fakeaws v1: %w", req.Operation, models.ErrNotFound))
 	}
