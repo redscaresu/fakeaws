@@ -192,14 +192,19 @@ var universalMigrations = []string{
 // new, and a db whose schema_version holds one row, dbSchemaVersion.
 // Anything else is models.ErrConflict naming name and the stored and
 // wanted versions. It reads dbPath through a read-only handle, before
-// openDB's pragmas, so a refusal writes nothing: immutable (no -wal or
-// -shm made) unless a -wal is there, which may hold the db's only copy
-// of its tables, as after a kill before any checkpoint.
+// openDB's pragmas, so the file and any -wal or -journal are left as
+// they were. The handle is immutable, and makes no file, unless a -wal
+// or a -journal is there: a -wal may hold the db's only copy of its
+// tables, as after a kill before any checkpoint, and beside one SQLite
+// may make a -shm; a hot -journal means the file's pages may be torn,
+// and a read-only handle cannot roll it back, so the check fails,
+// naming the file, until a read-write open of it does.
 func checkSchemaVersion(dbPath, name string) error {
 	if dbPath == ":memory:" {
 		return nil
 	}
-	// SQLite keeps the -wal beside the file a symlinked path resolves to.
+	// SQLite keeps the -wal and -journal beside the file a symlinked path
+	// resolves to.
 	file, err := filepath.EvalSymlinks(dbPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -207,11 +212,13 @@ func checkSchemaVersion(dbPath, name string) error {
 	if err != nil {
 		return fmt.Errorf("resolve db path: %w", err)
 	}
-	params := "mode=ro"
-	if _, err := os.Stat(file + "-wal"); errors.Is(err, fs.ErrNotExist) {
-		params += "&immutable=1"
-	} else if err != nil {
-		return fmt.Errorf("stat db wal: %w", err)
+	params := "mode=ro&immutable=1"
+	for _, suffix := range []string{"-wal", "-journal"} {
+		if _, err := os.Stat(file + suffix); err == nil {
+			params = "mode=ro"
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("stat db %s: %w", suffix, err)
+		}
 	}
 	db, err := sql.Open("sqlite", dsn(file, params))
 	if err != nil {
@@ -221,7 +228,7 @@ func checkSchemaVersion(dbPath, name string) error {
 	var entries, versionTables int
 	if err := db.QueryRow(`SELECT COUNT(*), COUNT(*) FILTER (WHERE type = 'table' AND name = 'schema_version') FROM sqlite_master`).
 		Scan(&entries, &versionTables); err != nil {
-		return fmt.Errorf("read schema: %w", err)
+		return fmt.Errorf("%s: read schema: %w", name, err)
 	}
 	if entries == 0 {
 		return nil
@@ -229,7 +236,7 @@ func checkSchemaVersion(dbPath, name string) error {
 	stored := "none"
 	if versionTables == 1 {
 		if err := db.QueryRow(`SELECT COALESCE(group_concat(version, ', '), 'none') FROM schema_version`).Scan(&stored); err != nil {
-			return fmt.Errorf("read schema version: %w", err)
+			return fmt.Errorf("%s: read schema version: %w", name, err)
 		}
 	}
 	if stored != strconv.Itoa(dbSchemaVersion) {

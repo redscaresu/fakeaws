@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -124,8 +125,9 @@ func killedDB(t *testing.T, live *Repository, dbPath string) {
 }
 
 // TestNewReadsTheVersionInTheWAL: a killed db's version is read from its
-// -wal, through a symlink too. Version 1 is refused with the file left
-// as it was; dbSchemaVersion opens.
+// -wal, through a symlink too. Version 1 is refused with the file and
+// its -wal left as they were; the only file the refusal may add is a
+// -shm. dbSchemaVersion opens.
 func TestNewReadsTheVersionInTheWAL(t *testing.T) {
 	for _, link := range []bool{false, true} {
 		t.Run(fmt.Sprintf("symlink=%v", link), func(t *testing.T) {
@@ -145,12 +147,15 @@ func TestNewReadsTheVersionInTheWAL(t *testing.T) {
 					*p = l
 				}
 			}
-			before := sha256File(t, older)
+			file := filepath.Join(dir, "older.db")
+			before, beforeWAL, beforeDir := sha256File(t, file), sha256File(t, file+"-wal"), dirNames(t, dir)
 
 			_, err = New(older)
 			require.ErrorIs(t, err, models.ErrConflict)
 			assert.Contains(t, err.Error(), fmt.Sprintf("%s: database schema version 1, fakeaws needs %d", older, dbSchemaVersion))
-			assert.Equal(t, before, sha256File(t, older), "the file is left as it was")
+			assert.Equal(t, before, sha256File(t, file), "the file is left as it was")
+			assert.Equal(t, beforeWAL, sha256File(t, file+"-wal"), "the -wal is left as it was")
+			assert.Subset(t, append(beforeDir, "older.db-shm"), dirNames(t, dir), "only a -shm may appear")
 
 			r, err := New(current)
 			require.NoError(t, err)
@@ -158,6 +163,49 @@ func TestNewReadsTheVersionInTheWAL(t *testing.T) {
 			assert.Equal(t, fmt.Sprint(dbSchemaVersion), storedVersion(t, r))
 		})
 	}
+}
+
+// TestNewWithAHotJournal: a db killed mid-transaction in rollback-journal
+// mode has torn pages and a hot -journal. The check does not read the
+// torn version 1: it fails naming the file, leaving the file and the
+// -journal as they were, and once a read-write open rolls the journal
+// back, the db opens at dbSchemaVersion.
+func TestNewWithAHotJournal(t *testing.T) {
+	dir := t.TempDir()
+	live, dbPath := filepath.Join(dir, "live.db"), filepath.Join(dir, "killed.db")
+	r, err := New(live)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	h, err := sql.Open("sqlite", dsn(live, ""))
+	require.NoError(t, err)
+	h.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = h.Close() })
+	// A small cache spills the uncommitted update, version 1, into the
+	// file, and its original page into the -journal.
+	for _, stmt := range []string{`PRAGMA journal_mode = DELETE`, `PRAGMA cache_size = 10`, `BEGIN`, `UPDATE schema_version SET version = 1`} {
+		_, err = h.Exec(stmt)
+		require.NoError(t, err)
+	}
+	for i := 0; i < 400; i++ {
+		_, err = h.Exec(`INSERT INTO audit (ts, account_id, method, path, status_code) VALUES ('t', 'a', 'GET', ?, 200)`, strings.Repeat("x", 4000))
+		require.NoError(t, err)
+	}
+	require.NoError(t, copyFile(live, dbPath))
+	require.NoError(t, copyFile(live+"-journal", dbPath+"-journal"))
+	before, beforeJournal := sha256File(t, dbPath), sha256File(t, dbPath+"-journal")
+
+	_, err = New(dbPath)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, models.ErrConflict, "the torn version is not read")
+	assert.Contains(t, err.Error(), dbPath+": read schema")
+	assert.Equal(t, before, sha256File(t, dbPath), "the file is left as it was")
+	assert.Equal(t, beforeJournal, sha256File(t, dbPath+"-journal"), "the -journal is left as it was")
+
+	execOnFile(t, dbPath, `SELECT 1`)
+	r, err = New(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	assert.Equal(t, fmt.Sprint(dbSchemaVersion), storedVersion(t, r))
 }
 
 // TestNewFailedMigrateLeavesNewDBEmpty: migrate is one transaction, so
@@ -340,6 +388,18 @@ func storedVersion(t *testing.T, r *Repository) string {
 	var v string
 	require.NoError(t, r.db.QueryRow(`SELECT group_concat(version, ', ') FROM schema_version`).Scan(&v))
 	return v
+}
+
+// dirNames lists the names in dir.
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 func sha256File(t *testing.T, path string) [sha256.Size]byte {
