@@ -1665,10 +1665,14 @@ func TestRegressionSweepDescribeSecurityGroupsListsEveryGroup(t *testing.T) {
 	assert.Equal(t, aws.ToString(sg.GroupId), aws.ToString(out.SecurityGroups[0].GroupId))
 	assert.Equal(t, "web", aws.ToString(out.SecurityGroups[0].GroupName))
 
-	_, err = c.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{Filters: sweepFilter})
-	assertRefused(t, err, "Filter.N")
+	out, err = c.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{Filters: sweepFilter})
+	require.NoError(t, err)
+	assert.Empty(t, out.SecurityGroups, "no group is tagged Owner=sweep")
 	_, err = c.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{GroupNames: []string{"web"}})
-	assertRefused(t, err, "GroupName.N")
+	var re *awshttp.ResponseError
+	require.ErrorAs(t, err, &re)
+	assert.Equal(t, http.StatusBadRequest, re.HTTPStatusCode())
+	assert.ErrorContains(t, err, "VPCIdNotSpecified", "fakeaws has no default VPC to resolve GroupName.N in")
 }
 
 func TestRegressionSweepDescribeImagesOwnerSelf(t *testing.T) {
@@ -1958,7 +1962,6 @@ func TestEC2_DescribeRefusesUnreadParams(t *testing.T) {
 	}{
 		{"DescribeImages", "ExecutableBy.1", "ExecutableBy.N"},
 		{"DescribeKeyPairs", "KeyPairId.1", "KeyPairId.N"},
-		{"DescribeSecurityGroups", "GroupName.1", "GroupName.N"},
 		{"DescribeAddresses", "PublicIp.1", "PublicIp.N"},
 		{"DescribeSubnets", "SubnetId.x", "SubnetId.x"},
 	} {
@@ -2306,10 +2309,11 @@ func ec2FilterParams(kv ...string) url.Values {
 // describedIDs are the ids a VPC, subnet, internet gateway or route
 // table Describe answers, each from its own set.
 type describedIDs struct {
-	Vpcs        []string `xml:"vpcSet>item>vpcId"`
-	Subnets     []string `xml:"subnetSet>item>subnetId"`
-	Gateways    []string `xml:"internetGatewaySet>item>internetGatewayId"`
-	RouteTables []string `xml:"routeTableSet>item>routeTableId"`
+	Vpcs           []string `xml:"vpcSet>item>vpcId"`
+	Subnets        []string `xml:"subnetSet>item>subnetId"`
+	Gateways       []string `xml:"internetGatewaySet>item>internetGatewayId"`
+	RouteTables    []string `xml:"routeTableSet>item>routeTableId"`
+	SecurityGroups []string `xml:"securityGroupInfo>item>groupId"`
 }
 
 func describeIDs(t *testing.T, srv *httptest.Server, action string, params url.Values) describedIDs {
@@ -2444,4 +2448,96 @@ func TestEC2_DescribeRouteTablesLookupFilters(t *testing.T) {
 	} {
 		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeRouteTables", ec2FilterParams(tc.kv...)).RouteTables, "%v", tc.kv)
 	}
+}
+
+// TestEC2_DescribeSecurityGroupsFilters: a group name is unique only
+// within a VPC, so group-name is read with vpc-id; infrafactory's
+// absent-name lookup sends group-name with tag-key and wants an empty
+// set, not a 501. aws_default_security_group's group-name=default is
+// refused: every AWS VPC has that group and the rows have none.
+func TestEC2_DescribeSecurityGroupsFilters(t *testing.T) {
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	a, b := tagVPC(t, srv), tagVPC(t, srv)
+	sg := func(vpc, desc string, tags ...string) string {
+		return createOK(t, srv, "CreateSecurityGroup", "groupId", withTagSpec(url.Values{
+			"GroupName": {"web"}, "GroupDescription": {desc}, "VpcId": {vpc},
+		}, 1, "security-group", tags...))
+	}
+	webA := sg(a, "web in a", "infrafactory-run-id", "run-1")
+	webB := sg(b, "web in b", "Name", "b")
+
+	for _, tc := range []struct {
+		kv   []string
+		want []string
+	}{
+		{[]string{"group-name", "web", "vpc-id", a}, []string{webA}},
+		{[]string{"group-name", "absent", "tag-key", "infrafactory-run-id"}, nil},
+		{[]string{"tag-key", "infrafactory-run-id"}, []string{webA}},
+		{[]string{"tag:Name", "b"}, []string{webB}},
+		{[]string{"tag-value", "run-1"}, []string{webA}},
+		{[]string{"group-id", webB}, []string{webB}},
+		{[]string{"description", "web in *"}, []string{webA, webB}},
+		{[]string{"owner-id", "000000000000", "group-name", "web"}, []string{webA, webB}},
+		{[]string{"group-name", "w?b", "vpc-id", b}, []string{webB}},
+	} {
+		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeSecurityGroups", ec2FilterParams(tc.kv...)).SecurityGroups, "%v", tc.kv)
+	}
+
+	for _, tc := range []struct {
+		params url.Values
+		want   string
+	}{
+		{ec2FilterParams("group-name", "default", "vpc-id", a), "group-name"},
+		{ec2FilterParams("group-name", "def*"), "group-name"},
+		{ec2FilterParams("group-name", "*", "vpc-id", a), "group-name"},
+		{url.Values{"Filter.1.Name": {"group-name"}, "Filter.1.Value.1": {"web"}, "Filter.1.Value.2": {"default"}}, "group-name"},
+		{ec2FilterParams("ip-permission.from-port", "22", "egress.ip-permission.cidr", "0.0.0.0/0", "group-name", "default"),
+			"egress.ip-permission.cidr, group-name, ip-permission.from-port"},
+	} {
+		resp, body := ec2Call(t, srv, tagRegion, "DescribeSecurityGroups", tc.params)
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%v: %s", tc.params, body)
+		assert.Equal(t, "DescribeSecurityGroups: not modelled by fakeaws: "+tc.want, extractEC2Tag(body, "Message"), "%v", tc.params)
+		assert.Equal(t, "filter-refused", lastClass(t, srv), "%v", tc.params)
+	}
+}
+
+// UNVERIFIED(aws-code): VPCIdNotSpecified from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func TestContract_ec2_sg_group_name_default_vpc_only(t *testing.T) {
+	groupName := func(srv *httptest.Server) (*http.Response, []byte) {
+		t.Helper()
+		createOK(t, srv, "CreateSecurityGroup", "groupId", url.Values{
+			"GroupName": {"web"}, "GroupDescription": {"web"}, "VpcId": {tagVPC(t, srv)},
+		})
+		return ec2Call(t, srv, tagRegion, "DescribeSecurityGroups", url.Values{"GroupName.1": {"web"}})
+	}
+
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	resp, body := groupName(srv)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "unloaded: %s", body)
+	assert.Equal(t, "VPCIdNotSpecified", extractEC2Tag(body, "Code"), "unloaded")
+	assert.NotContains(t, string(body), "<groupId>", "unloaded: GroupName.N matches no group")
+	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "unloaded")
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	markLoaded(t, dbPath, true)
+	_, srv = newRecordingApp(t, handlers.Options{DBPath: dbPath})
+	resp, body = groupName(srv)
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "loaded: %s", body)
+	assert.Equal(t, "NotImplemented", extractEC2Tag(body, "Code"), "loaded")
+	assert.Equal(t, "DescribeSecurityGroups: not modelled by fakeaws: GroupName.N", extractEC2Tag(body, "Message"), "loaded")
+	assert.Equal(t, "filter-refused", lastClass(t, srv), "loaded")
+
+	// An unreadable flag is 500 for GroupName.N, never either branch,
+	// and a GroupId.N lookup does not read it.
+	app, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	_, err := app.Repository().DB().Exec(`ALTER TABLE identity DROP COLUMN loaded`)
+	require.NoError(t, err)
+	resp, body = groupName(srv)
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "unreadable flag: %s", body)
+	assert.NotContains(t, string(body), "<groupId>", "unreadable flag")
+	sg := createOK(t, srv, "CreateSecurityGroup", "groupId", url.Values{
+		"GroupName": {"db"}, "GroupDescription": {"db"}, "VpcId": {tagVPC(t, srv)},
+	})
+	assert.Equal(t, []string{sg}, describeIDs(t, srv, "DescribeSecurityGroups", url.Values{"GroupId.1": {sg}}).SecurityGroups,
+		"GroupId.N with an unreadable flag")
 }

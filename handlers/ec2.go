@@ -1702,11 +1702,56 @@ func (app *Application) ec2FindSecurityGroups(w http.ResponseWriter, account, re
 	return out, true
 }
 
+// sgFilters are the DescribeSecurityGroups filters fakeaws models: the
+// AWS names whose value a group answers and the tag filters. The
+// ip-permission.* and egress.ip-permission.* names stay refused, as
+// does a group-name that matches default: every AWS VPC has a group
+// named default, and fakeaws's rows have none to answer with.
+var sgFilters = ec2FilterTable[ec2SecurityGroupXML]{
+	values: map[string]func(ec2SecurityGroupXML) []string{
+		"group-id":    func(g ec2SecurityGroupXML) []string { return []string{g.GroupId} },
+		"group-name":  func(g ec2SecurityGroupXML) []string { return []string{g.GroupName} },
+		"vpc-id":      func(g ec2SecurityGroupXML) []string { return []string{g.VpcId} },
+		"description": func(g ec2SecurityGroupXML) []string { return []string{g.GroupDesc} },
+		"owner-id":    func(g ec2SecurityGroupXML) []string { return []string{g.OwnerId} },
+	},
+	tagID:   func(g ec2SecurityGroupXML) string { return g.GroupId },
+	rowless: map[string]string{"group-name": "default"},
+}
+
 // ec2DescribeSecurityGroups answers the provider's GroupId.N lookup
-// and, with none, the scope sweep's list of every group. Filter.N and
-// GroupName.N are refused rather than ignored.
+// and, with none, the scope sweep's list of every group, each through
+// sgFilters.
+//
+// MUST[ec2-sg-group-name-default-vpc-only]: AWS resolves GroupName.N
+// only in the default VPC. fakeaws never creates one (CreateSecurityGroup
+// requires VpcId), so on an unloaded database the rows prove there is
+// none and every GroupName.N answers 400 VPCIdNotSpecified, never a
+// group. A loaded database's account usually has a default VPC its
+// rows cannot show, so there GroupName.N is refused through ec2Refuse.
+// The loaded flag is read only for a request with GroupName.N; an
+// unreadable flag answers 500, neither.
+// UNVERIFIED(aws-code): VPCIdNotSpecified from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if _, ok := ec2NoFilters.read(w, req, "GroupId.N"); !ok {
+	reads := []string{"GroupId.N"}
+	groupNames := len(queryListValues(req.Params, "GroupName.")) > 0
+	if groupNames {
+		loaded, err := app.repo.Loaded()
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return
+		}
+		if !loaded {
+			reads = append(reads, "GroupName.N")
+		}
+	}
+	filters, ok := sgFilters.read(w, req, reads...)
+	if !ok {
+		return
+	}
+	if groupNames {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "VPCIdNotSpecified",
+			"You have no default VPC in which to carry out the request. Specify a VPC ID or create a default VPC.")
 		return
 	}
 	sgs, ok := app.ec2FindSecurityGroups(w, account, region, req)
@@ -1719,6 +1764,14 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 	}
 	out := ec2DescribeSecurityGroupsResult{SecurityGroupSet: make([]ec2SecurityGroupXML, 0, len(sgs))}
 	for _, sg := range sgs {
+		x := ec2SecurityGroupXML{
+			GroupId: sg.ID, GroupName: sg.GroupName, GroupDesc: sg.Description, VpcId: sg.VPCID,
+			OwnerId: account,
+			TagSet:  tags[sg.ID],
+		}
+		if !sgFilters.matches(x, filters, tags) {
+			continue
+		}
 		ing, eg, err := app.repo.GetSecurityGroupRules(account, region, sg.ID)
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
@@ -1730,13 +1783,8 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 			return
 		}
-		out.SecurityGroupSet = append(out.SecurityGroupSet, ec2SecurityGroupXML{
-			GroupId: sg.ID, GroupName: sg.GroupName, GroupDesc: sg.Description, VpcId: sg.VPCID,
-			OwnerId:       account,
-			IpPermissions: ingress,
-			IpPermsEgress: egress,
-			TagSet:        tags[sg.ID],
-		})
+		x.IpPermissions, x.IpPermsEgress = ingress, egress
+		out.SecurityGroupSet = append(out.SecurityGroupSet, x)
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeSecurityGroups", &out)
 }

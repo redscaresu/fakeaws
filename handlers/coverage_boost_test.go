@@ -346,9 +346,10 @@ func TestCoverage_EC2ErrorPaths(t *testing.T) {
 	resp, _ = ec2Call(t, srv, region, "DeleteKeyPair", url.Values{"KeyName": {"missing"}})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteKeyPair missing")
 
-	// DescribeSecurityGroups with an unmodelled Filter.N → 501.
-	resp, _ = ec2Call(t, srv, region, "DescribeSecurityGroups", url.Values{"Filter.1.Name": {"group-name"}, "Filter.1.Value.1": {"default"}})
-	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "DescribeSecurityGroups Filter.N")
+	// DescribeSecurityGroups group-name=default → 501: every AWS VPC has a group named default, and the rows have none.
+	resp, body := ec2Call(t, srv, region, "DescribeSecurityGroups", url.Values{"Filter.1.Name": {"group-name"}, "Filter.1.Value.1": {"default"}})
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "DescribeSecurityGroups group-name=default: %s", body)
+	assert.Equal(t, "DescribeSecurityGroups: not modelled by fakeaws: group-name", extractEC2Tag(body, "Message"))
 
 	// Authorize on missing GroupId → 501 (AWS also takes GroupName).
 	resp, _ = ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", nil)
