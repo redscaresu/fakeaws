@@ -1,10 +1,16 @@
 package handlers
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // requestClass says how fakeaws answered a request. It does not come
@@ -44,17 +50,140 @@ const (
 )
 
 // requestEntry is one recorded provider request, as GET /mock/requests
-// returns it. Its path holds values (a bucket, a key, a secret name), so
-// it lives only in process memory.
+// returns it. Its path and params hold values (a bucket, a key, a
+// parameter value), so it lives only in process memory.
 type requestEntry struct {
 	Method         string       `json:"method"`
 	Path           string       `json:"path"`
 	Status         int          `json:"status"`
 	Classification requestClass `json:"classification"`
+	readSetEntry
 }
 
-// auditEntry is one /mock/state audit entry. protocol and action are
-// empty until the request log reads the action.
+// ADR-0041's read-set protocols.
+const (
+	protocolQuery = "query"
+	protocolJSON  = "json"
+	protocolREST  = "rest"
+)
+
+// serviceProtocols is the protocol each LandedServices id speaks: its
+// dispatcher calls awsproto.ParseQueryRPC (query) or
+// awsproto.ParseXAmzTarget (json), or it routes by path (rest).
+var serviceProtocols = map[string]string{
+	"ec2": protocolQuery, "iam": protocolQuery, "rds": protocolQuery, "sts": protocolQuery,
+	"dynamodb": protocolJSON, "kms": protocolJSON, "secretsmanager": protocolJSON, "sqs": protocolJSON, "ssm": protocolJSON,
+	"eks": protocolREST, "route53": protocolREST, "s3": protocolREST,
+}
+
+// readSetEntry is a request as ADR-0041's read-set entry.
+//
+// CRITICAL[request-log-read-set-entry]: a query entry's action is the
+// form body's Action and its params every other field but Version, one
+// string each; a json entry's action is the operation after the dot in
+// X-Amz-Target and its params the body's JSON object, verbatim; a rest
+// entry's action is "<METHOD> <route pattern>" and its params the raw
+// path and query, so two S3 subresources on one bucket differ in
+// params.query. A body that does not parse, a query body that repeats
+// a key or a json body that is not an object records null params. A
+// path no landed service owns records an empty service, protocol and
+// action.
+type readSetEntry struct {
+	Service  string `json:"service"`
+	Protocol string `json:"protocol"`
+	Action   string `json:"action"`
+	Params   any    `json:"params"`
+}
+
+// restParams is a rest entry's params.
+type restParams struct {
+	Path  string `json:"path"`
+	Query string `json:"query"`
+}
+
+// readSet is r's read-set entry, but for a rest entry's action, which
+// needs the route chi has not matched yet. It reads a query or json
+// body, never through r.ParseForm, and puts back one that reads the
+// same; on a read error it records no action, since the handler reads
+// the same error and refuses. It never reads a rest body, so an S3
+// upload is not buffered.
+func readSet(r *http.Request) readSetEntry {
+	e := readSetEntry{Service: serviceOf(r.URL.Path)}
+	e.Protocol = serviceProtocols[e.Service]
+	switch e.Protocol {
+	case protocolREST:
+		e.Params = restParams{Path: r.URL.EscapedPath(), Query: r.URL.RawQuery}
+	case protocolQuery:
+		if body, err := replayBody(r); err == nil {
+			e.Action, e.Params = queryReadSet(body)
+		}
+	case protocolJSON:
+		if body, err := replayBody(r); err == nil {
+			e.Action, e.Params = jsonReadSet(r.Header.Get("X-Amz-Target"), body)
+		}
+	}
+	return e
+}
+
+// replayBody reads r's body and puts back a reader of the same bytes,
+// then the same read error, so the handler reads what it would have.
+func replayBody(r *http.Request) ([]byte, error) {
+	body, err := io.ReadAll(r.Body)
+	var replay io.Reader = bytes.NewReader(body)
+	if err != nil {
+		replay = io.MultiReader(replay, errReader{err})
+	}
+	r.Body = io.NopCloser(replay)
+	return body, err
+}
+
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+// queryReadSet is a form body's Action, as awsproto.ParseQueryRPC reads
+// it, and its other fields but Version.
+func queryReadSet(body []byte) (string, map[string]string) {
+	values, err := url.ParseQuery(string(body))
+	if err != nil {
+		return "", nil
+	}
+	params := map[string]string{}
+	for k, v := range values {
+		if len(v) != 1 {
+			return values.Get("Action"), nil
+		}
+		if k != "Action" && k != "Version" {
+			params[k] = v[0]
+		}
+	}
+	return values.Get("Action"), params
+}
+
+// jsonReadSet is target's operation, as awsproto.ParseXAmzTarget reads
+// it, and body when it is a JSON object.
+func jsonReadSet(target string, body []byte) (string, json.RawMessage) {
+	_, op, _ := strings.Cut(target, ".")
+	body = bytes.TrimSpace(body)
+	if !bytes.HasPrefix(body, []byte("{")) || !json.Valid(body) {
+		return op, nil
+	}
+	return op, body
+}
+
+// routePattern is the route chi matched, each mount's "/*" joint
+// dropped. Unlike chi's RoutePattern it keeps the trailing slash, so an
+// S3 bucket route is "/s3/{bucket}/", as ADR-0041 writes it.
+func routePattern(r *http.Request) string {
+	p := strings.Join(chi.RouteContext(r.Context()).RoutePatterns, "")
+	for strings.Contains(p, "/*/") || strings.Contains(p, "//") {
+		p = strings.ReplaceAll(strings.ReplaceAll(p, "/*/", "/"), "//", "/")
+	}
+	return p
+}
+
+// auditEntry is one /mock/state audit entry: a request log entry
+// without its method, path and params.
 //
 // CRITICAL[state-audit-no-values]: an audit entry carries exactly
 // service, protocol, action, status and class, never a path, params or
@@ -105,7 +234,7 @@ func (l *requestLog) audit() []auditEntry {
 		return out
 	}
 	for _, e := range l.list() {
-		out = append(out, auditEntry{Service: serviceOf(e.Path), Status: e.Status, Class: e.Classification})
+		out = append(out, auditEntry{Service: e.Service, Protocol: e.Protocol, Action: e.Action, Status: e.Status, Class: e.Classification})
 	}
 	return out
 }
@@ -170,7 +299,8 @@ func markClass(w http.ResponseWriter, class requestClass) {
 }
 
 // recordRequests appends every request outside /mock and /healthz to
-// the log once its handler returns, so entries are in completion order.
+// the log once its handler returns, so entries are in completion order
+// and a rest entry's route is the one chi matched.
 //
 // CRITICAL[request-log-panic-recorded]: it runs inside
 // middleware.Recoverer, so it sees a handler panic before Recoverer
@@ -183,6 +313,7 @@ func (app *Application) recordRequests(next http.Handler) http.Handler {
 			return
 		}
 		path := r.URL.Path // before stripRegionRootSlash rewrites it
+		rs := readSet(r)
 		rw := &recordingWriter{ResponseWriter: w}
 		panicked := true
 		defer func() { // runs while a panic unwinds on to Recoverer
@@ -192,7 +323,10 @@ func (app *Application) recordRequests(next http.Handler) http.Handler {
 			case rw.status == 0:
 				rw.status = http.StatusOK // net/http's answer when a handler writes nothing
 			}
-			app.requests.append(requestEntry{Method: r.Method, Path: path, Status: rw.status, Classification: rw.classification()})
+			if rs.Protocol == protocolREST {
+				rs.Action = r.Method + " " + routePattern(r)
+			}
+			app.requests.append(requestEntry{Method: r.Method, Path: path, Status: rw.status, Classification: rw.classification(), readSetEntry: rs})
 		}()
 		next.ServeHTTP(rw, r)
 		panicked = false

@@ -3,9 +3,11 @@ package handlers_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -39,16 +41,31 @@ func newRecordingApp(t *testing.T, opts handlers.Options) (*handlers.Application
 	return app, srv
 }
 
-func loggedRequests(t *testing.T, srv *httptest.Server) []loggedRequest {
+// readSet is a logged request's ADR-0041 read-set fields and status.
+type readSet struct {
+	Service  string         `json:"service"`
+	Protocol string         `json:"protocol"`
+	Action   string         `json:"action"`
+	Params   map[string]any `json:"params"`
+	Status   int            `json:"status"`
+}
+
+// mockRequests is GET /mock/requests, each entry decoded as T.
+func mockRequests[T any](t *testing.T, srv *httptest.Server) []T {
 	t.Helper()
 	status, body := doAdmin(t, srv, http.MethodGet, "/mock/requests", bearer(adminToken))
 	require.Equal(t, http.StatusOK, status, body)
 	var got struct {
-		Requests []loggedRequest `json:"requests"`
+		Requests []T `json:"requests"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(body), &got), body)
 	require.NotNil(t, got.Requests, "requests is [], never null: %s", body)
 	return got.Requests
+}
+
+func loggedRequests(t *testing.T, srv *httptest.Server) []loggedRequest {
+	t.Helper()
+	return mockRequests[loggedRequest](t, srv)
 }
 
 // stateAudit is /mock/state's audit block, read with header.
@@ -257,8 +274,8 @@ func TestContract_state_audit_no_values(t *testing.T) {
 		assert.ElementsMatch(t, []string{"service", "protocol", "action", "status", "class"}, keys, "%v", e)
 	}
 	assert.Equal(t, []map[string]any{
-		{"service": "sts", "protocol": "", "action": "", "status": float64(http.StatusOK), "class": "answered-from-rows"},
-		{"service": "sts", "protocol": "", "action": "", "status": float64(http.StatusNotImplemented), "class": "unimplemented-501"},
+		{"service": "sts", "protocol": "query", "action": "GetCallerIdentity", "status": float64(http.StatusOK), "class": "answered-from-rows"},
+		{"service": "sts", "protocol": "query", "action": "AssumeRole", "status": float64(http.StatusNotImplemented), "class": "unimplemented-501"},
 		{"service": "", "protocol": "", "action": "", "status": float64(http.StatusNotImplemented), "class": "unimplemented-501"},
 	}, audit)
 }
@@ -445,4 +462,151 @@ func TestContract_request_log_empty_collection(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
 	require.Empty(t, extractEC2Tag(body, "vpcId"), "an empty account: %s", body)
 	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "DescribeVpcs on an empty account")
+}
+
+func TestContract_request_log_read_set_entry(t *testing.T) {
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	const region = "us-east-1"
+	type call = func() (*http.Response, []byte)
+	for _, c := range []struct {
+		name string
+		call call
+		want readSet
+	}{
+		{"EC2 DescribeVpcs", func() (*http.Response, []byte) {
+			return ec2Call(t, srv, region, "DescribeVpcs", url.Values{"Filter.1.Name": {"tag-key"}, "Filter.1.Value.1": {"env"}})
+		}, readSet{"ec2", "query", "DescribeVpcs", map[string]any{"Filter.1.Name": "tag-key", "Filter.1.Value.1": "env"}, http.StatusOK}},
+		{"IAM GetRole", func() (*http.Response, []byte) {
+			return iamCall(t, srv, "GetRole", url.Values{"RoleName": {"app"}})
+		}, readSet{"iam", "query", "GetRole", map[string]any{"RoleName": "app"}, http.StatusNotFound}},
+		{"STS GetCallerIdentity", func() (*http.Response, []byte) {
+			return stsCall(t, srv, "GetCallerIdentity")
+		}, readSet{"sts", "query", "GetCallerIdentity", map[string]any{}, http.StatusOK}},
+		{"RDS DescribeDBInstances", func() (*http.Response, []byte) {
+			return rdsCall(t, srv, region, "DescribeDBInstances", url.Values{"DBInstanceIdentifier": {"app-db"}})
+		}, readSet{"rds", "query", "DescribeDBInstances", map[string]any{"DBInstanceIdentifier": "app-db"}, http.StatusNotFound}},
+		{"SSM GetParameter", func() (*http.Response, []byte) {
+			return ssmCall(t, srv, "GetParameter", `{"Name":"/app/db/host","WithDecryption":true}`)
+		}, readSet{"ssm", "json", "GetParameter", map[string]any{"Name": "/app/db/host", "WithDecryption": true}, http.StatusBadRequest}},
+		{"DynamoDB DescribeTable", func() (*http.Response, []byte) {
+			return ddbCall(t, srv, region, "DescribeTable", `{"TableName":"app"}`)
+		}, readSet{"dynamodb", "json", "DescribeTable", map[string]any{"TableName": "app"}, http.StatusNotFound}},
+		{"a repeated query key", func() (*http.Response, []byte) {
+			return ec2Call(t, srv, region, "DescribeVpcs", url.Values{"VpcId.1": {"vpc-a", "vpc-b"}})
+		}, readSet{"ec2", "query", "DescribeVpcs", nil, http.StatusBadRequest}},
+		{"a json body that is not an object", func() (*http.Response, []byte) {
+			return ssmCall(t, srv, "GetParameter", `not json`)
+		}, readSet{"ssm", "json", "GetParameter", nil, http.StatusBadRequest}},
+		{"a path no service owns", func() (*http.Response, []byte) {
+			return doGet(t, srv, "/nowhere")
+		}, readSet{"", "", "", nil, http.StatusNotImplemented}},
+	} {
+		resp, body := c.call()
+		assert.Equal(t, c.want.Status, resp.StatusCode, "%s: %s", c.name, body)
+		got := mockRequests[readSet](t, srv)
+		require.NotEmpty(t, got, c.name)
+		assert.Equal(t, c.want, got[len(got)-1], c.name)
+	}
+}
+
+func TestRequestLog_RESTEntries(t *testing.T) {
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	resp, body := s3Do(t, srv, http.MethodPut, "/s3/web-assets/", "", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateBucket: %s", body)
+	for _, sub := range []string{"tagging", "policy"} {
+		resp, body = s3Do(t, srv, http.MethodGet, "/s3/web-assets/?"+sub, "", "")
+		require.Equal(t, http.StatusNotFound, resp.StatusCode, "%s: %s", sub, body)
+	}
+	resp, body = eksRequest(t, srv, http.MethodGet, "/eks/region/us-east-1/clusters/demo", "")
+	require.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeCluster: %s", body)
+	resp, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone/Z1", "")
+	require.Equal(t, http.StatusNotFound, resp.StatusCode, "GetHostedZone: %s", body)
+
+	bucket := func(method, query string, status int) readSet {
+		return readSet{"s3", "rest", method + " /s3/{bucket}/", map[string]any{"path": "/s3/web-assets/", "query": query}, status}
+	}
+	assert.Equal(t, []readSet{
+		bucket(http.MethodPut, "", http.StatusOK),
+		bucket(http.MethodGet, "tagging", http.StatusNotFound),
+		bucket(http.MethodGet, "policy", http.StatusNotFound),
+		{"eks", "rest", "GET /eks/region/{region}/clusters/{name}", map[string]any{"path": "/eks/region/us-east-1/clusters/demo", "query": ""}, http.StatusNotFound},
+		{"route53", "rest", "GET /route53/2013-04-01/hostedzone/{id}", map[string]any{"path": "/route53/2013-04-01/hostedzone/Z1", "query": ""}, http.StatusNotFound},
+	}, mockRequests[readSet](t, srv), "two subresources on one bucket differ only in params.query")
+}
+
+func TestRequestLog_BodyRestored(t *testing.T) {
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	t.Run("query", func(t *testing.T) {
+		const region = "us-east-1"
+		resp, body := ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "CreateVpc: %s", body)
+		vpc := extractEC2Tag(body, "vpcId")
+		resp, body = ec2Call(t, srv, region, "DescribeVpcs", url.Values{"VpcId.1": {vpc}})
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeVpcs: %s", body)
+		assert.Equal(t, vpc, extractEC2Tag(body, "vpcId"), "%s", body)
+
+		trust := `{"Version":"2012-10-17","Statement":[]}`
+		resp, body = iamCall(t, srv, "CreateRole", url.Values{"RoleName": {"restored"}, "AssumeRolePolicyDocument": {trust}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "CreateRole: %s", body)
+		resp, body = iamCall(t, srv, "GetRole", url.Values{"RoleName": {"restored"}})
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "GetRole: %s", body)
+		assert.Contains(t, string(body), "<RoleName>restored</RoleName>")
+	})
+	t.Run("json", func(t *testing.T) {
+		const value = `a&b=c "quoted" \ é ✓`
+		put, err := json.Marshal(map[string]string{"Name": "/restored", "Value": value, "Type": "String"})
+		require.NoError(t, err)
+		resp, body := ssmCall(t, srv, "PutParameter", string(put))
+		require.Equal(t, http.StatusOK, resp.StatusCode, "PutParameter: %s", body)
+		status, got, body := ssmGetValue(t, srv, "/restored")
+		assert.Equal(t, http.StatusOK, status, "GetParameter: %s", body)
+		assert.Equal(t, value, got, "byte-exact")
+	})
+}
+
+func TestRequestLog_ParamsStayInMemory(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "fakeaws.db")
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: dbPath})
+	const stored, value, missing = "stored-control-4b1d", "logged-only-value-7f3a", "/logged-only/missing-9c1e"
+
+	put := func(v string) (*http.Response, []byte) {
+		return ssmCall(t, srv, "PutParameter", `{"Name":"/in-memory","Value":"`+v+`","Type":"String"}`)
+	}
+	resp, body := put(stored)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "PutParameter: %s", body)
+	resp, body = put(value)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, "PutParameter without Overwrite stores nothing: %s", body)
+	resp, body = ssmCall(t, srv, "GetParameter", `{"Name":"`+missing+`"}`)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode, "GetParameter: %s", body)
+	status, snap := doAdmin(t, srv, http.MethodPost, "/mock/snapshot", bearer(adminToken))
+	require.Equal(t, http.StatusOK, status, snap)
+
+	_, requests := doAdmin(t, srv, http.MethodGet, "/mock/requests", bearer(adminToken))
+	_, state := doAdmin(t, srv, http.MethodGet, "/mock/state", bearer(adminToken))
+	files := map[string]string{"/mock/requests": requests, "/mock/state": state}
+	for _, name := range []string{dbPath, dbPath + "-wal", dbPath + ".snapshot"} {
+		b, err := os.ReadFile(name)
+		if !errors.Is(err, os.ErrNotExist) {
+			require.NoError(t, err, name)
+		}
+		files[name] = string(b)
+	}
+	assert.Contains(t, files[dbPath]+files[dbPath+"-wal"], stored, "the db holds the stored parameter")
+	assert.Contains(t, files[dbPath+".snapshot"], stored, "the snapshot holds the stored parameter")
+	for _, s := range []string{value, missing} {
+		assert.Contains(t, requests, s, "the request log holds the params")
+		for name, content := range files {
+			if name != "/mock/requests" {
+				assert.NotContains(t, content, s, name)
+			}
+		}
+	}
+}
+
+func TestRequestLog_EveryLandedServiceHasAProtocol(t *testing.T) {
+	var services []string
+	for s := range handlers.ServiceProtocols {
+		services = append(services, s)
+	}
+	assert.ElementsMatch(t, handlers.LandedServices, services)
 }
