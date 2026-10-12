@@ -2244,6 +2244,7 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	// fakeaws has no volumes, so those tags are accepted and dropped.
 	specs, refused := refuseTagSpecifications(w, req.Params, "instance", "network-interface", "volume")
 	if refused {
+		markClass(w, classFilterRefused) // AWS also tags spot-instances-request, elastic-gpu, ...
 		return
 	}
 	// Lazy-seed canonical AMI fixtures for this region (Codex pass 9
@@ -3044,7 +3045,6 @@ func tagSpecifications(p url.Values, allowed ...string) (map[string][]repository
 func refuseTagSpecifications(w http.ResponseWriter, p url.Values, allowed ...string) (map[string][]repository.EC2Tag, bool) {
 	specs, msg := tagSpecifications(p, allowed...)
 	if msg != "" {
-		markClass(w, classFilterRefused)
 		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue", msg)
 		return nil, true
 	}

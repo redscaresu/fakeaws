@@ -75,8 +75,7 @@ fakeaws/
 - **Gap marks**: a gap site the request log must tell apart (a 404
   default arm, a refusal of something fakeaws does not model,
   `ec2DescribeNone`) calls `markClass`; concepts.md item 7 has the
-  classes and the known ceilings left unmarked, which record
-  `answered-from-rows`.
+  classes and the gaps never marked, which record `answered-from-rows`.
 - **Examples are auto-discovered**: dropping a directory under
   `examples/{working,misconfigured,updates}/` registers it for the
   smoke gate (S43-T12). No per-service smoke ticket. Detail in

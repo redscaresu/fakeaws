@@ -424,6 +424,12 @@ func TestContract_request_log_filter_refused(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "a duplicate group name in one VPC: %s", body)
 	assert.Equal(t, string(refused), string(body), "a modelled 409 is wire-identical to a refusal")
 	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "a modelled 409")
+
+	resp, body = ec2Call(t, srv, region, "CreateVpc", url.Values{
+		"CidrBlock": {"10.2.0.0/16"}, "TagSpecification.1.ResourceType": {"subnet"}, "TagSpecification.1.Tag.1.Key": {"k"},
+	})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "CreateVpc with a subnet TagSpecification: %s", body)
+	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "a TagSpecification type EC2 refuses too")
 }
 
 func TestContract_request_log_empty_collection(t *testing.T) {

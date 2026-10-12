@@ -16,8 +16,9 @@ const (
 	classAnsweredFromRows requestClass = "answered-from-rows"
 	classUnimplemented    requestClass = "unimplemented-501"
 
-	// Not every gap is marked: concepts.md item 7 names the known
-	// ceilings that still record answered-from-rows.
+	// Not every gap is marked: concepts.md item 7 states which gaps never
+	// are (an ignored parameter, a 200 that stores nothing, an always-empty
+	// or always-404 answer), with examples; they record answered-from-rows.
 
 	// CRITICAL[request-log-not-modelled-404]: the default arm of EC2,
 	// IAM, RDS, DynamoDB, SQS, Secrets Manager and KMS marks an
@@ -31,8 +32,8 @@ const (
 	// a tag resource type, or a required-parameter check stricter than
 	// AWS's) marks filter-refused and answers as before (EC2 409 or 400,
 	// RDS and Route53 400, SSM 501). A refusal AWS makes too, a modelled
-	// 409 and a filter fakeaws ignores rather than refuses stay
-	// answered-from-rows.
+	// 409 and a filter or parameter fakeaws ignores rather than refuses
+	// stay answered-from-rows.
 	classFilterRefused requestClass = "filter-refused"
 
 	// CRITICAL[request-log-empty-collection]: only ec2DescribeNone, the
