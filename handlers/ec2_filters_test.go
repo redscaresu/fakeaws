@@ -16,12 +16,9 @@ import (
 	"github.com/redscaresu/fakeaws/repository"
 )
 
-// eniTable runs the engine over the existing DescribeNetworkInterfaces
-// row table, tagged by ENI id.
-var eniTable = ec2FilterTable[*repository.EC2NetworkInterface]{
-	values: eniFilterValues,
-	tagID:  func(e *repository.EC2NetworkInterface) string { return e.ID },
-}
+// eniTable runs the engine over the DescribeNetworkInterfaces table,
+// tagged by ENI id.
+var eniTable = eniFilters
 
 var testENIs = []*repository.EC2NetworkInterface{
 	{ID: "eni-a", SubnetID: "subnet-1", SecurityGroupIDs: []string{"sg-a"}, InstanceID: "i-1"},
@@ -40,7 +37,7 @@ func matchingENIs(t *testing.T, query string, tags map[string][]ec2ResourceTagXM
 	require.Empty(t, eniTable.unmodelled(filters), query)
 	ids := []string{}
 	for _, e := range testENIs {
-		if eniTable.matches(e, filters, tags) {
+		if eniTable.matches(ec2ENIToXML("", e), filters, tags) {
 			ids = append(ids, e.ID)
 		}
 	}
@@ -80,10 +77,10 @@ func TestEC2Filter_AbsentAttributeMatchesNothing(t *testing.T) {
 	assert.Equal(t, []string{"eni-a"}, matchingENIs(t, "Filter.1.Name=attachment.instance-id&Filter.1.Value.1=*", nil))
 	assert.Equal(t, []string{}, matchingENIs(t, "Filter.1.Name=attachment.instance-id&Filter.1.Value.1=?", nil))
 
-	row := &repository.EC2NetworkInterface{SecurityGroupIDs: []string{"", "sg-x"}}
+	row := ec2NetworkInterfaceXML{GroupSet: []ec2InstanceSGXML{{GroupId: ""}, {GroupId: "sg-x"}}}
 	filters := parseEC2Filters(url.Values{"Filter.1.Name": {"group-id"}, "Filter.1.Value.1": {"sg-x"}})
 	assert.True(t, eniTable.matches(row, filters, nil))
-	assert.Equal(t, []string{"", "sg-x"}, row.SecurityGroupIDs, "matching must not edit the row")
+	assert.Equal(t, []ec2InstanceSGXML{{GroupId: ""}, {GroupId: "sg-x"}}, row.GroupSet, "matching must not edit the row")
 }
 
 func TestEC2Filter_WildcardCrossesSlash(t *testing.T) {

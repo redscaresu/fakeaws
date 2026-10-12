@@ -1250,22 +1250,42 @@ func writeEIPError(w http.ResponseWriter, id string, err error) {
 }
 
 // addressFilters are the DescribeAddresses filters fakeaws models.
-var addressFilters = ec2FilterTable[*repository.EC2EIP]{values: map[string]func(*repository.EC2EIP) []string{
-	"association-id": func(e *repository.EC2EIP) []string { return []string{e.AssociationID} },
-}}
+var addressFilters = ec2FilterTable[*repository.EC2EIP]{
+	values: map[string]func(*repository.EC2EIP) []string{
+		"association-id":       func(e *repository.EC2EIP) []string { return []string{e.AssociationID} },
+		"allocation-id":        func(e *repository.EC2EIP) []string { return []string{e.AllocationID} },
+		"domain":               func(e *repository.EC2EIP) []string { return []string{e.Domain} },
+		"public-ip":            func(e *repository.EC2EIP) []string { return []string{e.PublicIP} },
+		"instance-id":          func(e *repository.EC2EIP) []string { return []string{e.InstanceID} },
+		"network-interface-id": func(e *repository.EC2EIP) []string { return []string{e.NetworkInterfaceID} },
+		"private-ip-address":   func(e *repository.EC2EIP) []string { return []string{e.PrivateIP} },
+	},
+	tagID: func(e *repository.EC2EIP) string { return e.AllocationID },
+}
 
 // ec2DescribeAddresses answers the AllocationId.N lookup the provider
-// makes, its association-id filter after AssociateAddress and, with
-// neither, the scope sweep's list of every address. Other filters and
-// PublicIp.N are refused rather than ignored.
+// makes, PublicIp.N, its association-id filter after AssociateAddress
+// and, with none of them, the scope sweep's list of every address.
 func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	filters, ok := addressFilters.read(w, req, "AllocationId.N")
+	filters, ok := addressFilters.read(w, req, "AllocationId.N", "PublicIp.N")
 	if !ok {
 		return
 	}
 	eips, ok := app.ec2FindAddresses(w, account, region, req)
 	if !ok {
 		return
+	}
+	ips := queryListValues(req.Params, "PublicIp.")
+	for _, ip := range ips {
+		if !slices.ContainsFunc(eips, func(e *repository.EC2EIP) bool { return e.PublicIP == ip }) {
+			// UNVERIFIED(aws-code): InvalidAddress.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				"InvalidAddress.NotFound", fmt.Sprintf("Address '%s' not found.", ip))
+			return
+		}
+	}
+	if len(ips) > 0 {
+		eips = slices.DeleteFunc(eips, func(e *repository.EC2EIP) bool { return !slices.Contains(ips, e.PublicIP) })
 	}
 	tags, ok := app.tagSets(w, account)
 	if !ok {
@@ -2411,38 +2431,50 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	})
 }
 
+// ec2InstanceRow is what DescribeInstances filters: the instance as
+// answered, plus what the answer does not show, the subnet's VPC and
+// zone and the owning account.
+type ec2InstanceRow struct {
+	x                    ec2InstanceXML
+	vpcID, zone, ownerID string
+}
+
+// instanceFilters are the DescribeInstances filters fakeaws models;
+// private-ip-address and ip-address come from the primary ENI, so a
+// terminated instance matches neither.
+var instanceFilters = ec2FilterTable[ec2InstanceRow]{
+	values: map[string]func(ec2InstanceRow) []string{
+		"instance-id":         func(r ec2InstanceRow) []string { return []string{r.x.InstanceId} },
+		"instance-state-name": func(r ec2InstanceRow) []string { return []string{r.x.InstanceState.Name} },
+		"instance-type":       func(r ec2InstanceRow) []string { return []string{r.x.InstanceType} },
+		"image-id":            func(r ec2InstanceRow) []string { return []string{r.x.ImageId} },
+		"subnet-id":           func(r ec2InstanceRow) []string { return []string{r.x.SubnetId} },
+		"vpc-id":              func(r ec2InstanceRow) []string { return []string{r.vpcID} },
+		"private-ip-address":  func(r ec2InstanceRow) []string { return []string{r.x.PrivateIpAddress} },
+		"ip-address":          func(r ec2InstanceRow) []string { return []string{r.x.IpAddress} },
+		"availability-zone":   func(r ec2InstanceRow) []string { return []string{r.zone} },
+		"owner-id":            func(r ec2InstanceRow) []string { return []string{r.ownerID} },
+	},
+	tagID: func(r ec2InstanceRow) string { return r.x.InstanceId },
+}
+
+// ec2DescribeInstances answers InstanceId.N or, with none, the
+// region's instances, either way narrowed by instanceFilters.
 func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if _, ok := ec2NoFilters.read(w, req, "InstanceId.N"); !ok {
+	filters, ok := instanceFilters.read(w, req, "InstanceId.N")
+	if !ok {
 		return
 	}
-	wanted := parseInstanceIDs(req)
-	var instances []*repository.EC2Instance
-	if len(wanted) > 0 {
-		for _, id := range wanted {
-			inst, err := app.repo.GetInstance(account, region, id)
-			if err != nil {
-				// Surface the EC2-specific NotFound code so
-				// terraform-provider-aws's destroy wait-loop can treat
-				// the response as "instance is gone, deletion complete"
-				// instead of a generic hard error. Mirrors the SG /
-				// RouteTable fix earlier in this session.
-				writeInstanceError(w, id, err)
-				return
-			}
-			instances = append(instances, inst)
-		}
-	} else {
-		// Unfiltered describe: keep account-wide behavior to match the
-		// existing wire contract — terraform-provider-aws's import path
-		// doesn't expect region scoping at this endpoint.
-		var err error
-		instances, err = app.repo.ListInstances(account, "")
-		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-			return
-		}
+	instances, ok := app.ec2FindInstances(w, account, region, parseInstanceIDs(req))
+	if !ok {
+		return
 	}
 	enis, err := app.instanceENIs(account)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	subnets, err := app.repo.ListSubnets(account, region)
 	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
@@ -2455,15 +2487,46 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 		ReservationSet: make([]ec2ReservationXML, 0, len(instances)),
 	}
 	for _, inst := range instances {
-		x := ec2InstanceToXML(account, inst, enis[inst.ID])
-		x.TagSet = tags[inst.ID]
+		row := ec2InstanceRow{x: ec2InstanceToXML(account, inst, enis[inst.ID]), ownerID: account}
+		row.x.TagSet = tags[inst.ID]
+		if i := slices.IndexFunc(subnets, func(s *repository.EC2Subnet) bool { return s.ID == inst.SubnetID }); i >= 0 {
+			row.vpcID, row.zone = subnets[i].VPCID, subnets[i].AvailabilityZone
+		}
+		if !instanceFilters.matches(row, filters, tags) {
+			continue
+		}
 		out.ReservationSet = append(out.ReservationSet, ec2ReservationXML{
 			ReservationId: "r-" + ec2RandID(),
 			OwnerId:       account,
-			InstancesSet:  []ec2InstanceXML{x},
+			InstancesSet:  []ec2InstanceXML{row.x},
 		})
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInstances", &out)
+}
+
+// ec2FindInstances looks up each id or, with none, lists the region's
+// instances. It writes the error itself, InvalidInstanceID.NotFound
+// for a missing one, which the provider's destroy wait reads as gone,
+// and reports false.
+func (app *Application) ec2FindInstances(w http.ResponseWriter, account, region string, ids []string) ([]*repository.EC2Instance, bool) {
+	if len(ids) == 0 {
+		instances, err := app.repo.ListInstances(account, region)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return nil, false
+		}
+		return instances, true
+	}
+	var out []*repository.EC2Instance
+	for _, id := range ids {
+		inst, err := app.repo.GetInstance(account, region, id)
+		if err != nil {
+			writeInstanceError(w, id, err)
+			return nil, false
+		}
+		out = append(out, inst)
+	}
+	return out, true
 }
 
 // instanceENIs maps instance id → primary ENI, account-wide.
@@ -2487,17 +2550,30 @@ func enisByInstance(enis []*repository.EC2NetworkInterface) map[string]*reposito
 // ----- NetworkInterface handlers -----
 
 // eniFilterValues maps each DescribeNetworkInterfaces filter fakeaws
-// supports to the ENI's values for it. The provider's aws_subnet and
-// aws_security_group deletes list lingering ENIs by subnet-id and
-// group-id.
-var eniFilterValues = map[string]func(*repository.EC2NetworkInterface) []string{
-	"network-interface-id":   func(e *repository.EC2NetworkInterface) []string { return []string{e.ID} },
-	"attachment.instance-id": func(e *repository.EC2NetworkInterface) []string { return []string{e.InstanceID} },
-	"subnet-id":              func(e *repository.EC2NetworkInterface) []string { return []string{e.SubnetID} },
-	"group-id":               func(e *repository.EC2NetworkInterface) []string { return e.SecurityGroupIDs },
+// supports to the ENI's values for it, read off the answer. The
+// provider's aws_subnet and aws_security_group deletes list lingering
+// ENIs by subnet-id and group-id.
+var eniFilterValues = map[string]func(ec2NetworkInterfaceXML) []string{
+	"network-interface-id":     func(e ec2NetworkInterfaceXML) []string { return []string{e.NetworkInterfaceId} },
+	"attachment.instance-id":   func(e ec2NetworkInterfaceXML) []string { return []string{e.Attachment.InstanceId} },
+	"attachment.attachment-id": func(e ec2NetworkInterfaceXML) []string { return []string{e.Attachment.AttachmentId} },
+	"subnet-id":                func(e ec2NetworkInterfaceXML) []string { return []string{e.SubnetId} },
+	"vpc-id":                   func(e ec2NetworkInterfaceXML) []string { return []string{e.VpcId} },
+	"private-ip-address":       func(e ec2NetworkInterfaceXML) []string { return []string{e.PrivateIpAddress} },
+	"owner-id":                 func(e ec2NetworkInterfaceXML) []string { return []string{e.OwnerId} },
+	"group-id": func(e ec2NetworkInterfaceXML) []string {
+		var out []string
+		for _, g := range e.GroupSet {
+			out = append(out, g.GroupId)
+		}
+		return out
+	},
 }
 
-var eniFilters = ec2FilterTable[*repository.EC2NetworkInterface]{values: eniFilterValues}
+var eniFilters = ec2FilterTable[ec2NetworkInterfaceXML]{
+	values: eniFilterValues,
+	tagID:  func(e ec2NetworkInterfaceXML) string { return e.NetworkInterfaceId },
+}
 
 // writeInstanceError answers a failed instance lookup, with EC2's 400
 // InvalidInstanceID.NotFound for a missing instance.
@@ -2538,13 +2614,17 @@ func (app *Application) ec2DescribeNetworkInterfaces(w http.ResponseWriter, acco
 			return
 		}
 	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
+		return
+	}
 	out := ec2DescribeNetworkInterfacesResult{NetworkInterfaceSet: []ec2NetworkInterfaceXML{}}
 	for _, eni := range enis {
 		if len(ids) > 0 && !slices.Contains(ids, eni.ID) {
 			continue
 		}
-		if eniFilters.matches(eni, filters, nil) {
-			out.NetworkInterfaceSet = append(out.NetworkInterfaceSet, ec2ENIToXML(account, eni))
+		if x := ec2ENIToXML(account, eni); eniFilters.matches(x, filters, tags) {
+			out.NetworkInterfaceSet = append(out.NetworkInterfaceSet, x)
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeNetworkInterfaces", &out)
@@ -2799,37 +2879,55 @@ func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region 
 	awsproto.WriteEC2QueryRPCResponse(w, "ImportKeyPair", &out)
 }
 
-// ec2DescribeKeyPairs answers KeyName.N, terraform-provider-aws's
-// read path, and with none lists the region's key pairs. KeyPairId.N
-// is refused.
+// keyPairFilters are the DescribeKeyPairs filters fakeaws models.
+var keyPairFilters = ec2FilterTable[ec2KeyPairXML]{
+	values: map[string]func(ec2KeyPairXML) []string{
+		"key-name":    func(k ec2KeyPairXML) []string { return []string{k.KeyName} },
+		"key-pair-id": func(k ec2KeyPairXML) []string { return []string{k.KeyPairId} },
+		"fingerprint": func(k ec2KeyPairXML) []string { return []string{k.KeyFingerprint} },
+	},
+	tagID: func(k ec2KeyPairXML) string { return k.KeyPairId },
+}
+
+// ec2DescribeKeyPairs answers the region's key pairs narrowed by
+// KeyName.N, terraform-provider-aws's read path, KeyPairId.N and
+// keyPairFilters. An unknown KeyName.N or KeyPairId.N fails the call.
 func (app *Application) ec2DescribeKeyPairs(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if _, ok := ec2NoFilters.read(w, req, "KeyName.N"); !ok {
+	filters, ok := keyPairFilters.read(w, req, "KeyName.N", "KeyPairId.N")
+	if !ok {
 		return
 	}
-	wanted := queryListValues(req.Params, "KeyName.")
+	kps, err := app.repo.ListKeyPairs(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	names := queryListValues(req.Params, "KeyName.")
+	for _, name := range names {
+		if !slices.ContainsFunc(kps, func(kp *repository.EC2KeyPair) bool { return kp.Name == name }) {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, models.ErrNotFound)
+			return
+		}
+	}
+	ids := queryListValues(req.Params, "KeyPairId.")
+	for _, id := range ids {
+		if !slices.ContainsFunc(kps, func(kp *repository.EC2KeyPair) bool { return kp.ID == id }) {
+			// UNVERIFIED(aws-code): InvalidKeyPair.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				"InvalidKeyPair.NotFound", fmt.Sprintf("The key pair ID '%s' does not exist", id))
+			return
+		}
+	}
 	tags, ok := app.tagSets(w, account)
 	if !ok {
 		return
 	}
 	out := ec2DescribeKeyPairsResult{KeySet: []ec2KeyPairXML{}}
-	if len(wanted) == 0 {
-		// no filter — list all in region
-		kps, err := app.repo.ListKeyPairs(account, region)
-		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-			return
-		}
-		for _, kp := range kps {
-			out.KeySet = append(out.KeySet, ec2KeyPairToXML(kp, tags))
-		}
-	} else {
-		for _, name := range wanted {
-			kp, err := app.repo.GetKeyPair(account, region, name)
-			if err != nil {
-				awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-				return
-			}
-			out.KeySet = append(out.KeySet, ec2KeyPairToXML(kp, tags))
+	for _, kp := range kps {
+		x := ec2KeyPairToXML(kp, tags)
+		if (len(names) == 0 || slices.Contains(names, kp.Name)) && (len(ids) == 0 || slices.Contains(ids, kp.ID)) &&
+			keyPairFilters.matches(x, filters, tags) {
+			out.KeySet = append(out.KeySet, x)
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeKeyPairs", &out)

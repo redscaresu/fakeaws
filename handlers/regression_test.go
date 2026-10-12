@@ -1354,6 +1354,22 @@ func TestRegressionNetworkDescribesHonourTagFilters(t *testing.T) {
 	}
 }
 
+// TestRegressionDescribeInstancesListsOneRegion: an unfiltered
+// DescribeInstances listed every region's instances, and every
+// Filter.N was refused, so a filtered read of one region's instances
+// got 501 or another region's instance with 200. The list is the
+// caller's region and vpc-id selects in it.
+func TestRegressionDescribeInstancesListsOneRegion(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	netUS, vpcUS := filteredNet(t, srv, tagRegion, "1")
+	netEU, _ := filteredNet(t, srv, "eu-west-2", "1")
+	us := runInstance(t, srv, tagRegion, topLevelParams(netUS.subnet, netUS.sgs))
+	runInstance(t, srv, "eu-west-2", topLevelParams(netEU.subnet, netEU.sgs))
+
+	assert.Equal(t, []string{us}, describeIDs(t, srv, "DescribeInstances", nil).Instances, "unfiltered")
+	assert.Equal(t, []string{us}, describeIDs(t, srv, "DescribeInstances", ec2FilterParams("vpc-id", vpcUS)).Instances, "vpc-id")
+}
+
 // instanceAttribute is DescribeInstanceAttribute's <value> for name.
 func instanceAttribute(t *testing.T, srv *httptest.Server, id, name string) string {
 	t.Helper()
