@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/redscaresu/fakeaws/models"
@@ -292,4 +293,57 @@ func TestCreateEIPStepsPastAHeldIP(t *testing.T) {
 	assert.Equal(t, "203.0.113.255", create("eipalloc-3", testRegion, "203.0.113.255"))
 	assert.Equal(t, "203.0.113.0", create("eipalloc-4", testRegion, "203.0.113.255"), "wraps within the /24")
 	assert.Equal(t, "203.0.113.7", create("eipalloc-5", "eu-west-2", "203.0.113.7"), "another region's IP is not held")
+}
+
+func azRow(region, name, id string) AvailabilityZone {
+	return AvailabilityZone{
+		Region: region, ZoneName: name, ZoneID: id, State: "available", OptInStatus: "opt-in-not-required",
+		ZoneType: "availability-zone", GroupName: region, NetworkBorderGroup: region,
+	}
+}
+
+func zones(t *testing.T, r *Repository, region string) []AvailabilityZone {
+	t.Helper()
+	got, err := r.ListAvailabilityZones(testAccount, region)
+	require.NoError(t, err)
+	return got
+}
+
+// AZ rows are listed per account and region by zone name, survive
+// snapshot/restore and a reopen, and reset empties the table.
+func TestAvailabilityZonesLifecycle(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	r, err := New(dbPath)
+	require.NoError(t, err)
+	b, a := azRow(testRegion, "us-east-1b", "use1-az1"), azRow(testRegion, "us-east-1a", "use1-az6")
+	for _, z := range []AvailabilityZone{b, a, azRow("eu-west-2", "eu-west-2a", "euw2-az2")} {
+		require.NoError(t, r.PutAvailabilityZone(testAccount, z))
+	}
+	require.NoError(t, r.PutAvailabilityZone("111111111111", azRow(testRegion, "us-east-1c", "use1-az2")))
+	assert.Equal(t, []AvailabilityZone{a, b}, zones(t, r, testRegion))
+
+	require.NoError(t, r.Snapshot())
+	_, err = r.DB().Exec(`DELETE FROM availability_zones`)
+	require.NoError(t, err)
+	require.NoError(t, r.Restore())
+	assert.Equal(t, []AvailabilityZone{a, b}, zones(t, r, testRegion), "restore")
+
+	require.NoError(t, r.Close())
+	r, err = New(dbPath)
+	require.NoError(t, err)
+	defer r.Close()
+	assert.Equal(t, []AvailabilityZone{a, b}, zones(t, r, testRegion), "reopen")
+
+	require.NoError(t, r.Reset())
+	assert.Empty(t, zones(t, r, testRegion), "reset")
+	assert.Empty(t, zones(t, r, "eu-west-2"), "reset")
+}
+
+// An AZ row is account data: SetIdentity refuses an account change on
+// a database whose only row is one.
+func TestAvailabilityZoneRowIsNotEmpty(t *testing.T) {
+	r := setupRepo(t)
+	require.NoError(t, r.PutAvailabilityZone(testAccount, azRow(testRegion, "us-east-1a", "use1-az6")))
+	err := r.SetIdentity(Identity{AccountID: "111111111111"}, testAccount, nil)
+	assert.ErrorIs(t, err, models.ErrConflict)
 }

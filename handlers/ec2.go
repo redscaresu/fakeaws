@@ -155,6 +155,10 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "DescribeImages":
 		app.ec2DescribeImages(w, account, region, req)
 
+	// ----- AvailabilityZone (read-only) -----
+	case "DescribeAvailabilityZones":
+		app.ec2DescribeAvailabilityZones(w, account, region, req)
+
 	// ----- Resources fakeaws never creates (the scope sweep lists them) -----
 	case "DescribeVolumes", "DescribeNatGateways", "DescribeSnapshots", "DescribeLaunchTemplates":
 		ec2DescribeNone(w, req)
@@ -491,6 +495,11 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 	if refused {
 		return
 	}
+	_, zoneID, err := app.ec2Zones(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
 	id := "subnet-" + ec2RandID()
 	s := newEC2Subnet(account, region, id, vpcID, cidr, az)
 	err = app.repo.CreateSubnet(account, s)
@@ -502,7 +511,7 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	out := ec2CreateSubnetResult{Subnet: ec2SubnetToXML(account, s)}
+	out := ec2CreateSubnetResult{Subnet: ec2SubnetToXML(account, s, zoneID)}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateSubnet", &out)
 }
 
@@ -567,13 +576,18 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
+	_, zoneID, err := app.ec2Zones(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
 	tags, ok := app.tagSets(w, account)
 	if !ok {
 		return
 	}
 	out := ec2DescribeSubnetsResult{SubnetSet: make([]ec2SubnetXML, 0, len(subnets))}
 	for _, s := range subnets {
-		x := ec2SubnetToXML(account, s)
+		x := ec2SubnetToXML(account, s, zoneID)
 		x.TagSet = tags[s.ID]
 		if len(ids) > 0 && !slices.Contains(ids, s.ID) || !subnetFilters.matches(x, filters, tags) {
 			continue
@@ -667,7 +681,8 @@ func ec2VpcToXML(account string, v *repository.EC2VPC) ec2VpcXML {
 	}
 }
 
-func ec2SubnetToXML(account string, s *repository.EC2Subnet) ec2SubnetXML {
+// ec2SubnetToXML answers s, its availabilityZoneId from zoneID (ec2Zones).
+func ec2SubnetToXML(account string, s *repository.EC2Subnet, zoneID func(zone string) string) ec2SubnetXML {
 	// availableIpAddressCount derived from CIDR mask: /24 → 251 usable
 	// (256 − 5 reserved by AWS), /25 → 123, etc. Defaults to 251 if
 	// we can't parse the CIDR — close enough for tests that just
@@ -688,7 +703,7 @@ func ec2SubnetToXML(account string, s *repository.EC2Subnet) ec2SubnetXML {
 		State:                   s.State,
 		CidrBlock:               s.CidrBlock,
 		AvailabilityZone:        s.AvailabilityZone,
-		AvailabilityZoneId:      s.AvailabilityZone + "-az1",
+		AvailabilityZoneId:      zoneID(s.AvailabilityZone),
 		AvailableIpAddressCount: available,
 		OwnerId:                 account,
 		SubnetArn:               s.ARN,
@@ -3048,6 +3063,146 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeImages", &out)
+}
+
+// ----- AvailabilityZone -----
+
+type ec2AvailabilityZoneXML struct {
+	ZoneName           string `xml:"zoneName"`
+	ZoneId             string `xml:"zoneId"`
+	ZoneState          string `xml:"zoneState"`
+	RegionName         string `xml:"regionName"`
+	OptInStatus        string `xml:"optInStatus"`
+	ZoneType           string `xml:"zoneType"`
+	GroupName          string `xml:"groupName"`
+	NetworkBorderGroup string `xml:"networkBorderGroup"`
+}
+
+type ec2DescribeAvailabilityZonesResult struct {
+	AvailabilityZoneInfo []ec2AvailabilityZoneXML `xml:"availabilityZoneInfo>item"`
+}
+
+// zoneFilters are the DescribeAvailabilityZones filters fakeaws
+// models, each matched against what the zone answers. data.aws_
+// availability_zones sends state=available by default.
+var zoneFilters = ec2FilterTable[ec2AvailabilityZoneXML]{
+	values: map[string]func(ec2AvailabilityZoneXML) []string{
+		"zone-name":            func(z ec2AvailabilityZoneXML) []string { return []string{z.ZoneName} },
+		"zone-id":              func(z ec2AvailabilityZoneXML) []string { return []string{z.ZoneId} },
+		"state":                func(z ec2AvailabilityZoneXML) []string { return []string{z.ZoneState} },
+		"region-name":          func(z ec2AvailabilityZoneXML) []string { return []string{z.RegionName} },
+		"opt-in-status":        func(z ec2AvailabilityZoneXML) []string { return []string{z.OptInStatus} },
+		"zone-type":            func(z ec2AvailabilityZoneXML) []string { return []string{z.ZoneType} },
+		"group-name":           func(z ec2AvailabilityZoneXML) []string { return []string{z.GroupName} },
+		"network-border-group": func(z ec2AvailabilityZoneXML) []string { return []string{z.NetworkBorderGroup} },
+	},
+}
+
+// ec2FixedZoneLetters name the zones an unloaded database answers in
+// every region, <region>a to c. AWS's sets differ: us-east-1 has six
+// zones, ap-northeast-1 no b.
+const ec2FixedZoneLetters = "abc"
+
+// ec2Zones reads region's availability zones once, with zoneID giving
+// a zone name's id. On an unloaded database they are the fixed set,
+// and zoneID gives any zone name (CreateSubnet takes any) <zone>-az1.
+// On a loaded one they are the AZ table's rows for (account, region),
+// and zoneID gives a row's stored zone id, "" for a zone with no row.
+// An unreadable loaded flag is an error, never the fixed set.
+func (app *Application) ec2Zones(account, region string) ([]repository.AvailabilityZone, func(zone string) string, error) {
+	loaded, err := app.repo.Loaded()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !loaded {
+		zones := make([]repository.AvailabilityZone, 0, len(ec2FixedZoneLetters))
+		for _, letter := range ec2FixedZoneLetters {
+			zones = append(zones, repository.AvailabilityZone{ // ZoneID unset: zoneID gives it
+				Region: region, ZoneName: region + string(letter), State: "available",
+				OptInStatus: "opt-in-not-required", ZoneType: "availability-zone",
+				GroupName: region, NetworkBorderGroup: region,
+			})
+		}
+		return zones, func(zone string) string { return zone + "-az1" }, nil
+	}
+	zones, err := app.repo.ListAvailabilityZones(account, region)
+	if err != nil {
+		return nil, nil, err
+	}
+	ids := make(map[string]string, len(zones))
+	for _, z := range zones {
+		ids[z.ZoneName] = z.ZoneID
+	}
+	return zones, func(zone string) string { return ids[zone] }, nil
+}
+
+// ec2DescribeAvailabilityZones answers region's zones (ec2Zones)
+// through zoneFilters, ZoneName.N and ZoneId.N. A ZoneName.N or
+// ZoneId.N that is none of them answers 400 InvalidParameterValue
+// naming it, unless the region has none: no rows cannot show a zone
+// does not exist. Without AllAvailabilityZones=true a zone whose
+// opt-in-status is not-opted-in is left out, as in AWS.
+//
+// CRITICAL[ec2-az-loaded-never-fixed-set]: a loaded database answers
+// the AZ table's rows for (account, region) with their stored zone ids,
+// never the fixed a-c set; with no rows it answers an empty set classed
+// empty-collection, whatever ZoneName.N it names, and an unreadable loaded flag answers 500. A
+// subnet's availabilityZoneId is read through the same ec2Zones: the
+// row's zone id, "" for a zone with no row, never <zone>-az1.
+//
+// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func (app *Application) ec2DescribeAvailabilityZones(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	filters, ok := zoneFilters.read(w, req, "ZoneName.N", "ZoneId.N", "AllAvailabilityZones")
+	if !ok || refuseInvalidValues(w, req.Params, map[string][]string{"AllAvailabilityZones": {"true", "false"}}) {
+		return
+	}
+	zones, zoneID, err := app.ec2Zones(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	xs := make([]ec2AvailabilityZoneXML, len(zones))
+	zoneNames, zoneIDs := make([]string, len(zones)), make([]string, len(zones))
+	for i, z := range zones {
+		xs[i] = ec2AvailabilityZoneXML{
+			ZoneName: z.ZoneName, ZoneId: zoneID(z.ZoneName), ZoneState: z.State, RegionName: region,
+			OptInStatus: z.OptInStatus, ZoneType: z.ZoneType, GroupName: z.GroupName, NetworkBorderGroup: z.NetworkBorderGroup,
+		}
+		zoneNames[i], zoneIDs[i] = xs[i].ZoneName, xs[i].ZoneId
+	}
+	names, ids := queryListValues(req.Params, "ZoneName."), queryListValues(req.Params, "ZoneId.")
+	if len(zones) > 0 && (refuseUnknownZone(w, names, zoneNames, "The zone '%s' does not exist.") ||
+		refuseUnknownZone(w, ids, zoneIDs, "The zone ID '%s' does not exist.")) {
+		return
+	}
+	all := req.Params.Get("AllAvailabilityZones") == "true"
+	out := ec2DescribeAvailabilityZonesResult{AvailabilityZoneInfo: []ec2AvailabilityZoneXML{}}
+	for _, x := range xs {
+		if !all && x.OptInStatus == "not-opted-in" ||
+			len(names) > 0 && !slices.Contains(names, x.ZoneName) ||
+			len(ids) > 0 && !slices.Contains(ids, x.ZoneId) ||
+			!zoneFilters.matches(x, filters, nil) {
+			continue
+		}
+		out.AvailabilityZoneInfo = append(out.AvailabilityZoneInfo, x)
+	}
+	if len(zones) == 0 {
+		markClass(w, classEmptyCollection)
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, req.Action, &out)
+}
+
+// refuseUnknownZone answers 400 InvalidParameterValue, message msg
+// naming it, for the first of wanted not in known, and reports whether
+// it wrote.
+func refuseUnknownZone(w http.ResponseWriter, wanted, known []string, msg string) bool {
+	for _, v := range wanted {
+		if !slices.Contains(known, v) {
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue", fmt.Sprintf(msg, v))
+			return true
+		}
+	}
+	return false
 }
 
 // ec2NoneSets names the result set of each Describe for a resource
