@@ -294,6 +294,11 @@ func decodeAdminBody(w http.ResponseWriter, r *http.Request, v any) bool {
 // identity table, so a snapshot carries it, a restore brings it back, a
 // restart on the same file keeps it, and /mock/reset deletes it, which
 // returns AccountID to awsproto.FakeAccountID.
+//
+// MUST[responses-carry-the-stored-account]: every account a response
+// or /mock/state names comes from AccountID (or a row created under
+// it), never from awsproto.FakeAccountID, so no body carries the
+// default under a stored identity.
 func (app *Application) AccountID() (string, error) {
 	id, err := app.repo.GetIdentity()
 	if errors.Is(err, sql.ErrNoRows) {
