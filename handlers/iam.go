@@ -212,6 +212,7 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		app.iamListInstanceProfilesForRole(w, account, req)
 
 	default:
+		markClass(w, classNotModelled404)
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
 			fmt.Errorf("unsupported IAM action %q: %w", req.Action, models.ErrNotFound))
 	}

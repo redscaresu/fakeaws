@@ -194,11 +194,13 @@ func (app *Application) ssmDescribeParameters(w http.ResponseWriter, account, re
 	for _, f := range in.ParameterFilters {
 		if f.Key != "Name" || (f.Option != "" && f.Option != "Equals") {
 			writeUnimplemented(w, fmt.Sprintf("POST /ssm DescribeParameters ParameterFilter Key=%s Option=%s", f.Key, f.Option))
+			markClass(w, classFilterRefused)
 			return
 		}
 	}
 	if len(in.Filters) > 0 {
 		writeUnimplemented(w, "POST /ssm DescribeParameters Filters")
+		markClass(w, classFilterRefused)
 		return
 	}
 	params, err := app.repo.ListSSMParameters(account, region)
@@ -262,6 +264,7 @@ func ssmDecodeTagRequest(w http.ResponseWriter, op string, body []byte) (ssmTagR
 	}
 	if in.ResourceType != "Parameter" {
 		writeUnimplemented(w, "POST /ssm "+op+" ResourceType="+in.ResourceType)
+		markClass(w, classFilterRefused)
 		return in, false
 	}
 	return in, true

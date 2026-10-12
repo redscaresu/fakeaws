@@ -195,6 +195,7 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	// a log line — per concepts.md "Anti-patterns explicitly forbidden",
 	// no silent 200.
 	default:
+		markClass(w, classNotModelled404)
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("EC2 action %q not yet implemented in fakeaws v1: %w", req.Action, models.ErrNotFound))
 	}
@@ -896,6 +897,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 	filters := ec2Filters(req.Params)
 	for name := range filters {
 		if rtFilterValues[name] == nil {
+			markClass(w, classFilterRefused)
 			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 				fmt.Errorf("DescribeRouteTables filter %q not supported by fakeaws: %w", name, models.ErrConflict))
 			return
@@ -1177,6 +1179,7 @@ func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, reg
 	filters := ec2Filters(req.Params)
 	for name := range filters {
 		if name != "association-id" {
+			markClass(w, classFilterRefused)
 			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 				fmt.Errorf("DescribeAddresses filter %q not supported by fakeaws: %w", name, models.ErrConflict))
 			return
@@ -1266,6 +1269,7 @@ func (app *Application) ec2AssociateAddress(w http.ResponseWriter, account, regi
 		return
 	}
 	if req.Params.Get("AllowReassociation") == "true" {
+		markClass(w, classFilterRefused)
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("AssociateAddress AllowReassociation not supported by fakeaws: %w", models.ErrConflict))
 		return
@@ -2394,6 +2398,7 @@ func (app *Application) ec2DescribeNetworkInterfaces(w http.ResponseWriter, acco
 	filters := ec2Filters(req.Params)
 	for name := range filters {
 		if eniFilterValues[name] == nil {
+			markClass(w, classFilterRefused)
 			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 				fmt.Errorf("DescribeNetworkInterfaces filter %q not supported by fakeaws: %w", name, models.ErrConflict))
 			return
@@ -2771,6 +2776,7 @@ func ec2DescribeNone(w http.ResponseWriter, req awsproto.QueryRPCRequest) {
 	if refuseUnmodelled(w, req, "Filter.") {
 		return
 	}
+	markClass(w, classEmptyCollection)
 	awsproto.WriteEC2QueryRPCResponse(w, req.Action,
 		&ec2DescribeNoneResult{Set: ec2EmptySet{XMLName: xml.Name{Local: ec2NoneSets[req.Action]}}})
 }
@@ -2781,6 +2787,7 @@ func ec2DescribeNone(w http.ResponseWriter, req awsproto.QueryRPCRequest) {
 func refuseUnmodelled(w http.ResponseWriter, req awsproto.QueryRPCRequest, prefixes ...string) bool {
 	for k := range req.Params {
 		if slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(k, p) }) {
+			markClass(w, classFilterRefused)
 			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 				fmt.Errorf("%s parameter %q not supported by fakeaws: %w", req.Action, k, models.ErrConflict))
 			return true
@@ -3168,6 +3175,7 @@ func (app *Application) ec2DescribeTags(w http.ResponseWriter, account, region s
 	filters := ec2Filters(req.Params)
 	for name := range filters {
 		if tagFilterValues[name] == nil {
+			markClass(w, classFilterRefused)
 			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 				fmt.Errorf("DescribeTags filter %q not supported by fakeaws: %w", name, models.ErrConflict))
 			return

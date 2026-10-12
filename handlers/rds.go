@@ -125,6 +125,7 @@ func (app *Application) handleRDS(w http.ResponseWriter, r *http.Request) {
 		awsproto.WriteQueryRPCResponse(w, "DescribeDBParameters", &rdsDescribeDBParametersResult{Parameters: []rdsParameterXML{}})
 
 	default:
+		markClass(w, classNotModelled404)
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
 			fmt.Errorf("RDS action %q not yet implemented in fakeaws v1: %w", req.Action, models.ErrNotFound))
 	}

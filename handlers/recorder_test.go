@@ -315,3 +315,90 @@ func TestRequestLog_AdminTokenGatesIt(t *testing.T) {
 	assert.Equal(t, http.StatusOK, status, body)
 	assert.Contains(t, body, "secret-bucket-name", "the bearer reads the log")
 }
+
+// lastClass is the classification of the last request srv recorded.
+func lastClass(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	got := loggedRequests(t, srv)
+	require.NotEmpty(t, got)
+	return got[len(got)-1].Classification
+}
+
+func TestContract_request_log_not_modelled_404(t *testing.T) {
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	const region = "us-east-1"
+	for name, call := range map[string]func() (*http.Response, []byte){
+		"EC2 CreateNatGateway":         func() (*http.Response, []byte) { return ec2Call(t, srv, region, "CreateNatGateway", nil) },
+		"IAM CreateGroup":              func() (*http.Response, []byte) { return iamCall(t, srv, "CreateGroup", nil) },
+		"RDS CreateEventSubscription":  func() (*http.Response, []byte) { return rdsCall(t, srv, region, "CreateEventSubscription", nil) },
+		"DynamoDB CreateBackup":        func() (*http.Response, []byte) { return ddbCall(t, srv, region, "CreateBackup", `{}`) },
+		"SQS SendMessageBatch":         func() (*http.Response, []byte) { return sqsCall(t, srv, "SendMessageBatch", `{}`) },
+		"Secrets Manager RotateSecret": func() (*http.Response, []byte) { return smCall(t, srv, "RotateSecret", `{}`) },
+		"KMS Encrypt":                  func() (*http.Response, []byte) { return kmsCall(t, srv, region, "Encrypt", `{}`) },
+	} {
+		resp, body := call()
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, "%s: %s", name, body)
+		assert.Contains(t, string(body), "ResourceNotFoundException", name)
+		assert.Equal(t, "not-modelled-404", lastClass(t, srv), name)
+	}
+
+	_, unknown := ddbCall(t, srv, region, "CreateBackup", `{}`)
+	resp, missing := ddbCall(t, srv, region, "DescribeTable", `{"TableName":"missing"}`)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "%s", missing)
+	assert.Equal(t, string(unknown), string(missing), "a missing table is wire-identical to the default arm")
+	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "DescribeTable on a missing table")
+}
+
+func TestContract_request_log_filter_refused(t *testing.T) {
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	const region = "us-east-1"
+	var refused []byte
+	for _, action := range []string{"DescribeSecurityGroups", "DescribeVolumes", "DescribeRouteTables", "DescribeAddresses", "DescribeNetworkInterfaces", "DescribeTags"} {
+		var resp *http.Response
+		resp, refused = ec2Call(t, srv, region, action, url.Values{"Filter.1.Name": {"foo"}, "Filter.1.Value.1": {"bar"}})
+		assert.Equal(t, http.StatusConflict, resp.StatusCode, "%s: %s", action, refused)
+		assert.Equal(t, "filter-refused", lastClass(t, srv), action)
+	}
+
+	instNet := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+	instance := runInstance(t, srv, region, topLevelParams(instNet.subnet, instNet.sgs))
+	resp, body := ec2Call(t, srv, region, "AllocateAddress", url.Values{"Domain": {"vpc"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "AllocateAddress: %s", body)
+	resp, body = ec2Call(t, srv, region, "AssociateAddress", url.Values{
+		"AllocationId": {extractEC2Tag(body, "allocationId")}, "InstanceId": {instance}, "AllowReassociation": {"true"},
+	})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AllowReassociation: %s", body)
+	assert.Equal(t, "filter-refused", lastClass(t, srv), "AllowReassociation")
+
+	for _, c := range []struct{ name, op, body string }{
+		{"Filters", "DescribeParameters", `{"Filters":[{"Key":"Name","Values":["x"]}]}`},
+		{"non-Name ParameterFilter", "DescribeParameters", `{"ParameterFilters":[{"Key":"Type","Values":["String"]}]}`},
+		{"ListTagsForResource", "ListTagsForResource", `{"ResourceType":"Document","ResourceId":"x"}`},
+		{"AddTagsToResource", "AddTagsToResource", `{"ResourceType":"Document","ResourceId":"x","Tags":[{"Key":"k","Value":"v"}]}`},
+		{"RemoveTagsFromResource", "RemoveTagsFromResource", `{"ResourceType":"Document","ResourceId":"x","TagKeys":["k"]}`},
+	} {
+		resp, body := ssmCall(t, srv, c.op, c.body)
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s: %s", c.name, body)
+		assert.Equal(t, "filter-refused", lastClass(t, srv), c.name)
+	}
+
+	resp, body = ec2Call(t, srv, region, "CreateVpc", nil)
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateVpc without CidrBlock: %s", body)
+	assert.Equal(t, string(refused), string(body), "a modelled 409 is wire-identical to a refusal")
+	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "a modelled 409")
+}
+
+func TestContract_request_log_empty_collection(t *testing.T) {
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	const region = "us-east-1"
+	for _, action := range []string{"DescribeVolumes", "DescribeNatGateways", "DescribeSnapshots", "DescribeLaunchTemplates"} {
+		resp, body := ec2Call(t, srv, region, action, nil)
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", action, body)
+		assert.Equal(t, "empty-collection", lastClass(t, srv), action)
+	}
+
+	resp, body := ec2Call(t, srv, region, "DescribeVpcs", nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	require.Empty(t, extractEC2Tag(body, "vpcId"), "an empty account: %s", body)
+	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "DescribeVpcs on an empty account")
+}

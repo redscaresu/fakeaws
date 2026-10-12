@@ -15,6 +15,24 @@ type requestClass string
 const (
 	classAnsweredFromRows requestClass = "answered-from-rows"
 	classUnimplemented    requestClass = "unimplemented-501"
+
+	// CRITICAL[request-log-not-modelled-404]: the default arm of EC2,
+	// IAM, RDS, DynamoDB, SQS, Secrets Manager and KMS marks an
+	// unknown action not-modelled-404. Its 404 ResourceNotFoundException
+	// is wire-identical to a missing row's, so only the mark tells them
+	// apart.
+	classNotModelled404 requestClass = "not-modelled-404"
+
+	// CRITICAL[request-log-filter-refused]: a filter or parameter fakeaws
+	// refuses rather than ignores marks filter-refused and answers as
+	// before: EC2's 409 ConflictException, SSM's 501. A modelled 409
+	// stays answered-from-rows.
+	classFilterRefused requestClass = "filter-refused"
+
+	// CRITICAL[request-log-empty-collection]: a Describe of a resource
+	// fakeaws never creates (ec2DescribeNone) marks empty-collection; an
+	// empty answer read from rows stays answered-from-rows.
+	classEmptyCollection requestClass = "empty-collection"
 )
 
 // requestEntry is one recorded provider request, as GET /mock/requests
@@ -119,9 +137,10 @@ func (w *recordingWriter) Write(b []byte) (int, error) {
 // status of 500 or more and answered-from-rows for anything else.
 //
 // CRITICAL[request-log-unimplemented-501]: the router's NotFound and
-// MethodNotAllowed and every writeUnimplemented record unimplemented-501,
-// as does an unmarked 5xx; a 5xx is never answered-from-rows. A marked
-// class wins over the status, and the last mark wins.
+// MethodNotAllowed and every writeUnimplemented record unimplemented-501
+// (unless the site marks again after it), as does an unmarked 5xx; a 5xx
+// is never answered-from-rows. A marked class wins over the status, and
+// the last mark wins.
 func (w *recordingWriter) classification() requestClass {
 	switch {
 	case w.class != "":
