@@ -487,17 +487,18 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 			fmt.Sprintf("The CIDR '%s' is invalid.", cidr))
 		return
 	}
-	az := req.Params.Get("AvailabilityZone")
-	if az == "" {
-		az = region + "a"
+	zones, zoneID, err := app.ec2Zones(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	az, ok := subnetZone(req.Params, region, zones, zoneID)
+	if !ok {
+		ec2Refuse(w, req.Action, "AvailabilityZoneId")
+		return
 	}
 	specs, refused := refuseTagSpecifications(w, req.Params, "subnet")
 	if refused {
-		return
-	}
-	_, zoneID, err := app.ec2Zones(account, region)
-	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	id := "subnet-" + ec2RandID()
@@ -513,6 +514,25 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 	}
 	out := ec2CreateSubnetResult{Subnet: ec2SubnetToXML(account, s, zoneID)}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateSubnet", &out)
+}
+
+// subnetZone is the zone CreateSubnet places a subnet in:
+// AvailabilityZone, else the zone of zones (ec2Zones) whose id is
+// AvailabilityZoneId, else <region>a. It reports false for an
+// AvailabilityZoneId that is no zone's id, or another zone's than
+// AvailabilityZone names: fakeaws cannot tell an id it lacks from one
+// AWS lacks, so the caller refuses it rather than ignore it.
+func subnetZone(p url.Values, region string, zones []repository.AvailabilityZone, zoneID func(string) string) (string, bool) {
+	az := p.Get("AvailabilityZone")
+	if p.Has("AvailabilityZoneId") {
+		id := p.Get("AvailabilityZoneId")
+		i := slices.IndexFunc(zones, func(z repository.AvailabilityZone) bool { return zoneID(z.ZoneName) == id })
+		if i < 0 || az != "" && az != zones[i].ZoneName {
+			return "", false
+		}
+		az = zones[i].ZoneName
+	}
+	return cmp.Or(az, region+"a"), true
 }
 
 // subnetCIDRInRange reports whether EC2 accepts cidr as a subnet of a

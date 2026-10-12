@@ -3028,3 +3028,44 @@ func TestEC2_DescribeAvailabilityZonesAllAvailabilityZones(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
 	assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"))
 }
+
+// CreateSubnet places a subnet by AvailabilityZoneId when it is one of
+// the region's zone ids (ec2Zones), and refuses any other id, or one
+// that disagrees with AvailabilityZone, rather than ignore it.
+func TestEC2_CreateSubnetAvailabilityZoneId(t *testing.T) {
+	createIn := func(srv *httptest.Server, params url.Values) (*http.Response, []byte) {
+		params.Set("VpcId", tagVPC(t, srv))
+		params.Set("CidrBlock", "10.0.1.0/24")
+		return ec2Call(t, srv, tagRegion, "CreateSubnet", params)
+	}
+	srv := newTestServer(t, ":memory:")
+	for _, params := range []url.Values{
+		{"AvailabilityZoneId": {"us-east-1b-az1"}},
+		{"AvailabilityZoneId": {"us-east-1b-az1"}, "AvailabilityZone": {"us-east-1b"}},
+	} {
+		resp, body := createIn(srv, params)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%v: %s", params, body)
+		assert.Equal(t, "us-east-1b", extractEC2Tag(body, "availabilityZone"), "%v", params)
+		assert.Equal(t, "us-east-1b-az1", extractEC2Tag(body, "availabilityZoneId"), "%v", params)
+	}
+	for _, params := range []url.Values{
+		{"AvailabilityZoneId": {"use1-az1"}},
+		{"AvailabilityZoneId": {""}},
+		{"AvailabilityZoneId": {"us-east-1b-az1"}, "AvailabilityZone": {"us-east-1a"}},
+	} {
+		resp, body := createIn(srv, params)
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%v: %s", params, body)
+		assert.Equal(t, "CreateSubnet: not modelled by fakeaws: AvailabilityZoneId", extractEC2Tag(body, "Message"), "%v", params)
+	}
+	_, body := ec2Call(t, srv, tagRegion, "DescribeSubnets", nil)
+	assert.Equal(t, 2, strings.Count(string(body), "<subnetId>"), "a refusal creates nothing: %s", body)
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	markLoaded(t, dbPath, true)
+	app, loaded := newTestApp(t, dbPath)
+	putZones(t, app, storedZone("us-east-1d", "use1-az4", "opt-in-not-required"))
+	resp, body := createIn(loaded, url.Values{"AvailabilityZoneId": {"use1-az4"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "loaded: %s", body)
+	assert.Equal(t, "us-east-1d", extractEC2Tag(body, "availabilityZone"), "loaded")
+	assert.Equal(t, "use1-az4", extractEC2Tag(body, "availabilityZoneId"), "loaded")
+}
