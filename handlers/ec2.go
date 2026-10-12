@@ -3132,13 +3132,17 @@ type ec2TagXML struct {
 
 // tagFilters are the DescribeTags filters fakeaws models. The provider
 // filters by resource-id, and by key for single-tag lookups (the
-// instance read's launch-template tags).
-var tagFilters = ec2FilterTable[repository.EC2Tag]{values: map[string]func(repository.EC2Tag) []string{
-	"resource-id":   func(t repository.EC2Tag) []string { return []string{t.ResourceID} },
-	"resource-type": func(t repository.EC2Tag) []string { return []string{t.ResourceType} },
-	"key":           func(t repository.EC2Tag) []string { return []string{t.Key} },
-	"value":         func(t repository.EC2Tag) []string { return []string{t.Value} },
-}}
+// instance read's launch-template tags). A tag's empty value is a
+// value: value=* and an empty value match it.
+var tagFilters = ec2FilterTable[repository.EC2Tag]{
+	values: map[string]func(repository.EC2Tag) []string{
+		"resource-id":   func(t repository.EC2Tag) []string { return []string{t.ResourceID} },
+		"resource-type": func(t repository.EC2Tag) []string { return []string{t.ResourceType} },
+		"key":           func(t repository.EC2Tag) []string { return []string{t.Key} },
+		"value":         func(t repository.EC2Tag) []string { return []string{t.Value} },
+	},
+	emptyIsValue: []string{"value"},
+}
 
 // ec2DescribeTags lists the region's tags matching every filter; no
 // match is a 200 with an empty tagSet. An unsupported filter is

@@ -124,12 +124,14 @@ func ec2IndexOrder(a, b string) int {
 // ec2FilterTable is what one Describe honours: values maps each
 // filter name to a row's values for it, "" meaning the row lacks the
 // attribute, so it matches no value, * and ? included (an unattached
-// ENI's attachment.instance-id). Setting tagID opts the table
-// into tag:<Key>, tag-key and tag-value, matched against the tags of
-// the resource tagID(row) names.
+// ENI's attachment.instance-id), but for the names in emptyIsValue,
+// whose "" is a value (a tag's empty value: * and an empty value match
+// it). Setting tagID opts the table into tag:<Key>, tag-key and
+// tag-value, matched against the tags of the resource tagID(row) names.
 type ec2FilterTable[R any] struct {
-	values map[string]func(R) []string
-	tagID  func(R) string
+	values       map[string]func(R) []string
+	emptyIsValue []string
+	tagID        func(R) string
 }
 
 // unmodelled lists what t cannot honour in filters: each name it
@@ -168,6 +170,9 @@ func (t ec2FilterTable[R]) matches(row R, filters []ec2Filter, tags map[string][
 // tag's value is kept even when "": tag-value=* matches it.
 func (t ec2FilterTable[R]) valuesFor(name string) func(R, map[string][]ec2ResourceTagXML) []string {
 	if get := t.values[name]; get != nil {
+		if slices.Contains(t.emptyIsValue, name) {
+			return func(row R, _ map[string][]ec2ResourceTagXML) []string { return get(row) }
+		}
 		return func(row R, _ map[string][]ec2ResourceTagXML) []string {
 			// Clone first: get may hand back the row's own slice.
 			return slices.DeleteFunc(slices.Clone(get(row)), func(v string) bool { return v == "" })
