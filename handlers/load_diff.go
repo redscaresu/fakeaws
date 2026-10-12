@@ -70,15 +70,18 @@ type Tree struct {
 	json   bool // name is a JSON key
 	member bool
 	kids   []*Tree
-	index  int // among its same-named siblings, set by diffAppend
+	index  int // among its same-named siblings in the body it was parsed from, or in MergePages's tree; set by diffAppend
 }
 
-// diffAppend adds kid to parent, indexed among parent's same-named kids:
-// the index a path names, which Subtree and prune keep.
+// diffAppend adds kid to parent, indexed among parent's kids in its
+// group: the index a path names, which Subtree and prune keep.
+//
+// ponytail: O(n²) per parent; keep a per-group count if one set reaches
+// ~100k members.
 func diffAppend(parent, kid *Tree) {
 	kid.index = 0
 	for _, k := range parent.kids {
-		if k.name == kid.name && k.json == kid.json && k.member == kid.member {
+		if k.group() == kid.group() {
 			kid.index++
 		}
 	}
@@ -362,9 +365,10 @@ func diffRootPath(t *Tree) string {
 // Diff compares a recorded body with fakeaws's rendering. It returns the
 // paths only the recording holds or whose value differs, and the paths
 // only the rendering holds, each sorted; equal is both empty. A path
-// runs from below the root and names a set member's index in its own
-// tree, counting the members pruning drops (vpcSet/item[2]/isDefault);
-// a root's own value is named by
+// runs from below the root and names a set member's index in the body it
+// was parsed from (or MergePages's tree), so a Subtree'd member keeps its
+// body index and a member pruning drops still counts
+// (vpcSet/item[2]/isDefault). A root's own value is named by
 // diffRootPath, and a member with no counterpart is named whole. Two
 // differently named XML roots are named and nothing under them compared.
 // diffAlwaysIgnored's fields and key's ignore entries (applied here and
@@ -443,18 +447,22 @@ func (d treeDiffer) prune(t *Tree, shape string) *Tree {
 	return &c
 }
 
+// diffGroupKey is what makes kids same-named siblings: compared as one
+// group, and indexed within it.
 type diffGroupKey struct {
 	name   string
 	json   bool
 	member bool
 }
 
+func (t *Tree) group() diffGroupKey { return diffGroupKey{t.name, t.json, t.member} }
+
 // diffGroups groups t's kids by name, the groups in a fixed order.
 func diffGroups(t *Tree) (map[diffGroupKey][]*Tree, []diffGroupKey) {
 	groups := map[diffGroupKey][]*Tree{}
 	var order []diffGroupKey
 	for _, k := range t.kids {
-		g := diffGroupKey{k.name, k.json, k.member}
+		g := k.group()
 		if _, ok := groups[g]; !ok {
 			order = append(order, g)
 		}
