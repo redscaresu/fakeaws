@@ -309,15 +309,22 @@ func TestIAM_PutGetDeleteUserPolicy(t *testing.T) {
 // returns its document URL-decoded, as the provider reads it.
 func getRolePolicyDocument(t *testing.T, srv *httptest.Server, role, name string) string {
 	t.Helper()
+	doc, err := url.QueryUnescape(getRolePolicyWire(t, srv, role, name))
+	require.NoError(t, err, "PolicyDocument is not URL-encoded")
+	return doc
+}
+
+// getRolePolicyWire returns GetRolePolicy's PolicyDocument as sent,
+// still URL-encoded.
+func getRolePolicyWire(t *testing.T, srv *httptest.Server, role, name string) string {
+	t.Helper()
 	resp, body := iamCall(t, srv, "GetRolePolicy", url.Values{"RoleName": {role}, "PolicyName": {name}})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "GetRolePolicy: %s", body)
 	var out struct {
 		PolicyDocument string `xml:"GetRolePolicyResult>PolicyDocument"`
 	}
 	require.NoError(t, xml.Unmarshal(body, &out), "GetRolePolicy body: %s", body)
-	doc, err := url.QueryUnescape(out.PolicyDocument)
-	require.NoError(t, err, "PolicyDocument is not URL-encoded: %s", body)
-	return doc
+	return out.PolicyDocument
 }
 
 // listRolePolicies returns the inline-policy names ListRolePolicies
@@ -334,9 +341,10 @@ func listRolePolicies(t *testing.T, srv *httptest.Server, role string) []string 
 }
 
 // TestIAM_RoleInlinePolicyLifecycle pins aws_iam_role_policy's calls:
-// Put then Get answers the document byte-exact once URL-decoded, List
-// names it, a second Put replaces it, Delete removes it, and Put on a
-// missing role or Get or Delete of an absent name is NoSuchEntity. A role holding an inline
+// Put then Get answers the document byte-exact once URL-decoded and
+// RFC 3986 encoded on the wire, List names it, a second Put replaces
+// it, Delete removes it, and Put or List on a missing role or Get or
+// Delete of an absent name is NoSuchEntity, naming the missing one. A role holding an inline
 // policy refuses DeleteRole with DeleteConflict and keeps both.
 func TestIAM_RoleInlinePolicyLifecycle(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
@@ -345,6 +353,11 @@ func TestIAM_RoleInlinePolicyLifecycle(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "PutRolePolicy on a missing role: %s", body)
 	assert.Contains(t, string(body), "<Code>NoSuchEntity</Code>", "PutRolePolicy on a missing role")
+	assert.Contains(t, string(body), "<Message>The role with name app cannot be found.</Message>", "PutRolePolicy on a missing role")
+	resp, body = iamCall(t, srv, "ListRolePolicies", url.Values{"RoleName": {"app"}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ListRolePolicies on a missing role: %s", body)
+	assert.Contains(t, string(body), "<Code>NoSuchEntity</Code>", "ListRolePolicies on a missing role")
+	assert.Contains(t, string(body), "<Message>The role with name app cannot be found.</Message>", "ListRolePolicies on a missing role")
 	resp, body = iamCall(t, srv, "CreateRole", url.Values{"RoleName": {"app"}})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateRole: %s", body)
 	put := func(doc string) {
@@ -361,6 +374,11 @@ func TestIAM_RoleInlinePolicyLifecycle(t *testing.T) {
 
 	put(v1)
 	assert.Equal(t, v1, getRolePolicyDocument(t, srv, "app", "s3"))
+	// IAM's RFC 3986 encoding: a space is %20, a '+' is %2B.
+	assert.Contains(t, getRolePolicyWire(t, srv, "app", "s3"), "a%2Bb%2520c%26d%20e", "PolicyDocument on the wire")
+	resp, body = iamCall(t, srv, "GetRolePolicy", url.Values{"RoleName": {"app"}, "PolicyName": {"absent"}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "GetRolePolicy of an absent name: %s", body)
+	assert.Contains(t, string(body), "<Message>The role policy with name absent cannot be found.</Message>")
 	assert.Equal(t, []string{"s3"}, listRolePolicies(t, srv, "app"))
 
 	put(v2)

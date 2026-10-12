@@ -1167,7 +1167,7 @@ type iamGetUserPolicyResult struct {
 func (app *Application) iamPutRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	p := req.Params
 	if err := app.repo.PutRolePolicy(account, p.Get("RoleName"), p.Get("PolicyName"), p.Get("PolicyDocument")); err != nil {
-		iamWriteRolePolicyError(w, p.Get("RoleName"), err)
+		app.iamWriteRolePolicyError(w, account, req, err)
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "PutRolePolicy", nil)
@@ -1178,25 +1178,27 @@ func (app *Application) iamPutRolePolicy(w http.ResponseWriter, account string, 
 func (app *Application) iamDeleteRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	p := req.Params
 	if err := app.repo.DeleteRolePolicy(account, p.Get("RoleName"), p.Get("PolicyName")); err != nil {
-		iamWriteRolePolicyError(w, p.Get("RoleName"), err)
+		app.iamWriteRolePolicyError(w, account, req, err)
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteRolePolicy", nil)
 }
 
 // iamGetRolePolicy reads back a role's inline policy, its document
-// URL-encoded as IAM sends it (the provider URL-decodes it).
+// URL-encoded as IAM sends it: RFC 3986, a space as %20 (QueryEscape
+// writes '+', and has already turned a literal '+' into %2B). The
+// provider URL-decodes it.
 func (app *Application) iamGetRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	role, name := req.Params.Get("RoleName"), req.Params.Get("PolicyName")
 	doc, err := app.repo.GetRolePolicy(account, role, name)
 	if err != nil {
-		iamWriteRolePolicyError(w, role, err)
+		app.iamWriteRolePolicyError(w, account, req, err)
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "GetRolePolicy", &iamGetRolePolicyResult{
 		RoleName:       role,
 		PolicyName:     name,
-		PolicyDocument: url.QueryEscape(doc),
+		PolicyDocument: strings.ReplaceAll(url.QueryEscape(doc), "+", "%20"),
 	})
 }
 
@@ -1208,15 +1210,23 @@ type iamGetRolePolicyResult struct {
 	PolicyDocument string `xml:"PolicyDocument"`
 }
 
-// iamWriteRolePolicyError writes an inline role policy call's failure,
-// NoSuchEntity for a missing role or policy as IAM does.
-func iamWriteRolePolicyError(w http.ResponseWriter, role string, err error) {
-	if errors.Is(err, models.ErrNotFound) {
-		awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
-			"NoSuchEntity", "The role policy or role with name "+role+" cannot be found.")
+// iamWriteRolePolicyError writes an inline role policy call's failure:
+// NoSuchEntity as IAM does, naming the role when the role is missing,
+// else the policy.
+func (app *Application) iamWriteRolePolicyError(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest, err error) {
+	if !errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+	role := req.Params.Get("RoleName")
+	msg := "The role policy with name " + req.Params.Get("PolicyName") + " cannot be found."
+	if _, err := app.repo.GetRole(account, role); errors.Is(err, models.ErrNotFound) {
+		msg = "The role with name " + role + " cannot be found."
+	} else if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound, "NoSuchEntity", msg)
 }
 
 func (app *Application) iamDetachRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
@@ -1290,11 +1300,12 @@ type iamListAttachedRolePoliciesResult struct {
 // role_inline_policies. terraform-provider-aws calls this as part of
 // the aws_iam_role Read flow after CreateRole; returning the default
 // unsupported-action 404 made the provider conclude the role didn't
-// exist. A missing role is 404 ResourceNotFoundException.
+// exist. A missing role is 404 NoSuchEntity, which the provider's
+// role destroy reads as already gone.
 func (app *Application) iamListRolePolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("RoleName")
 	if _, err := app.repo.GetRole(account, name); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		app.iamWriteRolePolicyError(w, account, req, err)
 		return
 	}
 	names, err := app.repo.ListRolePolicies(account, name)
