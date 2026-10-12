@@ -206,11 +206,17 @@ func (t ec2FilterTable[R]) valuesFor(name string) func(R, map[string][]ec2Resour
 // read parses req's Filter.N and refuses, in one answer, each filter t
 // cannot honour and each other param whose name (ec2ParamName) is not
 // in reads, but MaxResults and NextToken: fakeaws answers every
-// Describe in one page. It reports false when it refused.
+// Describe in one page. A key with a literal N segment (VpcId.N itself)
+// is refused too: its name would equal the declared VpcId.N, but
+// queryListValues reads only digit indexes and would drop it. It
+// reports false when it refused.
 func (t ec2FilterTable[R]) read(w http.ResponseWriter, req awsproto.QueryRPCRequest, reads ...string) ([]ec2Filter, bool) {
 	var unread []string
 	for k := range req.Params {
-		if !strings.HasPrefix(k, "Filter.") && k != "MaxResults" && k != "NextToken" && !slices.Contains(reads, ec2ParamName(k)) {
+		if strings.HasPrefix(k, "Filter.") || k == "MaxResults" || k == "NextToken" {
+			continue
+		}
+		if !slices.Contains(reads, ec2ParamName(k)) || slices.Contains(strings.Split(k, "."), "N") {
 			unread = append(unread, k)
 		}
 	}

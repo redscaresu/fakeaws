@@ -1300,3 +1300,23 @@ func TestRegressionQueryListReadsEveryIndex(t *testing.T) {
 		assert.Contains(t, string(body), "<VpcSecurityGroupId>"+sg+"</VpcSecurityGroupId>", "stored")
 	}
 }
+
+// TestRegressionDescribeLiteralNIndexRefused: read compared a raw key's
+// ec2ParamName with the declared names, and a key spelled with a literal
+// N (VpcId.N=x) equals the declared VpcId.N, so it was accepted while
+// queryListValues, reading only digit indexes, dropped it: DescribeVpcs
+// answered 200 with every VPC. A literal N is refused, named.
+func TestRegressionDescribeLiteralNIndexRefused(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	tagVPC(t, srv)
+	for action, key := range map[string]string{
+		"DescribeVpcs":      "VpcId.N",
+		"DescribeInstances": "InstanceId.N",
+		"DescribeImages":    "Owner.N",
+		"DescribeSnapshots": "Owner.N",
+	} {
+		resp, body := ec2Call(t, srv, tagRegion, action, url.Values{key: {"x"}})
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s %s: %s", action, key, body)
+		assert.Equal(t, action+": not modelled by fakeaws: "+key, extractEC2Tag(body, "Message"), action)
+	}
+}
