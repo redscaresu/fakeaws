@@ -113,7 +113,9 @@ func ec2IsIndex(s string) bool {
 }
 
 // ec2FilterTable is what one Describe honours: values maps each
-// filter name to a row's values for it. Setting tagID opts the table
+// filter name to a row's values for it, "" meaning the row lacks the
+// attribute, so it matches no value, * and ? included (an unattached
+// ENI's attachment.instance-id). Setting tagID opts the table
 // into tag:<Key>, tag-key and tag-value, matched against the tags of
 // the resource tagID(row) names.
 type ec2FilterTable[R any] struct {
@@ -153,10 +155,14 @@ func (t ec2FilterTable[R]) matches(row R, filters []ec2Filter, tags map[string][
 }
 
 // valuesFor returns how t reads filter name's values off a row, and
-// nil for a name t does not honour.
+// nil for a name t does not honour (tag: with no key among them). A
+// tag's value is kept even when "": tag-value=* matches it.
 func (t ec2FilterTable[R]) valuesFor(name string) func(R, map[string][]ec2ResourceTagXML) []string {
 	if get := t.values[name]; get != nil {
-		return func(row R, _ map[string][]ec2ResourceTagXML) []string { return get(row) }
+		return func(row R, _ map[string][]ec2ResourceTagXML) []string {
+			// Clone first: get may hand back the row's own slice.
+			return slices.DeleteFunc(slices.Clone(get(row)), func(v string) bool { return v == "" })
+		}
 	}
 	if t.tagID == nil {
 		return nil
@@ -167,7 +173,7 @@ func (t ec2FilterTable[R]) valuesFor(name string) func(R, map[string][]ec2Resour
 		pick = func(tag ec2ResourceTagXML) (string, bool) { return tag.Key, true }
 	case name == "tag-value":
 		pick = func(tag ec2ResourceTagXML) (string, bool) { return tag.Value, true }
-	case isKey:
+	case isKey && key != "":
 		pick = func(tag ec2ResourceTagXML) (string, bool) { return tag.Value, tag.Key == key }
 	default:
 		return nil

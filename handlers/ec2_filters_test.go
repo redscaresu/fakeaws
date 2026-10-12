@@ -24,7 +24,7 @@ var eniTable = ec2FilterTable[*repository.EC2NetworkInterface]{
 }
 
 var testENIs = []*repository.EC2NetworkInterface{
-	{ID: "eni-a", SubnetID: "subnet-1", SecurityGroupIDs: []string{"sg-a"}},
+	{ID: "eni-a", SubnetID: "subnet-1", SecurityGroupIDs: []string{"sg-a"}, InstanceID: "i-1"},
 	{ID: "eni-b", SubnetID: "subnet-2", SecurityGroupIDs: []string{"sg-b"}},
 	{ID: "eni-ab", SubnetID: "subnet-1", SecurityGroupIDs: []string{"sg-a", "sg-b"}},
 	{ID: "eni-none", SubnetID: "subnet-3"},
@@ -74,6 +74,18 @@ func TestEC2Filter_AndAcrossOrWithin(t *testing.T) {
 	}
 }
 
+// An attribute a row lacks reads "" (an unattached ENI's
+// attachment.instance-id) and matches no value, * and ? included.
+func TestEC2Filter_AbsentAttributeMatchesNothing(t *testing.T) {
+	assert.Equal(t, []string{"eni-a"}, matchingENIs(t, "Filter.1.Name=attachment.instance-id&Filter.1.Value.1=*", nil))
+	assert.Equal(t, []string{}, matchingENIs(t, "Filter.1.Name=attachment.instance-id&Filter.1.Value.1=?", nil))
+
+	row := &repository.EC2NetworkInterface{SecurityGroupIDs: []string{"", "sg-x"}}
+	filters := parseEC2Filters(url.Values{"Filter.1.Name": {"group-id"}, "Filter.1.Value.1": {"sg-x"}})
+	assert.True(t, eniTable.matches(row, filters, nil))
+	assert.Equal(t, []string{"", "sg-x"}, row.SecurityGroupIDs, "matching must not edit the row")
+}
+
 func TestEC2Filter_WildcardCrossesSlash(t *testing.T) {
 	nameTable := ec2FilterTable[string]{values: map[string]func(string) []string{
 		"name": func(s string) []string { return []string{s} },
@@ -102,12 +114,19 @@ func TestEC2Filter_WildcardCrossesSlash(t *testing.T) {
 
 func TestEC2Filter_Tags(t *testing.T) {
 	tags := map[string][]ec2ResourceTagXML{
-		"eni-a": {{Key: "Name", Value: "web"}},
-		"eni-b": {{Key: "Name", Value: "db"}, {Key: "Role", Value: "web"}},
+		"eni-a":    {{Key: "Name", Value: "web"}},
+		"eni-b":    {{Key: "Name", Value: "db"}, {Key: "Role", Value: "web"}},
+		"eni-none": {{Key: "Empty", Value: ""}},
 	}
 	assert.Equal(t, []string{"eni-a"}, matchingENIs(t, "Filter.1.Name=tag:Name&Filter.1.Value.1=web", tags))
 	assert.Equal(t, []string{"eni-b"}, matchingENIs(t, "Filter.1.Name=tag-key&Filter.1.Value.1=Role", tags))
 	assert.Equal(t, []string{"eni-a", "eni-b"}, matchingENIs(t, "Filter.1.Name=tag-value&Filter.1.Value.1=web", tags))
+	assert.Equal(t, []string{"eni-a", "eni-b", "eni-none"}, matchingENIs(t, "Filter.1.Name=tag-value&Filter.1.Value.1=*", tags),
+		"a tag whose value is empty still has a value")
+	assert.Equal(t, []string{"eni-none"}, matchingENIs(t, "Filter.1.Name=tag:Empty&Filter.1.Value.1=*", tags))
+
+	noKey := parseEC2Filters(url.Values{"Filter.1.Name": {"tag:"}, "Filter.1.Value.1": {"x"}})
+	assert.Equal(t, []string{"tag:"}, eniTable.unmodelled(noKey), "tag: with no key is refused by name")
 
 	rtTable := ec2FilterTable[ec2RouteTableXML]{values: rtFilterValues}
 	for _, name := range []string{"tag:Name", "tag-key", "tag-value"} {
