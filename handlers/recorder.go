@@ -38,9 +38,10 @@ const (
 	// AWS would accept but fakeaws does not model (a filter, a parameter,
 	// a tag resource type, or a required-parameter check stricter than
 	// AWS's) marks filter-refused: every EC2 site through ec2Refuse, 501
-	// NotImplemented, RDS and Route53 at 400, SSM at 501. A refusal AWS
-	// makes too, a modelled 409 and a filter or parameter fakeaws ignores
-	// rather than refuses stay answered-from-rows.
+	// NotImplemented, RDS and Route53 at 400, SSM and KMS (DescribeKey
+	// by alias) at 501. A refusal AWS makes too, a modelled 409 and a
+	// filter or parameter fakeaws ignores rather than refuses stay
+	// answered-from-rows.
 	classFilterRefused requestClass = "filter-refused"
 
 	// CRITICAL[request-log-empty-collection]: only ec2DescribeNone, the

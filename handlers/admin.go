@@ -37,6 +37,7 @@ import (
 //	  "secretsmanager": {...},
 //	  "route53":        {...},
 //	  "ssm":            {"parameters": [...]},  // name, type, version, region; no values
+//	  "kms":            {"keys": [...]},  // key_id, arn, state, region, account
 //	  "operations":     [...],   // bookkeeping; ignored by countOrphans
 //	  "audit":          [...]    // request log, {service, protocol, action, status, class}; ignored by countOrphans
 //	}
@@ -298,11 +299,7 @@ func decodeAdminBody(w http.ResponseWriter, r *http.Request, v any) bool {
 //
 // MUST[responses-carry-the-stored-account]: a resource created under
 // the stored identity is answered with that account, in its responses
-// and in /mock/state, never with awsproto.FakeAccountID. KMS keys are
-// the exception: kmsStore is process memory, outside /mock/reset,
-// snapshot, restore and the empty-database check of
-// identity-change-refused-on-non-empty-db, so a key created before an
-// identity change keeps the account it was created under.
+// and in /mock/state, never with awsproto.FakeAccountID.
 func (app *Application) AccountID() (string, error) {
 	id, err := app.repo.GetIdentity()
 	if errors.Is(err, sql.ErrNoRows) {
@@ -341,8 +338,8 @@ func (app *Application) setIdentity(id repository.Identity) error {
 // shaped like us-east-1, else 400 naming the field.
 //
 // CRITICAL[identity-change-refused-on-non-empty-db]: a different account
-// on a database holding any row outside repository.emptyExclusions is
-// 409 naming both ids, and the stored account stays, so resources made
+// on a database holding any row repository's isEmpty counts is 409
+// naming both ids, and the stored account stays, so resources made
 // under one account never read back under another. -account refuses the
 // same way at boot.
 func (app *Application) handleMockIdentity(w http.ResponseWriter, r *http.Request) {
@@ -509,6 +506,7 @@ func (app *Application) collectState(service string) (map[string]any, error) {
 		{"route53", app.gatherRoute53StateReal},
 		{"secretsmanager", app.gatherSecretsManagerStateReal},
 		{"ssm", app.gatherSSMStateReal},
+		{"kms", app.gatherKMSStateReal},
 	} {
 		if service != "" && service != g.service {
 			continue

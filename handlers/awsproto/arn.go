@@ -156,3 +156,8 @@ func BuildRoute53HostedZoneARN(id string) string {
 func BuildSSMParameterARN(region, account, name string) string {
 	return fmt.Sprintf("arn:aws:ssm:%s:%s:parameter/%s", region, account, strings.TrimPrefix(name, "/"))
 }
+
+// BuildKMSKeyARN: arn:aws:kms:<region>:<account>:key/<key-id>
+func BuildKMSKeyARN(region, account, keyID string) string {
+	return fmt.Sprintf("arn:aws:kms:%s:%s:key/%s", region, account, keyID)
+}
