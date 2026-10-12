@@ -228,11 +228,12 @@ func matchHandlerFile(t *testing.T, dir, id string) bool {
 // knownNonServiceFiles lists handler-package files that aren't
 // service handlers — they're shared infrastructure (router wiring,
 // admin endpoints, audit tests, etc.) and shouldn't appear in
-// LandedServices.
+// LandedServices. serviceFilePrefixes also skips every load_*.go: the
+// loader's files, one per service, belong to /mock/load.
 var knownNonServiceFiles = map[string]bool{
 	"handlers.go":            true,
 	"admin.go":               true,
-	"load_diff.go":           true,
+	"load.go":                true,
 	"recorder.go":            true,
 	"regression_manifest.go": true,
 	"tags.go":                true,
@@ -248,7 +249,7 @@ func serviceFilePrefixes(t *testing.T, dir string) map[string]bool {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		if knownNonServiceFiles[name] {
+		if knownNonServiceFiles[name] || strings.HasPrefix(name, "load_") {
 			continue
 		}
 		base := strings.TrimSuffix(name, ".go")

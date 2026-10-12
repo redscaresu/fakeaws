@@ -32,12 +32,14 @@ type Application struct {
 	dbPath     string
 	adminToken string
 	requests   *requestLog // nil unless Options.RecordRequests
+	// loadMaxBytes is Options.LoadMaxBytes.
+	loadMaxBytes int64
 	// identityMu is held shared by every AWS request, /mock/images and
 	// /mock/state, from the account read to the last read or write, and
 	// exclusively by everything that changes the identity or the db
-	// handle (setIdentity, /mock/reset, /mock/restore) and by
-	// /mock/snapshot, so none of them lands between a handler's account
-	// read and the rows it reads or writes under that account.
+	// handle (setIdentity, /mock/reset, /mock/restore, /mock/load) and
+	// by /mock/snapshot, so none of them lands between a handler's
+	// account read and the rows it reads or writes under that account.
 	identityMu sync.RWMutex
 }
 
@@ -68,6 +70,12 @@ type Options struct {
 	// recorded, /mock/state's audit is [], and /mock/requests and
 	// /mock/requests/clear are the router's 501.
 	RecordRequests bool
+	// LoadMaxBytes, when above 0, serves POST /mock/load, which takes a
+	// recorded read of at most this many bytes; 0 leaves it unrouted. A
+	// load replaces every row, so NewApplication refuses it without an
+	// AdminToken (ErrLoadNeedsAdminToken), as cmd/fakeaws refuses the
+	// flag naming -admin-token and FAKEAWS_ADMIN_TOKEN.
+	LoadMaxBytes int64
 }
 
 // ListenAddr is the address to listen on.
@@ -84,6 +92,10 @@ func (o Options) ListenAddr() string {
 // RecordRequests without an AdminToken.
 var ErrRecordRequestsNeedsAdminToken = errors.New("recording requests needs an admin token: the log holds request values")
 
+// ErrLoadNeedsAdminToken is NewApplication's refusal of LoadMaxBytes
+// without an AdminToken.
+var ErrLoadNeedsAdminToken = errors.New("loading needs an admin token: Options.LoadMaxBytes is set and AdminToken is empty, and a load replaces every row")
+
 // NewApplication boots an Application from opts.
 //
 // In S43-T4 this attaches the admin (/mock/*) routes; S43-T5/T6 add
@@ -96,16 +108,20 @@ func NewApplication(opts Options) (*Application, error) {
 	if opts.RecordRequests && opts.AdminToken == "" {
 		return nil, ErrRecordRequestsNeedsAdminToken
 	}
+	if opts.LoadMaxBytes > 0 && opts.AdminToken == "" {
+		return nil, ErrLoadNeedsAdminToken
+	}
 	repo, err := repository.New(opts.DBPath)
 	if err != nil {
 		return nil, err
 	}
 	app := &Application{
-		router:     chi.NewRouter(),
-		repo:       repo,
-		echo:       opts.Echo,
-		dbPath:     opts.DBPath,
-		adminToken: opts.AdminToken,
+		router:       chi.NewRouter(),
+		repo:         repo,
+		echo:         opts.Echo,
+		dbPath:       opts.DBPath,
+		adminToken:   opts.AdminToken,
+		loadMaxBytes: opts.LoadMaxBytes,
 	}
 
 	app.router.Use(middleware.Recoverer)
