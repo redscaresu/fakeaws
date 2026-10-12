@@ -53,6 +53,132 @@ func recvType(e ast.Expr) string {
 	return ""
 }
 
+type ref struct{ pkg, name string }
+
+// stateCode is the handlers and repository packages, parsed.
+type stateCode struct {
+	fset *token.FileSet
+	pkgs map[string]*scanPkg
+}
+
+func loadStateCode(t *testing.T) *stateCode {
+	t.Helper()
+	fset := token.NewFileSet()
+	return &stateCode{fset: fset, pkgs: map[string]*scanPkg{
+		"handlers":   loadScanPkg(t, fset, "handlers", ".", "Application"),
+		"repository": loadScanPkg(t, fset, "repository", filepath.Join("..", "repository"), "Repository"),
+	}}
+}
+
+// walk calls visit once for every function reachable from roots: a
+// package func named anywhere in a body, a method on the receiver, and
+// a Repository method called through app.repo.
+func (c *stateCode) walk(roots []ref, visit func(cur ref, fn *ast.FuncDecl)) {
+	seen := map[ref]bool{}
+	queue := []ref{}
+	reach := func(r ref) {
+		if !seen[r] {
+			seen[r] = true
+			queue = append(queue, r)
+		}
+	}
+	for _, r := range roots {
+		reach(r)
+	}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		p := c.pkgs[cur.pkg]
+		fn := p.methods[cur.name]
+		if fn == nil {
+			fn = p.funcs[cur.name]
+		}
+		if fn == nil {
+			continue // a method of another type, or outside both packages
+		}
+		recv := receiverName(fn)
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.Ident:
+				if _, ok := p.funcs[n.Name]; ok {
+					reach(ref{cur.pkg, n.Name})
+				}
+			case *ast.SelectorExpr:
+				if x, ok := n.X.(*ast.Ident); ok && recv != "" && x.Name == recv {
+					reach(ref{cur.pkg, n.Sel.Name})
+				}
+				if name, ok := repoCall(n); ok {
+					reach(ref{"repository", name})
+				}
+			}
+			return true
+		})
+		visit(cur, fn)
+	}
+}
+
+func receiverName(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List[0].Names) == 0 {
+		return ""
+	}
+	return fn.Recv.List[0].Names[0].Name
+}
+
+// repoCall reports the method name of an `app.repo.<Method>` selector.
+func repoCall(sel *ast.SelectorExpr) (string, bool) {
+	x, ok := sel.X.(*ast.SelectorExpr)
+	if !ok || x.Sel.Name != "repo" {
+		return "", false
+	}
+	return sel.Sel.Name, true
+}
+
+// stateGathers returns the gathers collectState calls, from its table.
+func (c *stateCode) stateGathers(t *testing.T) []ref {
+	t.Helper()
+	fn := c.pkgs["handlers"].methods["collectState"]
+	require.NotNil(t, fn)
+	var gathers []ref
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			if x, ok := sel.X.(*ast.Ident); ok && x.Name == receiverName(fn) && strings.HasPrefix(sel.Sel.Name, "gather") {
+				gathers = append(gathers, ref{"handlers", sel.Sel.Name})
+			}
+		}
+		return true
+	})
+	require.NotEmpty(t, gathers, "collectState calls no gather")
+	return gathers
+}
+
+// stateGatherReads returns every Repository method a gather, or a
+// handlers helper it reaches, calls through app.repo: each read behind
+// a /mock/state block.
+func stateGatherReads(t *testing.T) []string {
+	t.Helper()
+	c := loadStateCode(t)
+	reads := map[string]bool{}
+	c.walk(c.stateGathers(t), func(cur ref, fn *ast.FuncDecl) {
+		if cur.pkg != "handlers" {
+			return
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok {
+				if name, ok := repoCall(sel); ok {
+					reads[name] = true
+				}
+			}
+			return true
+		})
+	})
+	out := make([]string, 0, len(reads))
+	for r := range reads {
+		out = append(out, r)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // TestStateReadsKeepEveryError walks every function GET /mock/state can
 // reach, from collectState through the gathers, their helpers and each
 // Repository method they call, and fails on any way to lose a read
@@ -64,53 +190,14 @@ func recvType(e ast.Expr) string {
 // rows.Next loop with no rows.Err. A skip on purpose names its error
 // (`errors.Is(err, models.ErrNotFound)`), which this scan does not match.
 func TestStateReadsKeepEveryError(t *testing.T) {
-	fset := token.NewFileSet()
-	pkgs := map[string]*scanPkg{
-		"handlers":   loadScanPkg(t, fset, "handlers", ".", "Application"),
-		"repository": loadScanPkg(t, fset, "repository", filepath.Join("..", "repository"), "Repository"),
-	}
-	type ref struct{ pkg, name string }
-	root := ref{"handlers", "collectState"}
-	require.Contains(t, pkgs["handlers"].methods, root.name)
-
-	seen := map[ref]bool{root: true}
-	queue := []ref{root}
-	reach := func(r ref) {
-		if !seen[r] {
-			seen[r] = true
-			queue = append(queue, r)
-		}
-	}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		p := pkgs[cur.pkg]
-		fn := p.methods[cur.name]
-		if fn == nil {
-			fn = p.funcs[cur.name]
-		}
-		if fn == nil {
-			continue // a method of another type, or outside both packages
-		}
-		recv := ""
-		if fn.Recv != nil && len(fn.Recv.List[0].Names) > 0 {
-			recv = fn.Recv.List[0].Names[0].Name
-		}
+	c := loadStateCode(t)
+	scanned := 0
+	c.walk([]ref{{"handlers", "collectState"}}, func(cur ref, fn *ast.FuncDecl) {
+		scanned++
 		where := cur.pkg + "." + cur.name
 		nexts, errs := map[string]bool{}, map[string]bool{}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch n := n.(type) {
-			case *ast.Ident:
-				if _, ok := p.funcs[n.Name]; ok {
-					reach(ref{cur.pkg, n.Name})
-				}
-			case *ast.SelectorExpr:
-				if x, ok := n.X.(*ast.Ident); ok && x.Name == recv && recv != "" {
-					reach(ref{cur.pkg, n.Sel.Name})
-				}
-				if x, ok := n.X.(*ast.SelectorExpr); ok && x.Sel.Name == "repo" {
-					reach(ref{"repository", n.Sel.Name})
-				}
 			case *ast.CallExpr:
 				if sel, ok := n.Fun.(*ast.SelectorExpr); ok {
 					if x, ok := sel.X.(*ast.Ident); ok && sel.Sel.Name == "Next" {
@@ -122,22 +209,22 @@ func TestStateReadsKeepEveryError(t *testing.T) {
 				}
 			case *ast.AssignStmt:
 				if discards(n.Lhs) {
-					assert.Fail(t, "a state read discards a value with _", "%s at %s", where, fset.Position(n.Pos()))
+					assert.Fail(t, "a state read discards a value with _", "%s at %s", where, c.fset.Position(n.Pos()))
 				}
 			case *ast.ExprStmt:
 				if call, ok := n.X.(*ast.CallExpr); ok && !bareCallAllowed(call) {
-					assert.Fail(t, "a state read drops a call's results", "%s at %s", where, fset.Position(n.Pos()))
+					assert.Fail(t, "a state read drops a call's results", "%s at %s", where, c.fset.Position(n.Pos()))
 				}
 			case *ast.ValueSpec:
 				if len(n.Values) > 0 && discards(identExprs(n.Names)) {
-					assert.Fail(t, "a state read declares a value as _", "%s at %s", where, fset.Position(n.Pos()))
+					assert.Fail(t, "a state read declares a value as _", "%s at %s", where, c.fset.Position(n.Pos()))
 				}
 			case *ast.IfStmt:
 				if isErrCompare(n.Cond, token.NEQ) && !returnsError(n.Body) {
-					assert.Fail(t, "a state read's `if err != nil` does not return the error", "%s at %s", where, fset.Position(n.Pos()))
+					assert.Fail(t, "a state read's `if err != nil` does not return the error", "%s at %s", where, c.fset.Position(n.Pos()))
 				}
 				if isErrCompare(n.Cond, token.EQL) {
-					assert.Fail(t, "a state read branches on `err == nil`, so its else drops the error", "%s at %s", where, fset.Position(n.Pos()))
+					assert.Fail(t, "a state read branches on `err == nil`, so its else drops the error", "%s at %s", where, c.fset.Position(n.Pos()))
 				}
 			}
 			return true
@@ -145,17 +232,8 @@ func TestStateReadsKeepEveryError(t *testing.T) {
 		for rows := range nexts {
 			assert.True(t, errs[rows], "%s iterates %s.Next() and never checks %s.Err()", where, rows, rows)
 		}
-	}
-
-	var gathers []string
-	for r := range seen {
-		if strings.HasPrefix(r.name, "gather") {
-			gathers = append(gathers, r.name)
-		}
-	}
-	sort.Strings(gathers)
-	require.NotEmpty(t, gathers, "collectState reaches no gather")
-	t.Logf("scanned %d functions, gathers %v", len(seen), gathers)
+	})
+	t.Logf("scanned %d functions", scanned)
 }
 
 // discards reports whether an assignment binds a `_`, unless its last

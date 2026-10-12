@@ -6,9 +6,9 @@
 //
 // Schema:
 //
-//   s3_buckets         (account_id, name)               — top-level
-//   s3_bucket_configs  (account_id, bucket_name, kind)  — child of s3_buckets,
-//                                                          ON DELETE CASCADE
+//	s3_buckets         (account_id, name)               — top-level
+//	s3_bucket_configs  (account_id, bucket_name, kind)  — child of s3_buckets,
+//	                                                       ON DELETE CASCADE
 //
 // `kind` is one of: versioning, encryption, policy, public_access_block,
 // ownership_controls, tagging. We model each config as a row rather
@@ -67,12 +67,12 @@ type S3Bucket struct {
 // Bucket-config kind constants. Each maps to one row in
 // s3_bucket_configs. Adding a new kind is one INSERT; no migration.
 const (
-	S3ConfigVersioning         = "versioning"
-	S3ConfigEncryption         = "encryption"
-	S3ConfigPolicy             = "policy"
-	S3ConfigPublicAccessBlock  = "public_access_block"
-	S3ConfigOwnershipControls  = "ownership_controls"
-	S3ConfigTagging            = "tagging"
+	S3ConfigVersioning        = "versioning"
+	S3ConfigEncryption        = "encryption"
+	S3ConfigPolicy            = "policy"
+	S3ConfigPublicAccessBlock = "public_access_block"
+	S3ConfigOwnershipControls = "ownership_controls"
+	S3ConfigTagging           = "tagging"
 )
 
 // ----- Buckets -----
@@ -221,7 +221,12 @@ func (r *Repository) DeleteBucketConfig(account, bucket, kind string) error {
 
 // ListBucketConfigs returns the (kind, data) pairs for a bucket's
 // configs. Used by /mock/state to surface the full config surface.
+// models.ErrNotFound when the bucket is gone, as ListRecordSets does
+// for its zone.
 func (r *Repository) ListBucketConfigs(account, bucket string) (map[string]json.RawMessage, error) {
+	if _, err := r.GetBucket(account, bucket); err != nil {
+		return nil, err
+	}
 	rows, err := r.db.Query(
 		`SELECT kind, data FROM s3_bucket_configs WHERE account_id = ? AND bucket_name = ?`,
 		account, bucket,

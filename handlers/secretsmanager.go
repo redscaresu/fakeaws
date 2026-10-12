@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -481,19 +482,22 @@ func (app *Application) gatherSecretsManagerStateReal(account string) (map[strin
 		if s.State != repository.SecretStateActive {
 			continue
 		}
-		allSecrets = append(allSecrets, map[string]any{
-			"name": s.Name, "arn": s.ARN, "state": s.State,
-			"recovery_window_in_days": s.RecoveryWindowInDays,
-			"region":                  s.Region,
-		})
 		// Surface every persisted version (Codex pass 4 BLOCKING
 		// #3 fix). Older versions remain in the DB after stage
 		// rotation but were previously invisible because the
 		// gather only fetched AWSCURRENT + AWSPREVIOUS.
 		versions, err := app.repo.ListSecretVersions(account, s.Region, s.Name)
+		if errors.Is(err, models.ErrNotFound) {
+			continue // deleted since the list
+		}
 		if err != nil {
 			return nil, err
 		}
+		allSecrets = append(allSecrets, map[string]any{
+			"name": s.Name, "arn": s.ARN, "state": s.State,
+			"recovery_window_in_days": s.RecoveryWindowInDays,
+			"region":                  s.Region,
+		})
 		for _, v := range versions {
 			allVersions = append(allVersions, map[string]any{
 				"secret_name": s.Name, "version_id": v.VersionID,

@@ -131,18 +131,23 @@ func (r *Repository) SetSecretTags(account, arn string, tags map[string]string) 
 // breaks the create-wait state machine ("couldn't find resource"
 // loop until timeout).
 func (r *Repository) GetSecret(account, region, secretId string) (*SecretsManagerSecret, error) {
-	var s SecretsManagerSecret
-	var tagsJSON string
-	err := r.db.QueryRow(
-		`SELECT name, arn, description, kms_key_id, recovery_window_in_days, deleted_at, state, tags, region, created_at
-		 FROM secretsmanager_secrets WHERE account_id = ? AND region = ? AND (name = ? OR arn = ?)`,
+	s, err := scanSecret(r.db.QueryRow(
+		`SELECT `+secretColumns+` FROM secretsmanager_secrets WHERE account_id = ? AND region = ? AND (name = ? OR arn = ?)`,
 		account, region, secretId, secretId,
-	).Scan(&s.Name, &s.ARN, &s.Description, &s.KMSKeyID, &s.RecoveryWindowInDays,
-		&s.DeletedAt, &s.State, &tagsJSON, &s.Region, &s.CreatedAt)
+	))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
-	if err != nil {
+	return s, err
+}
+
+const secretColumns = `name, arn, description, kms_key_id, recovery_window_in_days, deleted_at, state, tags, region, created_at`
+
+func scanSecret(row interface{ Scan(...any) error }) (*SecretsManagerSecret, error) {
+	var s SecretsManagerSecret
+	var tagsJSON string
+	if err := row.Scan(&s.Name, &s.ARN, &s.Description, &s.KMSKeyID, &s.RecoveryWindowInDays,
+		&s.DeletedAt, &s.State, &tagsJSON, &s.Region, &s.CreatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(tagsJSON), &s.Tags); err != nil {
@@ -171,17 +176,19 @@ func (r *Repository) GetSecretActiveOrPending(account, region, name string) (*Se
 // must behave as not-found across read/list paths (Codex pass 2
 // BLOCKING #2). Empty region = all regions (Codex pass 8
 // BLOCKING #2: /mock/state previously walked a hard-coded slice).
+// One query reads every secret, so none can be deleted between the
+// list and a read of it.
 func (r *Repository) ListSecrets(account, region string) ([]*SecretsManagerSecret, error) {
 	var rows *sql.Rows
 	var err error
 	if region == "" {
 		rows, err = r.db.Query(
-			`SELECT region, name FROM secretsmanager_secrets WHERE account_id = ? AND state != ? ORDER BY region, name`,
+			`SELECT `+secretColumns+` FROM secretsmanager_secrets WHERE account_id = ? AND state != ? ORDER BY region, name`,
 			account, SecretStateDestroyed,
 		)
 	} else {
 		rows, err = r.db.Query(
-			`SELECT region, name FROM secretsmanager_secrets WHERE account_id = ? AND region = ? AND state != ? ORDER BY name`,
+			`SELECT `+secretColumns+` FROM secretsmanager_secrets WHERE account_id = ? AND region = ? AND state != ? ORDER BY name`,
 			account, region, SecretStateDestroyed,
 		)
 	}
@@ -189,31 +196,15 @@ func (r *Repository) ListSecrets(account, region string) ([]*SecretsManagerSecre
 		return nil, err
 	}
 	defer rows.Close()
-	type pair struct{ region, name string }
-	var pairs []pair
+	out := []*SecretsManagerSecret{}
 	for rows.Next() {
-		var p pair
-		if err := rows.Scan(&p.region, &p.name); err != nil {
-			return nil, err
-		}
-		pairs = append(pairs, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	rows.Close()
-	out := make([]*SecretsManagerSecret, 0, len(pairs))
-	for _, p := range pairs {
-		s, err := r.GetSecret(account, p.region, p.name)
-		if errors.Is(err, models.ErrNotFound) {
-			continue // deleted since the list
-		}
+		s, err := scanSecret(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, s)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // ScheduleSecretDeletion moves the secret to PendingDeletion (or
@@ -389,8 +380,12 @@ func (r *Repository) GetSecretValue(account, region, secretId, versionStage, ver
 // ListSecretVersions returns every version row for a given secret,
 // regardless of stage. /mock/state uses this so historical versions
 // remain visible after multiple PutSecretValue rotations (Codex
-// pass 4 BLOCKING #3 fix).
+// pass 4 BLOCKING #3 fix). models.ErrNotFound when the secret is gone,
+// as ListRecordSets does for its zone.
 func (r *Repository) ListSecretVersions(account, region, name string) ([]*SecretsManagerVersion, error) {
+	if _, err := r.GetSecret(account, region, name); err != nil {
+		return nil, err
+	}
 	rows, err := r.db.Query(
 		`SELECT version_id, secret_string, stages, created_at FROM secretsmanager_versions WHERE account_id = ? AND region = ? AND secret_name = ? ORDER BY created_at`,
 		account, region, name,

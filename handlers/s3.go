@@ -64,6 +64,9 @@ func (app *Application) gatherS3StateReal(account string) (map[string]any, error
 			"created_at": b.CreatedAt,
 		}
 		configs, err := app.repo.ListBucketConfigs(account, b.Name)
+		if errors.Is(err, models.ErrNotFound) {
+			continue // deleted since the list
+		}
 		if err != nil {
 			return nil, err
 		}
