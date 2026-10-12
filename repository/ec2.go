@@ -30,6 +30,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/redscaresu/fakeaws/models"
 )
@@ -841,13 +843,64 @@ func (r *Repository) DeleteSecurityGroup(account, region, id string) error {
 
 // ----- EIP -----
 
+// CreateEIP stores eip with the first public IP, from eip.PublicIP up
+// and wrapping within its /24, that no address in its account and
+// region holds, and sets eip.PublicIP to it: AWS never gives two
+// allocations one IP. It is ErrConflict when the /24 is full.
+// ponytail: one /24 caps a region at 256 addresses; widen the range if
+// a test needs more.
 func (r *Repository) CreateEIP(account string, eip *EC2EIP) error {
+	// SetMaxOpenConns(1): only tx may touch the db until Commit, so two
+	// allocations cannot pick the same free IP.
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT public_ip FROM ec2_eips WHERE account_id = ? AND region = ?`, account, eip.Region)
+	if err != nil {
+		return err
+	}
+	held := map[string]bool{}
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			rows.Close()
+			return err
+		}
+		held[ip] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if eip.PublicIP, err = freeIP(eip.PublicIP, held); err != nil {
+		return err
+	}
 	body, _ := json.Marshal(eip)
-	_, err := r.db.Exec(
+	if _, err := tx.Exec(
 		`INSERT INTO ec2_eips (account_id, region, allocation_id, domain, public_ip, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		account, eip.Region, eip.AllocationID, eip.Domain, eip.PublicIP, string(body), eip.CreatedAt,
-	)
-	return mapInsertError(err)
+	); err != nil {
+		return mapInsertError(err)
+	}
+	return tx.Commit()
+}
+
+// freeIP returns the first IPv4 address from want up, wrapping within
+// its /24, not in held.
+func freeIP(want string, held map[string]bool) (string, error) {
+	i := strings.LastIndex(want, ".")
+	last, err := strconv.Atoi(want[i+1:])
+	if i < 0 || err != nil {
+		return "", fmt.Errorf("public IP %q is not IPv4", want)
+	}
+	for step := range 256 {
+		if ip := want[:i+1] + strconv.Itoa((last+step)%256); !held[ip] {
+			return ip, nil
+		}
+	}
+	return "", fmt.Errorf("every address in %s0/24 is allocated: %w", want[:i+1], models.ErrConflict)
 }
 
 // GetEIP looks up an EIP by allocation id, optionally scoped to a

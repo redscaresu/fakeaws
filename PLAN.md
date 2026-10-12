@@ -140,10 +140,10 @@ handler refuses transitions out of `terminated` (concepts.md
 
 ### AMI fixture data
 
-AMIs are read-only at v1. handlers/ec2_instance.go ships a
-hand-curated fixture map (`ami-0abcd1234` etc.) that DescribeImages
-returns. terraform-provider-aws's `data.aws_ami` is NOT supported —
-scenarios use literal AMI ids per the S44-T0 pitfall.
+AMIs are read-only at v1. handlers/ec2.go ships a hand-curated
+fixture list (`ami-0abcd1234` etc.) that DescribeImages returns.
+terraform-provider-aws's `data.aws_ami` resolves against it through
+`Owner.N` and the filters in `imageFilters`.
 
 ### Endpoints (handlers split into 3 files)
 

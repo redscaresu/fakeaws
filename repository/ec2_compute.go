@@ -21,9 +21,8 @@
 //
 // AMIs are read-only at v1 — handlers/ec2.go ships a fixture set
 // (ami-0abcd1234 etc.) and the repository just stores the set so
-// DescribeImages can echo it back. terraform-provider-aws's
-// data.aws_ami is NOT supported; scenarios use literal AMI ids per
-// the S44-T0 pitfall.
+// DescribeImages can answer it, by id, owner and the filters
+// data.aws_ami sends (handlers/ec2.go's imageFilters).
 package repository
 
 import (

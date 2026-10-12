@@ -1354,6 +1354,66 @@ func TestRegressionNetworkDescribesHonourTagFilters(t *testing.T) {
 	}
 }
 
+// TestRegressionDescribeInstancesListsOneRegion: an unfiltered
+// DescribeInstances listed every region's instances, and every
+// Filter.N was refused, so a filtered read of one region's instances
+// got 501 or another region's instance with 200. The list is the
+// caller's region and vpc-id selects in it.
+func TestRegressionDescribeInstancesListsOneRegion(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	netUS, vpcUS := filteredNet(t, srv, tagRegion, "1")
+	netEU, _ := filteredNet(t, srv, "eu-west-2", "1")
+	us := runInstance(t, srv, tagRegion, topLevelParams(netUS.subnet, netUS.sgs))
+	runInstance(t, srv, "eu-west-2", topLevelParams(netEU.subnet, netEU.sgs))
+
+	assert.Equal(t, []string{us}, describeIDs(t, srv, "DescribeInstances", nil).Instances, "unfiltered")
+	assert.Equal(t, []string{us}, describeIDs(t, srv, "DescribeInstances", ec2FilterParams("vpc-id", vpcUS)).Instances, "vpc-id")
+}
+
+// TestRegressionAllocateAddressNeverSharesAPublicIP: the public IP is
+// derived from the allocation id by a one-byte hash, so two addresses
+// in a region could hold one IP and PublicIp.1 returned both. The test
+// allocates until an address derives an IP another already holds (a
+// clash all but certain within 256; about 20 on average) and asserts
+// it got another IP.
+func TestRegressionAllocateAddressNeverSharesAPublicIP(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	held := map[string]string{} // public IP → allocation id
+	clashed := ""
+	for len(held) < 256 && clashed == "" {
+		resp, body := ec2Call(t, srv, tagRegion, "AllocateAddress", url.Values{"Domain": {"vpc"}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "AllocateAddress: %s", body)
+		alloc, ip := extractEC2Tag(body, "allocationId"), extractEC2Tag(body, "publicIp")
+		if derived := handlers.EC2DerivePublicIP(alloc); held[derived] != "" {
+			clashed = derived
+			assert.NotEqual(t, derived, ip, "%s derives %s, which %s holds", alloc, derived, held[derived])
+		}
+		require.Empty(t, held[ip], "two allocations hold %s", ip)
+		held[ip] = alloc
+	}
+	require.NotEmpty(t, clashed, "no allocation derived a held IP")
+	assert.Equal(t, []string{held[clashed]}, describeIDs(t, srv, "DescribeAddresses", url.Values{"PublicIp.1": {clashed}}).Addresses)
+}
+
+// TestRegressionKeyPairFingerprintSelectsOneKey: the fingerprint was
+// one hashed byte repeated 16 times, so these two key materials shared
+// one and the fingerprint filter alone returned both keys.
+func TestRegressionKeyPairFingerprintSelectsOneKey(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	const material = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" // + aa and + bB collide under the old hash
+	ids, fingerprints := map[string]string{}, map[string]string{}
+	for _, name := range []string{"aa", "bB"} {
+		resp, body := ec2Call(t, srv, tagRegion, "ImportKeyPair", url.Values{"KeyName": {name}, "PublicKeyMaterial": {material + name}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "ImportKeyPair: %s", body)
+		ids[name], fingerprints[name] = extractEC2Tag(body, "keyPairId"), extractEC2Tag(body, "keyFingerprint")
+	}
+	assert.Regexp(t, `^[0-9a-f]{2}(:[0-9a-f]{2}){15}$`, fingerprints["aa"], "16 colon-separated hex bytes")
+	assert.NotEqual(t, fingerprints["aa"], fingerprints["bB"])
+	for name, fp := range fingerprints {
+		assert.Equal(t, []string{ids[name]}, describeIDs(t, srv, "DescribeKeyPairs", ec2FilterParams("fingerprint", fp)).KeyPairs, name)
+	}
+}
+
 // instanceAttribute is DescribeInstanceAttribute's <value> for name.
 func instanceAttribute(t *testing.T, srv *httptest.Server, id, name string) string {
 	t.Helper()
@@ -1571,4 +1631,20 @@ func TestRegressionBooleanAttributesOnlyTrueOrFalse(t *testing.T) {
 	resp, body = ec2Call(t, srv, tagRegion, "ModifyInstanceAttribute", url.Values{"InstanceId": {id}})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "no attribute: %s", body)
 	assert.Equal(t, "MissingParameter", extractEC2Tag(body, "Code"), "no attribute")
+}
+
+// TestRegressionDescribeImagesNameFilter: DescribeImages refused every
+// Filter.N, so data.aws_ami's name filter answered 501 and no config
+// that looks an image up by name could plan. name is honoured, its *
+// crossing / as Ubuntu's image names need, and Owner.N amazon matches
+// the fixtures' literal owner.
+func TestRegressionDescribeImagesNameFilter(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	byName := func(owner, name string) url.Values {
+		return url.Values{"Owner.1": {owner}, "Filter.1.Name": {"name"}, "Filter.1.Value.1": {name}}
+	}
+	assert.Equal(t, []string{handlers.AL2023AMIID},
+		describeImageIDs(t, srv, byName("amazon", "al2023-ami-2023.*-x86_64")))
+	assert.ElementsMatch(t, []string{"ami-0ubuntu2004", "ami-0ubuntu2204"},
+		describeImageIDs(t, srv, byName("099720109477", "ubuntu/images/*")))
 }
