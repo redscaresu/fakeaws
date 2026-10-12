@@ -164,3 +164,15 @@ func TestSSMParameterPatchTagsNeverTouchesPublic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"k": "v"}, got.Tags)
 }
+
+func TestSSMParameterDeleteNeverTouchesPublic(t *testing.T) {
+	const public = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+	r := setupRepo(t)
+	_, err := r.PutSSMParameter(testAccount, ssmPut(public, "v"), false)
+	require.NoError(t, err)
+
+	assert.ErrorIs(t, r.DeleteSSMParameter(testAccount, testRegion, public), models.ErrNotFound)
+	got, err := r.GetSSMParameter(testAccount, testRegion, public)
+	require.NoError(t, err, "DeleteSSMParameter removed the public row")
+	assert.Equal(t, "v", got.Value)
+}

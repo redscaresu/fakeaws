@@ -468,3 +468,15 @@ func TestSSM_EveryOperationTreatsPublicParameterAsPublic(t *testing.T) {
 		})
 	}
 }
+
+// DescribeParameters never lists a public parameter, but its metadata
+// derives the ARN account as GetParameter does: none for a public one.
+func TestSSM_ParameterMetadataARN(t *testing.T) {
+	for name, want := range map[string]string{
+		publicParameter: "arn:aws:ssm:us-east-1::parameter" + publicParameter,
+		privateTwin:     "arn:aws:ssm:us-east-1:" + awsproto.FakeAccountID + ":parameter" + privateTwin,
+	} {
+		got := handlers.SSMParameterMetadata(awsproto.FakeAccountID, "us-east-1", repository.SSMParameter{Name: name, Type: "String"})
+		assert.Equal(t, want, got["ARN"], name)
+	}
+}

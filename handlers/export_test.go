@@ -18,3 +18,6 @@ var ServiceProtocols = serviceProtocols
 
 // For ssm_test.go's sweep of every SSM operation.
 var SSMOperations = ssmOperations
+
+// For ssm_test.go's check of the DescribeParameters ARN.
+var SSMParameterMetadata = ssmParameterMetadata

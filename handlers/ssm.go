@@ -242,7 +242,7 @@ func (app *Application) ssmDescribeParameters(w http.ResponseWriter, account, re
 
 func ssmParameterMetadata(account, region string, p repository.SSMParameter) map[string]any {
 	m := map[string]any{
-		"ARN":  awsproto.BuildSSMParameterARN(region, account, p.Name),
+		"ARN":  awsproto.BuildSSMParameterARN(region, repository.SSMParameterARNAccount(account, p.Name), p.Name),
 		"Name": p.Name, "Type": p.Type, "Version": p.Version,
 		"Description": p.Description, "AllowedPattern": p.AllowedPattern,
 		"DataType": p.DataType, "Tier": p.Tier, "Policies": []any{},
@@ -262,12 +262,9 @@ func (app *Application) ssmDeleteParameter(w http.ResponseWriter, account, regio
 	if !ssmDecode(w, body, &in) {
 		return
 	}
-	if repository.IsPublicSSMParameter(in.Name) {
-		// Never deletable: a loaded row stays, answered as when unloaded.
-		// UNVERIFIED(aws-code): ParameterNotFound from https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_DeleteParameter.html; no recording
-		ssmNotFound(w, in.Name, models.ErrNotFound)
-		return
-	}
+	// A public parameter is never deleted (the repository refuses it), so
+	// a loaded row stays, answered as when unloaded.
+	// UNVERIFIED(aws-code): ParameterNotFound for a public parameter, from https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_DeleteParameter.html; no recording
 	if err := app.repo.DeleteSSMParameter(account, region, in.Name); err != nil {
 		ssmNotFound(w, in.Name, err)
 		return

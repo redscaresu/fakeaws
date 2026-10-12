@@ -111,6 +111,11 @@ func (r *Repository) PutSSMParameter(account string, p *SSMParameterPut, overwri
 // parameter, such as /aws/service/ami-amazon-linux-latest/<image>.
 const publicSSMParameterPrefix = "/aws/service/"
 
+// ssmAccountOwned matches only the account's own rows, never a public
+// parameter's: no write through the repository reaches one. GLOB, unlike
+// LIKE, is case-sensitive, as IsPublicSSMParameter is.
+const ssmAccountOwned = `name NOT GLOB '` + publicSSMParameterPrefix + `*'`
+
 // IsPublicSSMParameter reports whether name is an AWS public parameter:
 // AWS's, not the account's, so it is read-only, never listed, and its
 // ARN has no account. A loaded database stores one as a row.
@@ -197,9 +202,10 @@ func (r *Repository) ListSSMParameters(account, region string) ([]SSMParameter, 
 	return out, rows.Err()
 }
 
-// DeleteSSMParameter returns models.ErrNotFound for an unknown name.
+// DeleteSSMParameter returns models.ErrNotFound for an unknown name or
+// a public parameter, which is AWS's and never deleted.
 func (r *Repository) DeleteSSMParameter(account, region, name string) error {
-	res, err := r.db.Exec(`DELETE FROM ssm_parameters WHERE account_id = ? AND region = ? AND name = ?`, account, region, name)
+	res, err := r.db.Exec(`DELETE FROM ssm_parameters WHERE account_id = ? AND region = ? AND name = ? AND `+ssmAccountOwned, account, region, name)
 	if err != nil {
 		return err
 	}
@@ -218,14 +224,8 @@ func (r *Repository) PatchSSMParameterTags(account, region, ref string, patch ma
 	if err != nil {
 		return err
 	}
-	refArgs := ssmRefArgs(account, region, ref)
-	for i, a := range refArgs {
-		if name, ok := a.(string); ok && IsPublicSSMParameter(name) {
-			refArgs[i] = nil
-		}
-	}
-	args := append([]any{string(b), account, region}, refArgs...)
-	res, err := r.db.Exec(`UPDATE ssm_parameters SET tags = json_patch(tags, ?) WHERE account_id = ? AND region = ? AND `+ssmRefMatch, args...)
+	args := append([]any{string(b), account, region}, ssmRefArgs(account, region, ref)...)
+	res, err := r.db.Exec(`UPDATE ssm_parameters SET tags = json_patch(tags, ?) WHERE account_id = ? AND region = ? AND `+ssmRefMatch+` AND `+ssmAccountOwned, args...)
 	if err != nil {
 		return err
 	}
