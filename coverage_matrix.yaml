@@ -306,11 +306,11 @@ entries:
   - aws_service: ec2
     aws_resource_type: aws_ami
     working_exempt: true
-    working_exempt_reason: "Read-only AMI fixtures; fakeaws creates no images. DescribeImages by ImageId.N and Owner.N (Owner.1=self lists none of the fixtures) is pinned in TestEC2_DescribeImagesFixtures and TestRegressionSweepDescribeImagesOwnerSelf."
+    working_exempt_reason: "Read-only AMI fixtures; fakeaws creates no images. DescribeImages by ImageId.N, Owner.N (Owner.1=self lists none of the fixtures) and imageFilters is pinned in TestEC2_DescribeImagesFixtures, TestRegressionSweepDescribeImagesOwnerSelf, TestEC2_DescribeImagesFilters and TestRegressionDescribeImagesNameFilter."
     misconfigured_dir_name: instance_unknown_ami
     updates_exempt: true
     updates_exempt_reason: "The fixtures are immutable."
-    integration_test_func_name: "^(TestEC2_DescribeImagesFixtures|TestRegressionSweepDescribeImagesOwnerSelf)$"
+    integration_test_func_name: "^(TestEC2_DescribeImagesFixtures|TestRegressionSweepDescribeImagesOwnerSelf|TestEC2_DescribeImagesFilters|TestRegressionDescribeImagesNameFilter)$"
   - aws_service: ec2
     aws_resource_type: aws_network_interface
     working_exempt: true

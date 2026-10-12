@@ -260,7 +260,7 @@ func validateSeedImage(req *seedImageRequest, account string) string {
 		return "account_id must be " + account
 	}
 	if req.OwnerID == "" {
-		req.OwnerID = "amazon"
+		req.OwnerID = ec2AmazonOwner
 	}
 	if req.VirtualizationType == "" {
 		req.VirtualizationType = "hvm"
