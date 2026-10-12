@@ -2970,6 +2970,7 @@ type ec2ImageXML struct {
 	RootDeviceName     string `xml:"rootDeviceName"`
 	State              string `xml:"imageState"`
 	ImageType          string `xml:"imageType"`
+	ImageOwnerAlias    string `xml:"imageOwnerAlias,omitempty"`
 }
 
 type ec2DescribeImagesResult struct {
@@ -2986,7 +2987,7 @@ var imageFilters = ec2FilterTable[ec2ImageXML]{
 		"name":                func(x ec2ImageXML) []string { return []string{x.Name} },
 		"image-id":            func(x ec2ImageXML) []string { return []string{x.ImageId} },
 		"owner-id":            func(x ec2ImageXML) []string { return []string{x.OwnerId} },
-		"owner-alias":         imageOwnerAlias,
+		"owner-alias":         func(x ec2ImageXML) []string { return []string{x.ImageOwnerAlias} },
 		"virtualization-type": func(x ec2ImageXML) []string { return []string{x.VirtualizationType} },
 		"root-device-name":    func(x ec2ImageXML) []string { return []string{x.RootDeviceName} },
 		"state":               func(x ec2ImageXML) []string { return []string{x.State} },
@@ -2995,21 +2996,12 @@ var imageFilters = ec2FilterTable[ec2ImageXML]{
 	tagID: func(x ec2ImageXML) string { return x.ImageId },
 }
 
-// imageOwnerAlias is amazon for an image whose owner is the fixtures'
-// literal amazon, and none for any other.
-func imageOwnerAlias(x ec2ImageXML) []string {
-	if x.OwnerId == "amazon" {
-		return []string{"amazon"}
-	}
-	return nil
-}
-
 // ec2DescribeImages answers ImageId.N, most common from
 // terraform-provider-aws where users pass a literal AMI id, Owner.N
-// and imageFilters (data.aws_ami's owners and filter blocks). Owner.N keeps account ids, self (the caller) and amazon, which
-// matches the fixtures' literal OwnerID; a loaded database has no
-// fixtures and its Amazon images a numeric owner, so amazon matches
-// none there. ExecutableBy.N is refused, by name. IncludeDisabled and
+// and imageFilters (data.aws_ami's owners and filter blocks). Owner.N
+// keeps account ids, self (the caller) and amazon, which matches the
+// fixtures' literal ec2AmazonOwner; a loaded database has no fixtures
+// and its Amazon images a numeric owner, so amazon matches none there. ExecutableBy.N is refused, by name. IncludeDisabled and
 // IncludeDeprecated (which data.aws_ami always sends) are read:
 // fakeaws has no disabled or deprecated image, so neither can change
 // the answer.
@@ -3106,12 +3098,21 @@ func ec2Refuse(w http.ResponseWriter, action string, names ...string) {
 		fmt.Sprintf("%s: %s: %s", action, ec2NotModelled, strings.Join(names, ", ")))
 }
 
+// ec2AmazonOwner is the literal owner of the Amazon fixtures and of a
+// /mock/images image that names none. An image with it answers it as
+// imageOwnerAlias too; any other owner answers no alias.
+const ec2AmazonOwner = "amazon"
+
 func ec2AMIToXML(a *repository.EC2AMI) ec2ImageXML {
-	return ec2ImageXML{
+	x := ec2ImageXML{
 		ImageId: a.ID, Name: a.Name, OwnerId: a.OwnerID,
 		VirtualizationType: a.VirtualizationType, RootDeviceName: a.RootDeviceName,
 		State: "available", ImageType: "machine",
 	}
+	if a.OwnerID == ec2AmazonOwner {
+		x.ImageOwnerAlias = ec2AmazonOwner
+	}
+	return x
 }
 
 // AL2023AMIID is the Amazon Linux 2023 fixture, the image SSM's public
@@ -3126,8 +3127,8 @@ const AL2023AMIID = "ami-0al2023x8664"
 // pass in either. Per concepts.md "Standing patterns" item 8 — fixture
 // state, never derived from real AWS.
 var ec2AMIFixtures = []repository.EC2AMI{
-	{ID: "ami-0abcd1234", Name: "amzn2-ami-hvm-2.0", OwnerID: "amazon", VirtualizationType: "hvm", RootDeviceName: "/dev/xvda"},
-	{ID: AL2023AMIID, Name: "al2023-ami-2023.6.20241010.0-kernel-6.1-x86_64", OwnerID: "amazon", VirtualizationType: "hvm", RootDeviceName: "/dev/xvda"},
+	{ID: "ami-0abcd1234", Name: "amzn2-ami-hvm-2.0", OwnerID: ec2AmazonOwner, VirtualizationType: "hvm", RootDeviceName: "/dev/xvda"},
+	{ID: AL2023AMIID, Name: "al2023-ami-2023.6.20241010.0-kernel-6.1-x86_64", OwnerID: ec2AmazonOwner, VirtualizationType: "hvm", RootDeviceName: "/dev/xvda"},
 	{ID: "ami-0ubuntu2004", Name: "ubuntu/images/hvm-ssd/ubuntu-focal-20.04", OwnerID: "099720109477", VirtualizationType: "hvm", RootDeviceName: "/dev/sda1"},
 	{ID: "ami-0ubuntu2204", Name: "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04", OwnerID: "099720109477", VirtualizationType: "hvm", RootDeviceName: "/dev/sda1"},
 }

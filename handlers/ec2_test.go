@@ -2102,7 +2102,8 @@ func describeImageIDs(t *testing.T, srv *httptest.Server, params url.Values) []s
 // TestEC2_DescribeImagesFilters: each imageFilters name selects the
 // fixtures whose row answers it; Owner.1=self with a name filter keeps
 // none, and a filter on a field AMI rows do not store, or
-// ExecutableBy.N, is refused by name.
+// ExecutableBy.N, is refused by name. An image answers the owner-alias
+// the filter reads: amazon for an Amazon fixture, none for Ubuntu's.
 func TestEC2_DescribeImagesFilters(t *testing.T) {
 	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
 	filter := func(name, value string) url.Values {
@@ -2127,6 +2128,19 @@ func TestEC2_DescribeImagesFilters(t *testing.T) {
 		assert.ElementsMatch(t, c.want, describeImageIDs(t, srv, filter(c.name, c.value)), "%s=%s", c.name, c.value)
 	}
 
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeImages", url.Values{"ImageId.1": {handlers.AL2023AMIID}, "ImageId.2": {"ami-0ubuntu2204"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	var images struct {
+		Items []struct {
+			ID    string  `xml:"imageId"`
+			Alias *string `xml:"imageOwnerAlias"`
+		} `xml:"imagesSet>item"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &images), "%s", body)
+	require.Len(t, images.Items, 2, "%s", body)
+	assert.Equal(t, "amazon", aws.ToString(images.Items[0].Alias), "an amazon fixture answers its alias: %s", body)
+	assert.Nil(t, images.Items[1].Alias, "an Ubuntu fixture answers no alias: %s", body)
+
 	self := filter("name", "*")
 	self.Set("Owner.1", "self")
 	assert.Empty(t, describeImageIDs(t, srv, self), "none of the fixtures is the caller's")
@@ -2138,7 +2152,7 @@ func TestEC2_DescribeImagesFilters(t *testing.T) {
 		{filter("architecture", "x86_64"), "architecture"},
 		{url.Values{"ExecutableBy.1": {"all"}}, "ExecutableBy.N"},
 	} {
-		resp, body := ec2Call(t, srv, tagRegion, "DescribeImages", c.params)
+		resp, body = ec2Call(t, srv, tagRegion, "DescribeImages", c.params)
 		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s: %s", c.name, body)
 		assert.Equal(t, "DescribeImages: not modelled by fakeaws: "+c.name, extractEC2Tag(body, "Message"), c.name)
 		assert.Equal(t, "filter-refused", lastClass(t, srv), c.name)
