@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -339,19 +340,71 @@ func (r *Repository) DeleteVPC(account, region, id string) error {
 
 // ----- Subnet -----
 
+// ErrSubnetConflict is why CreateSubnet refuses a CIDR overlapping a
+// subnet of the same VPC.
+var ErrSubnetConflict = errors.New("subnet CIDR conflicts with another subnet")
+
+// CreateSubnet stores s unless its VPC is missing (ErrNotFound) or its
+// CIDR overlaps a sibling's (ErrSubnetConflict). The lookups and the
+// INSERT share one tx so two creates cannot both pass the check; they go
+// through tx, never r.db, which would deadlock under SetMaxOpenConns(1).
 func (r *Repository) CreateSubnet(account string, s *EC2Subnet) error {
+	cidr, err := netip.ParsePrefix(s.CidrBlock)
+	if err != nil {
+		return fmt.Errorf("subnet cidr %q: %w", s.CidrBlock, err)
+	}
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	// Codex pass 7 BLOCKING #1 — parent must be in the SAME region as
-	// the child, not just same account. Cross-region refs reject with
-	// ErrNotFound from GetVPC.
-	if _, err := r.GetVPC(account, s.Region, s.VPCID); err != nil {
+	// the child, not just same account. Empty region is account-wide,
+	// as GetVPC.
+	var one int
+	err = tx.QueryRow(`SELECT 1 FROM ec2_vpcs WHERE account_id = ? AND id = ? AND (? = '' OR region = ?)`,
+		account, s.VPCID, s.Region, s.Region).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return models.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err := subnetOverlap(tx, account, s.VPCID, cidr); err != nil {
 		return err
 	}
 	body, _ := json.Marshal(s)
-	_, err := r.db.Exec(
+	if _, err := tx.Exec(
 		`INSERT INTO ec2_subnets (account_id, region, id, vpc_id, cidr_block, availability_zone, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		account, s.Region, s.ID, s.VPCID, s.CidrBlock, s.AvailabilityZone, s.ARN, string(body), s.CreatedAt,
-	)
-	return mapInsertError(err)
+	); err != nil {
+		return mapInsertError(err)
+	}
+	return tx.Commit()
+}
+
+// subnetOverlap returns ErrSubnetConflict when cidr overlaps a subnet of
+// vpcID.
+func subnetOverlap(tx *sql.Tx, account, vpcID string, cidr netip.Prefix) error {
+	rows, err := tx.Query(`SELECT cidr_block FROM ec2_subnets WHERE account_id = ? AND vpc_id = ?`, account, vpcID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sibling string
+		if err := rows.Scan(&sibling); err != nil {
+			return err
+		}
+		p, err := netip.ParsePrefix(sibling)
+		if err != nil {
+			return fmt.Errorf("stored subnet cidr %q: %w", sibling, err)
+		}
+		if p.Overlaps(cidr) {
+			return ErrSubnetConflict
+		}
+	}
+	return rows.Err()
 }
 
 // GetSubnet looks up a subnet by id, optionally scoped to a region.

@@ -2,7 +2,9 @@ package repository
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/redscaresu/fakeaws/models"
@@ -346,4 +348,42 @@ func TestAvailabilityZoneRowIsNotEmpty(t *testing.T) {
 	require.NoError(t, r.PutAvailabilityZone(testAccount, azRow(testRegion, "us-east-1a", "use1-az6")))
 	err := r.SetIdentity(Identity{AccountID: "111111111111"}, testAccount, nil)
 	assert.ErrorIs(t, err, models.ErrConflict)
+}
+
+// Concurrent creates of one CIDR in one VPC: the overlap check and the
+// INSERT share a tx, so exactly one wins and the rest are refused.
+func TestCreateSubnetOverlapIsAtomic(t *testing.T) {
+	r := setupRepo(t)
+	const goroutines, rounds = 8, 50
+	for round := range rounds {
+		vpcID := fmt.Sprintf("vpc-%d", round)
+		require.NoError(t, r.CreateVPC(testAccount, &EC2VPC{ID: vpcID, CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
+		errs := make([]error, goroutines)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for g := range goroutines {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				errs[g] = r.CreateSubnet(testAccount, &EC2Subnet{ID: fmt.Sprintf("subnet-%d-%d", round, g), VPCID: vpcID,
+					CidrBlock: "10.0.1.0/24", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"})
+			}()
+		}
+		close(start)
+		wg.Wait()
+		won, refused := 0, 0
+		for _, err := range errs {
+			switch {
+			case err == nil:
+				won++
+			case errors.Is(err, ErrSubnetConflict):
+				refused++
+			default:
+				t.Errorf("round %d: unexpected error %v", round, err)
+			}
+		}
+		assert.Equal(t, 1, won, "round %d successes", round)
+		assert.Equal(t, goroutines-1, refused, "round %d ErrSubnetConflict", round)
+	}
 }

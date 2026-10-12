@@ -470,6 +470,12 @@ type ec2CreateSubnetResult struct {
 	Subnet ec2SubnetXML `xml:"subnet"`
 }
 
+// CRITICAL[ec2-subnet-overlap-refused]: a CidrBlock overlapping a subnet
+// of the same VPC is refused 400 InvalidSubnet.Conflict naming it, and
+// nothing is stored; the overlap check and the INSERT share one tx
+// (repository.CreateSubnet), so concurrent creates cannot both pass.
+//
+// UNVERIFIED(aws-code): InvalidSubnet.Conflict from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	vpcID := req.Params.Get("VpcId")
 	cidr := req.Params.Get("CidrBlock")
@@ -504,6 +510,11 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 	id := "subnet-" + ec2RandID()
 	s := newEC2Subnet(account, region, id, vpcID, cidr, az)
 	err = app.repo.CreateSubnet(account, s)
+	if errors.Is(err, repository.ErrSubnetConflict) {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidSubnet.Conflict",
+			fmt.Sprintf("The CIDR '%s' conflicts with another subnet", cidr))
+		return
+	}
 	if err == nil {
 		err = app.tagNew(account, region, onResource(specs["subnet"], id, "subnet"),
 			func() error { return app.repo.DeleteSubnet(account, region, id) })
@@ -537,7 +548,7 @@ func subnetZone(p url.Values, region string, zones []repository.AvailabilityZone
 
 // subnetCIDRInRange reports whether EC2 accepts cidr as a subnet of a
 // VPC whose block is vpcCIDR: inside it, and between /16 and /28.
-// Overlap with sibling subnets is not checked.
+// Overlap with sibling subnets is refused by repository.CreateSubnet.
 func subnetCIDRInRange(vpcCIDR, cidr string) bool {
 	vpc, err := netip.ParsePrefix(vpcCIDR)
 	if err != nil {
