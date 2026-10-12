@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/redscaresu/fakeaws/handlers/awsproto"
 	"github.com/redscaresu/fakeaws/repository"
 )
 
@@ -45,6 +46,9 @@ func decodeSSMGetParameter(env *loadEnvelope, ex *loadExchange) ([]loadItem, err
 	if !repository.IsPublicSSMParameter(in.Name) {
 		return nil, loadRefusal(fmt.Sprintf("parameter %s is not public: the read never records its description, tier, allowed_pattern, key_id and tags, which aws_ssm_parameter reads through DescribeParameters and ListTagsForResource", in.Name))
 	}
+	if in.ARN == "" {
+		return nil, loadRefusal(fmt.Sprintf("parameter %s records no ARN", in.Name))
+	}
 	if !ssmAccountlessARN(in.ARN, in.Name) {
 		return nil, loadRefusal(fmt.Sprintf("parameter %s: ARN %s is not its account-less parameter ARN", in.Name, in.ARN))
 	}
@@ -61,13 +65,13 @@ func decodeSSMGetParameter(env *loadEnvelope, ex *loadExchange) ([]loadItem, err
 }
 
 // ssmAccountlessARN reports whether arn is public parameter name's own
-// ARN: arn:aws:ssm:<region>::parameter<name>, with no account. The
-// region may be any, as recorded; ssmRefMatch matches the stored ARN, so
-// one carrying an account or naming another parameter would find the row.
+// ARN, as awsproto.BuildSSMParameterARN builds it with no account, in
+// any valid region: the region may differ from the load's, as recorded.
+// ssmRefMatch matches the stored ARN, so one carrying an account or
+// naming another parameter would find the row.
 func ssmAccountlessARN(arn, name string) bool {
-	parts := strings.SplitN(arn, ":", 6)
-	return len(parts) == 6 && parts[0] == "arn" && parts[1] == "aws" && parts[2] == "ssm" &&
-		CheckRegion(parts[3]) == nil && parts[4] == "" && parts[5] == "parameter"+name
+	parts := strings.SplitN(arn, ":", 5)
+	return len(parts) == 5 && CheckRegion(parts[3]) == nil && arn == awsproto.BuildSSMParameterARN(parts[3], "", name)
 }
 
 // renderSSMGetParameter answers GetParameter for the one stored

@@ -202,13 +202,20 @@ func TestLoadSSM_NonPublicParameterIsRefused(t *testing.T) {
 	}
 }
 
-// A recorded ARN loads only as the parameter's own account-less ARN:
-// one carrying an account, or naming another parameter, is refused, so
-// neither finds the row.
+// A recorded ARN loads only as the parameter's own account-less ARN,
+// as awsproto.BuildSSMParameterARN builds it in a valid region: any other
+// is refused, so it never finds the row, and a recording with no ARN is
+// refused saying so.
 func TestLoadSSM_ARNNotTheParametersOwnIsRefused(t *testing.T) {
+	notOwn := func(arn string) string {
+		return "exchange 0: ssm GetParameter: parameter " + al2023Parameter + ": ARN " + arn + " is not its account-less parameter ARN"
+	}
 	for name, arn := range map[string]string{
-		"an account":        "arn:aws:ssm:us-east-1:" + loadAccount + ":parameter" + al2023Parameter,
-		"another parameter": "arn:aws:ssm:us-east-1::parameter/aws/service/other",
+		"an account":         "arn:aws:ssm:us-east-1:" + loadAccount + ":parameter" + al2023Parameter,
+		"another parameter":  "arn:aws:ssm:us-east-1::parameter/aws/service/other",
+		"another service":    "arn:aws:ec2:us-east-1::parameter" + al2023Parameter,
+		"an empty region":    "arn:aws:ssm:::parameter" + al2023Parameter,
+		"a malformed region": "arn:aws:ssm:us-east::parameter" + al2023Parameter,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
@@ -216,8 +223,16 @@ func TestLoadSSM_ARNNotTheParametersOwnIsRefused(t *testing.T) {
 			require.Contains(t, fixture, arn)
 			status, body := loadSSM(t, srv, ssmGetParameterExchange(http.StatusOK, fixture))
 			require.Equal(t, http.StatusBadRequest, status, body)
-			assert.Equal(t, []string{"exchange 0: ssm GetParameter: parameter " + al2023Parameter + ": ARN " + arn +
-				" is not its account-less parameter ARN"}, loadRefusals(t, body))
+			assert.Equal(t, []string{notOwn(arn)}, loadRefusals(t, body))
 		})
 	}
+	t.Run("no ARN", func(t *testing.T) {
+		_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+		arnLine := `        "ARN": "` + ssmFixtureARN + `",` + "\n"
+		fixture := strings.Replace(ssmFixture(t), arnLine, "", 1)
+		require.NotContains(t, fixture, `"ARN"`)
+		status, body := loadSSM(t, srv, ssmGetParameterExchange(http.StatusOK, fixture))
+		require.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, []string{"exchange 0: ssm GetParameter: parameter " + al2023Parameter + " records no ARN"}, loadRefusals(t, body))
+	})
 }

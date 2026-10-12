@@ -245,7 +245,9 @@ func (r *Repository) PatchSSMParameterTags(account, region, ref string, patch ma
 }
 
 // LoadSSMParameter stores p, a recorded parameter, under account through
-// a load's transaction, its ARN as recorded: NULL, so derived, for none.
+// a load's transaction, its ARN as recorded. The loader refuses a
+// recording with no ARN; an empty one would be stored NULL, as a
+// PutParameter row's is.
 func LoadSSMParameter(tx *LoadTx, account string, p *SSMParameter) error {
 	tags, err := json.Marshal(p.Tags)
 	if err != nil {
