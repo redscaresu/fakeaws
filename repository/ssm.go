@@ -12,6 +12,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/redscaresu/fakeaws/handlers/awsproto"
 	"github.com/redscaresu/fakeaws/models"
 )
 
@@ -130,23 +131,20 @@ func SSMParameterARNAccount(account, name string) string {
 // passes the ARN after an import by ARN); bind it with ssmRefArgs.
 const ssmRefMatch = `name IN (?, ?, ?)`
 
-// ssmRefArgs binds ssmRefMatch for ref: ref as a name, and the names an
-// ARN encodes (parameter/x is /x's and x's) whose own ARN it is, in this
-// region under this account or, for a public parameter, none. So an ARN
-// in another region or account, or a public parameter's ARN with an
-// account, matches nothing.
+// ssmRefArgs binds ssmRefMatch for ref: ref as a name, and each name
+// ref could be the ARN of (parameter/x is /x's and x's) kept only when
+// awsproto.BuildSSMParameterARN builds exactly ref for it, in this region
+// under this account or, for a public parameter, none. So an ARN in
+// another region or account, a public parameter's ARN with an account,
+// or an ARN not in the builder's form matches nothing.
 func ssmRefArgs(account, region, ref string) []any {
 	args := []any{ref, nil, nil}
-	rest, ok := strings.CutPrefix(ref, "arn:aws:ssm:"+region+":")
-	if !ok {
-		return args
-	}
-	arnAccount, path, ok := strings.Cut(rest, ":parameter/")
+	_, path, ok := strings.Cut(ref, ":parameter/")
 	if !ok {
 		return args
 	}
 	for i, name := range []string{"/" + path, path} {
-		if arnAccount == SSMParameterARNAccount(account, name) {
+		if awsproto.BuildSSMParameterARN(region, SSMParameterARNAccount(account, name), name) == ref {
 			args[i+1] = name
 		}
 	}
@@ -213,13 +211,20 @@ func (r *Repository) DeleteSSMParameter(account, region, name string) error {
 
 // PatchSSMParameterTags applies an RFC 7396 merge patch to a parameter's
 // tags in one statement: a string value sets that tag, nil removes it.
-// ref is a name or ARN; models.ErrNotFound when neither matches.
+// ref is a name or ARN; models.ErrNotFound when neither matches or it is
+// a public parameter, which is AWS's and never tagged.
 func (r *Repository) PatchSSMParameterTags(account, region, ref string, patch map[string]any) error {
 	b, err := json.Marshal(patch)
 	if err != nil {
 		return err
 	}
-	args := append([]any{string(b), account, region}, ssmRefArgs(account, region, ref)...)
+	refArgs := ssmRefArgs(account, region, ref)
+	for i, a := range refArgs {
+		if name, ok := a.(string); ok && IsPublicSSMParameter(name) {
+			refArgs[i] = nil
+		}
+	}
+	args := append([]any{string(b), account, region}, refArgs...)
 	res, err := r.db.Exec(`UPDATE ssm_parameters SET tags = json_patch(tags, ?) WHERE account_id = ? AND region = ? AND `+ssmRefMatch, args...)
 	if err != nil {
 		return err

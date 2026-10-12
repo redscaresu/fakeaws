@@ -298,7 +298,9 @@ func ssmDecodeTagRequest(w http.ResponseWriter, op string, body []byte) (ssmTagR
 	return in, true
 }
 
-// ssmTagError answers InvalidResourceId for an unknown parameter.
+// ssmTagError answers InvalidResourceId for an unknown or public
+// parameter: a public parameter is AWS's, so the account cannot tag it.
+// UNVERIFIED(aws-code): InvalidResourceId from https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_AddTagsToResource.html (and API_RemoveTagsFromResource, API_ListTagsForResource); no recording
 func ssmTagError(w http.ResponseWriter, err error) {
 	if errors.Is(err, models.ErrNotFound) {
 		ssmError(w, "InvalidResourceId", "The resource ID is not valid. Verify that you entered the correct ID and try again.")
@@ -307,31 +309,20 @@ func ssmTagError(w http.ResponseWriter, err error) {
 	awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
 }
 
-// ssmTagTarget reads the parameter a tagging request names, by name or
-// ARN, answering InvalidResourceId when there is none or it is public:
-// a public parameter is AWS's, so the account cannot tag it.
-// UNVERIFIED(aws-code): InvalidResourceId from https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_AddTagsToResource.html (and API_RemoveTagsFromResource, API_ListTagsForResource); no recording
-func (app *Application) ssmTagTarget(w http.ResponseWriter, account, region, ref string) (*repository.SSMParameter, bool) {
-	p, err := app.repo.GetSSMParameter(account, region, ref)
-	if err == nil && repository.IsPublicSSMParameter(p.Name) {
-		err = models.ErrNotFound
-	}
-	if err != nil {
-		ssmTagError(w, err)
-		return nil, false
-	}
-	return p, true
-}
-
 // ssmListTagsForResource backs the provider's tag read on every
-// aws_ssm_parameter refresh.
+// aws_ssm_parameter refresh. A public parameter has no tags of the
+// account's, so it answers as an unknown one.
 func (app *Application) ssmListTagsForResource(w http.ResponseWriter, account, region string, body []byte) {
 	in, ok := ssmDecodeTagRequest(w, "ListTagsForResource", body)
 	if !ok {
 		return
 	}
-	p, ok := app.ssmTagTarget(w, account, region, in.ResourceId)
-	if !ok {
+	p, err := app.repo.GetSSMParameter(account, region, in.ResourceId)
+	if err == nil && repository.IsPublicSSMParameter(p.Name) {
+		err = models.ErrNotFound
+	}
+	if err != nil {
+		ssmTagError(w, err)
 		return
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"TagList": tagsAsJSONSlice(p.Tags)})
@@ -344,10 +335,6 @@ func (app *Application) ssmChangeTags(w http.ResponseWriter, account, region, op
 	if !ok {
 		return
 	}
-	p, ok := app.ssmTagTarget(w, account, region, in.ResourceId)
-	if !ok {
-		return
-	}
 	patch := map[string]any{}
 	for _, t := range in.Tags {
 		patch[t.Key] = t.Value
@@ -355,7 +342,7 @@ func (app *Application) ssmChangeTags(w http.ResponseWriter, account, region, op
 	for _, k := range in.TagKeys {
 		patch[k] = nil
 	}
-	if err := app.repo.PatchSSMParameterTags(account, region, p.Name, patch); err != nil {
+	if err := app.repo.PatchSSMParameterTags(account, region, in.ResourceId, patch); err != nil {
 		ssmTagError(w, err)
 		return
 	}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -309,7 +310,7 @@ const (
 
 // newSSMPublicApp stores publicParameter and privateTwin as the loader
 // would, through the repository (PutParameter refuses aws-prefixed names).
-func newSSMPublicApp(t *testing.T) *httptest.Server {
+func newSSMPublicApp(t *testing.T) (*handlers.Application, *httptest.Server) {
 	t.Helper()
 	app, srv := newTestApp(t, ":memory:")
 	for _, name := range []string{publicParameter, privateTwin} {
@@ -319,11 +320,11 @@ func newSSMPublicApp(t *testing.T) *httptest.Server {
 		}, false)
 		require.NoError(t, err)
 	}
-	return srv
+	return app, srv
 }
 
 func TestSSM_PublicParameterRow(t *testing.T) {
-	srv := newSSMPublicApp(t)
+	app, srv := newSSMPublicApp(t)
 	publicARN := "arn:aws:ssm:us-east-1::parameter" + publicParameter
 	accountARN := "arn:aws:ssm:us-east-1:" + awsproto.FakeAccountID + ":parameter" + publicParameter
 
@@ -370,13 +371,39 @@ func TestSSM_PublicParameterRow(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s: %s", call, body)
 		assert.Contains(t, string(body), codes[op], call)
 	}
-	status, value, body := ssmGetValue(t, srv, publicParameter)
-	require.Equal(t, http.StatusOK, status, "GetParameter after the refusals: %s", body)
-	assert.Equal(t, "ami-0123456789abcdef0", value, "a refused call changed the public parameter")
+	got, err := app.Repository().GetSSMParameter(awsproto.FakeAccountID, "us-east-1", publicParameter)
+	require.NoError(t, err, "the refusals left the public parameter")
+	assert.Equal(t, "ami-0123456789abcdef0", got.Value, "a refused call changed the value")
+	assert.Equal(t, int64(1), got.Version, "a refused call changed the version")
+	assert.Equal(t, map[string]string{"k": "v"}, got.Tags, "a refused call changed the tags")
+}
+
+// An ARN matches only in the form awsproto.BuildSSMParameterARN builds:
+// a doubled slash or an empty path names no stored parameter.
+func TestSSM_NonCanonicalARNMatchesNothing(t *testing.T) {
+	_, srv := newSSMPublicApp(t)
+	for _, ref := range []string{
+		"arn:aws:ssm:us-east-1:" + awsproto.FakeAccountID + ":parameter/" + privateTwin,
+		"arn:aws:ssm:us-east-1::parameter/" + publicParameter,
+		"arn:aws:ssm:us-east-1:" + awsproto.FakeAccountID + ":parameter/",
+	} {
+		status, _, body := ssmGetValue(t, srv, ref)
+		assert.Equal(t, http.StatusBadRequest, status, "GetParameter %s: %s", ref, body)
+		assert.Contains(t, string(body), "ParameterNotFound", ref)
+		for op, reqBody := range map[string]string{
+			"ListTagsForResource":    `{"ResourceType":"Parameter","ResourceId":%q}`,
+			"AddTagsToResource":      `{"ResourceType":"Parameter","ResourceId":%q,"Tags":[{"Key":"a","Value":"b"}]}`,
+			"RemoveTagsFromResource": `{"ResourceType":"Parameter","ResourceId":%q,"TagKeys":["k"]}`,
+		} {
+			resp, body := ssmCall(t, srv, op, fmt.Sprintf(reqBody, ref))
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s %s: %s", op, ref, body)
+			assert.Contains(t, string(body), "InvalidResourceId", "%s %s", op, ref)
+		}
+	}
 }
 
 func TestSSM_PrivateParameterTagOpsByARN(t *testing.T) {
-	srv := newSSMPublicApp(t)
+	_, srv := newSSMPublicApp(t)
 	arn := "arn:aws:ssm:us-east-1:" + awsproto.FakeAccountID + ":parameter" + privateTwin
 	tagged := func(ref string) []byte {
 		t.Helper()
@@ -398,32 +425,46 @@ func TestSSM_PrivateParameterTagOpsByARN(t *testing.T) {
 	assert.Contains(t, string(body), "InvalidResourceId")
 }
 
-// Every operation handleSSM dispatches, sent to a public parameter, must
-// answer otherwise than to its private twin: rename the public answer to
-// the twin's and it must not equal the twin's answer.
+// Every operation handleSSM dispatches, sent to a public parameter,
+// answers exactly as a public parameter must: its pinned status and
+// error code, or body. And renamed to its private twin's, the answer
+// must not equal the twin's.
 func TestSSM_EveryOperationTreatsPublicParameterAsPublic(t *testing.T) {
-	bodies := map[string]string{
-		"PutParameter":           `{"Name":%q,"Type":"String","Value":"x","Overwrite":true}`,
-		"GetParameter":           `{"Name":%q}`,
-		"DescribeParameters":     `{"ParameterFilters":[{"Key":"Name","Option":"Equals","Values":[%q]}]}`,
-		"DeleteParameter":        `{"Name":%q}`,
-		"ListTagsForResource":    `{"ResourceType":"Parameter","ResourceId":%q}`,
-		"AddTagsToResource":      `{"ResourceType":"Parameter","ResourceId":%q,"Tags":[{"Key":"a","Value":"b"}]}`,
-		"RemoveTagsFromResource": `{"ResourceType":"Parameter","ResourceId":%q,"TagKeys":["k"]}`,
+	refused := func(code string) string { return `{"__type":"` + code + `"}` }
+	type call struct {
+		body, want string // want: the public answer's body, message aside
+		status     int
 	}
-	require.ElementsMatch(t, slices.Collect(maps.Keys(handlers.SSMOperations)), slices.Collect(maps.Keys(bodies)),
-		"every dispatched SSM operation has a body here")
+	calls := map[string]call{
+		"PutParameter": {`{"Name":%q,"Type":"String","Value":"x","Overwrite":true}`, refused("ValidationException"), http.StatusBadRequest},
+		"GetParameter": {`{"Name":%q}`, fmt.Sprintf(`{"Parameter":{"ARN":"arn:aws:ssm:us-east-1::parameter%s","Name":%q,
+			"Type":"String","DataType":"text","Value":"ami-0123456789abcdef0","Version":1,"LastModifiedDate":%d}}`,
+			publicParameter, publicParameter, time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC).Unix()), http.StatusOK},
+		"DescribeParameters":     {`{"ParameterFilters":[{"Key":"Name","Option":"Equals","Values":[%q]}]}`, `{"Parameters":[]}`, http.StatusOK},
+		"DeleteParameter":        {`{"Name":%q}`, refused("ParameterNotFound"), http.StatusBadRequest},
+		"ListTagsForResource":    {`{"ResourceType":"Parameter","ResourceId":%q}`, refused("InvalidResourceId"), http.StatusBadRequest},
+		"AddTagsToResource":      {`{"ResourceType":"Parameter","ResourceId":%q,"Tags":[{"Key":"a","Value":"b"}]}`, refused("InvalidResourceId"), http.StatusBadRequest},
+		"RemoveTagsFromResource": {`{"ResourceType":"Parameter","ResourceId":%q,"TagKeys":["k"]}`, refused("InvalidResourceId"), http.StatusBadRequest},
+	}
+	require.ElementsMatch(t, slices.Collect(maps.Keys(handlers.SSMOperations)), slices.Collect(maps.Keys(calls)),
+		"every dispatched SSM operation has a call here")
 
-	for op, body := range bodies {
+	for op, c := range calls {
 		t.Run(op, func(t *testing.T) {
-			srv := newSSMPublicApp(t)
-			answer := func(name string) string {
-				resp, out := ssmCall(t, srv, op, fmt.Sprintf(body, name))
-				return fmt.Sprintf("%d %s", resp.StatusCode, out)
-			}
-			private := answer(privateTwin)
-			public := strings.ReplaceAll(answer(publicParameter), "aws/service/", "twin/")
-			assert.NotEqual(t, private, public, "%s answers the public parameter as a private one", op)
+			_, srv := newSSMPublicApp(t)
+			resp, out := ssmCall(t, srv, op, fmt.Sprintf(c.body, publicParameter))
+			assert.Equal(t, c.status, resp.StatusCode, "%s: %s", op, out)
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(out, &got), "%s: %s", op, out)
+			delete(got, "message")
+			gotJSON, err := json.Marshal(got)
+			require.NoError(t, err)
+			assert.JSONEq(t, c.want, string(gotJSON), op)
+
+			public := fmt.Sprintf("%d %s", resp.StatusCode, strings.ReplaceAll(string(out), "aws/service/", "twin/"))
+			resp, private := ssmCall(t, srv, op, fmt.Sprintf(c.body, privateTwin))
+			assert.NotEqual(t, fmt.Sprintf("%d %s", resp.StatusCode, private), public,
+				"%s answers the public parameter as a private one", op)
 		})
 	}
 }

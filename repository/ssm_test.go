@@ -133,6 +133,9 @@ func TestSSMParameterRefMatchesItsOwnARN(t *testing.T) {
 		arn("", "/app/x"),
 		arn("111111111111", "/app/x"),
 		"arn:aws:ssm:eu-west-9:" + testAccount + ":parameter/app/x",
+		arn(testAccount, "//app/x"),
+		arn("", "/"+public),
+		arn(testAccount, "/"),
 	} {
 		_, err := r.GetSSMParameter(testAccount, testRegion, ref)
 		assert.ErrorIs(t, err, models.ErrNotFound, ref)
@@ -143,4 +146,21 @@ func TestSSMParameterRefMatchesItsOwnARN(t *testing.T) {
 	got, err := r.GetSSMParameter(testAccount, testRegion, "/app/x")
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"a": "1"}, got.Tags)
+}
+
+func TestSSMParameterPatchTagsNeverTouchesPublic(t *testing.T) {
+	const public = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+	r := setupRepo(t)
+	p := ssmPut(public, "v")
+	p.Tags = map[string]string{"k": "v"}
+	_, err := r.PutSSMParameter(testAccount, p, false)
+	require.NoError(t, err)
+
+	for _, ref := range []string{public, "arn:aws:ssm:" + testRegion + "::parameter" + public} {
+		err := r.PatchSSMParameterTags(testAccount, testRegion, ref, map[string]any{"k": nil, "a": "1"})
+		assert.ErrorIs(t, err, models.ErrNotFound, ref)
+	}
+	got, err := r.GetSSMParameter(testAccount, testRegion, public)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"k": "v"}, got.Tags)
 }
