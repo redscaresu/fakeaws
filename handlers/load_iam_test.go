@@ -249,33 +249,72 @@ func TestLoadIAM_DocumentsCompareDecoded(t *testing.T) {
 }
 
 // TestLoadIAM_RoleWithNoKeyRefuses: a role is keyed by its name and its
-// tags by its ARN, so a GetRole answering neither is refused naming the
-// field, never stored under "".
+// tags by its ARN, so a GetRole answering either empty is refused naming
+// the first missing, in order, never stored under "".
 func TestLoadIAM_RoleWithNoKeyRefuses(t *testing.T) {
-	for field, cut := range map[string]*regexp.Regexp{
-		"Arn":      regexp.MustCompile(`<Arn>[^<]*</Arn>`),
-		"RoleName": regexp.MustCompile(`<RoleName>[^<]*</RoleName>`),
+	arn, name := regexp.MustCompile(`<Arn>[^<]*</Arn>`), regexp.MustCompile(`<RoleName>[^<]*</RoleName>`)
+	for _, tc := range []struct {
+		name, field string
+		cut         []*regexp.Regexp
+	}{
+		{"no Arn", "Arn", []*regexp.Regexp{arn}},
+		{"no RoleName", "RoleName", []*regexp.Regexp{name}},
+		{"neither", "RoleName", []*regexp.Regexp{arn, name}},
 	} {
-		t.Run(field, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 			status, body := postLoad(t, srv, iamReadEnvelope(t, iamRoleRead[:1], func(_, body string) string {
-				return cut.ReplaceAllString(body, "")
+				for _, re := range tc.cut {
+					body = re.ReplaceAllString(body, "")
+				}
+				return body
 			}))
 			require.Equal(t, http.StatusBadRequest, status, body)
-			assert.Equal(t, []string{"exchange 0: iam GetRole: GetRoleResult/Role holds no " + field}, loadRefusals(t, body))
+			assert.Equal(t, []string{"exchange 0: iam GetRole: GetRoleResult/Role holds no " + tc.field}, loadRefusals(t, body))
 		})
 	}
 }
 
-// TestLoadIAM_ProfileWithNoNameRefuses: a profile is keyed by its name,
-// so one answering none is refused, never stored under "".
-func TestLoadIAM_ProfileWithNoNameRefuses(t *testing.T) {
+// TestLoadIAM_ProfileWithNoKeyRefuses: a profile is keyed by its name
+// and its tags by its ARN, so one answering either empty is refused,
+// never stored under "".
+func TestLoadIAM_ProfileWithNoKeyRefuses(t *testing.T) {
+	for field, cut := range map[string]*regexp.Regexp{
+		"InstanceProfileName": regexp.MustCompile(`<InstanceProfileName>[^<]*</InstanceProfileName>`),
+		// The profile's own Arn, after its Roles.
+		"Arn": regexp.MustCompile(`(</Roles>[\s\S]*)<Arn>[^<]*</Arn>`),
+	} {
+		t.Run(field, func(t *testing.T) {
+			_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+			status, body := postLoad(t, srv, iamReadEnvelope(t, iamRoleRead, func(fixture, body string) string {
+				if fixture != "ListInstanceProfilesForRole" {
+					return body
+				}
+				return cut.ReplaceAllString(body, "$1")
+			}))
+			require.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, []string{"exchange 5: iam ListInstanceProfilesForRole: ListInstanceProfilesForRoleResult/InstanceProfiles/member holds no " + field},
+				loadRefusals(t, body))
+		})
+	}
+}
+
+// TestLoadIAM_RepeatedProfileComparesDocumentsDecoded: a profile two
+// ListInstanceProfilesForRole reads answer, its role's trust policy
+// encoded otherwise in the second, loads once: the repeat compares the
+// document decoded, under the entry re-rooted at the profile.
+func TestLoadIAM_RepeatedProfileComparesDocumentsDecoded(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
-	cut := regexp.MustCompile(`<InstanceProfileName>[^<]*</InstanceProfileName>`)
-	status, body := postLoad(t, srv, iamReadEnvelope(t, iamRoleRead, func(fixture, body string) string {
-		return cut.ReplaceAllString(body, "")
-	}))
-	require.Equal(t, http.StatusBadRequest, status, body)
-	assert.Equal(t, []string{"exchange 5: iam ListInstanceProfilesForRole: ListInstanceProfilesForRoleResult/InstanceProfiles/member holds no InstanceProfileName"},
-		loadRefusals(t, body))
+	exchanges := []string{}
+	for _, r := range iamRoleRead {
+		exchanges = append(exchanges, loadPage("iam", r.action, r.params, http.StatusOK, iamFixture(t, r.fixture)))
+	}
+	again := otherEncoding("", iamFixture(t, "ListInstanceProfilesForRole"))
+	require.NotEqual(t, iamFixture(t, "ListInstanceProfilesForRole"), again)
+	exchanges = append(exchanges, loadPage("iam", "ListInstanceProfilesForRole", map[string]string{"RoleName": "S3Access"}, http.StatusOK, again))
+	status, body := postLoad(t, srv, loadEnvelope(iamLoadAccount, loadRegion, exchanges...))
+	require.Equal(t, http.StatusOK, status, body)
+	var answer struct{ Loaded map[string]int }
+	require.NoError(t, json.Unmarshal([]byte(body), &answer))
+	assert.Equal(t, 1, answer.Loaded["instance-profile"])
 }

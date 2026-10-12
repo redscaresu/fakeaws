@@ -67,10 +67,8 @@ func loadGetRole(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 	}
 	r := body.Role
 	// A role is keyed by its name, and its tags by its ARN.
-	for field, v := range map[string]string{"RoleName": r.RoleName, "Arn": r.Arn} {
-		if v == "" {
-			return nil, loadRefusal("GetRoleResult/Role holds no " + field)
-		}
+	if err := iamMissingKey("GetRoleResult/Role", [2]string{"RoleName", r.RoleName}, [2]string{"Arn", r.Arn}); err != nil {
+		return nil, err
 	}
 	doc, err := url.QueryUnescape(r.AssumeRolePolicyDocument)
 	if err != nil {
@@ -214,8 +212,10 @@ func loadListInstanceProfilesForRole(env *loadEnvelope, ex *loadExchange) ([]loa
 	}
 	items := make([]loadItem, len(body.Profiles))
 	for i, p := range body.Profiles {
-		if p.InstanceProfileName == "" {
-			return nil, loadRefusal("ListInstanceProfilesForRoleResult/InstanceProfiles/member holds no InstanceProfileName")
+		// A profile is keyed by its name, and its tags by its ARN.
+		if err := iamMissingKey("ListInstanceProfilesForRoleResult/InstanceProfiles/member",
+			[2]string{"InstanceProfileName", p.InstanceProfileName}, [2]string{"Arn", p.Arn}); err != nil {
+			return nil, err
 		}
 		profile := &repository.IAMInstanceProfile{Name: p.InstanceProfileName, Path: p.Path, ARN: p.Arn, ID: p.InstanceProfileId, CreatedAt: p.CreateDate}
 		write := func(tx *repository.LoadTx) error { return tx.LoadInstanceProfile(env.Account, profile, "") }
@@ -248,6 +248,17 @@ func renderListInstanceProfilesForRole(tx *repository.LoadTx, ids []string) ([]b
 		out.InstanceProfiles = append(out.InstanceProfiles, instanceProfileToXML(p, role))
 	}
 	return awsproto.QueryRPCResponse("ListInstanceProfilesForRole", &out), nil
+}
+
+// iamMissingKey refuses the first of fields, each a name and its
+// value, in order, whose value is empty, naming it under path.
+func iamMissingKey(path string, fields ...[2]string) error {
+	for _, f := range fields {
+		if f[1] == "" {
+			return loadRefusal(path + " holds no " + f[0])
+		}
+	}
+	return nil
 }
 
 // iamListBody decodes ex's body into body and returns the role its
