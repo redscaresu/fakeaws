@@ -2969,20 +2969,53 @@ type ec2ImageXML struct {
 	VirtualizationType string `xml:"virtualizationType"`
 	RootDeviceName     string `xml:"rootDeviceName"`
 	State              string `xml:"imageState"`
+	ImageType          string `xml:"imageType"`
 }
 
 type ec2DescribeImagesResult struct {
 	ImagesSet []ec2ImageXML `xml:"imagesSet>item"`
 }
 
+// imageFilters are the DescribeImages filters fakeaws models: the
+// fields an AMI row stores (repository.EC2AMI), what ec2AMIToXML
+// derives from them, and the tag filters. The row has no field for
+// architecture, platform, block-device-mapping.* and the rest, so
+// those stay refused, by name.
+var imageFilters = ec2FilterTable[ec2ImageXML]{
+	values: map[string]func(ec2ImageXML) []string{
+		"name":                func(x ec2ImageXML) []string { return []string{x.Name} },
+		"image-id":            func(x ec2ImageXML) []string { return []string{x.ImageId} },
+		"owner-id":            func(x ec2ImageXML) []string { return []string{x.OwnerId} },
+		"owner-alias":         imageOwnerAlias,
+		"virtualization-type": func(x ec2ImageXML) []string { return []string{x.VirtualizationType} },
+		"root-device-name":    func(x ec2ImageXML) []string { return []string{x.RootDeviceName} },
+		"state":               func(x ec2ImageXML) []string { return []string{x.State} },
+		"image-type":          func(x ec2ImageXML) []string { return []string{x.ImageType} },
+	},
+	tagID: func(x ec2ImageXML) string { return x.ImageId },
+}
+
+// imageOwnerAlias is amazon for an image whose owner is the fixtures'
+// literal amazon, and none for any other.
+func imageOwnerAlias(x ec2ImageXML) []string {
+	if x.OwnerId == "amazon" {
+		return []string{"amazon"}
+	}
+	return nil
+}
+
 // ec2DescribeImages answers ImageId.N, most common from
-// terraform-provider-aws where users pass a literal AMI id, and
-// Owner.N. data.aws_ami's filters are refused per the S44-T0 pitfall,
-// as is ExecutableBy.N. IncludeDisabled and IncludeDeprecated (which
-// data.aws_ami always sends) are read: no image is disabled or
-// deprecated, so neither can change the answer.
+// terraform-provider-aws where users pass a literal AMI id, Owner.N
+// and imageFilters (data.aws_ami's owners and filter blocks). Owner.N keeps account ids, self (the caller) and amazon, which
+// matches the fixtures' literal OwnerID; a loaded database has no
+// fixtures and its Amazon images a numeric owner, so amazon matches
+// none there. ExecutableBy.N is refused, by name. IncludeDisabled and
+// IncludeDeprecated (which data.aws_ami always sends) are read:
+// fakeaws has no disabled or deprecated image, so neither can change
+// the answer.
 func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if _, ok := ec2NoFilters.read(w, req, "ImageId.N", "Owner.N", "IncludeDisabled", "IncludeDeprecated"); !ok {
+	filters, ok := imageFilters.read(w, req, "ImageId.N", "Owner.N", "IncludeDisabled", "IncludeDeprecated")
+	if !ok {
 		return
 	}
 	// Lazy-seed canonical AMI fixtures for this region (Codex pass 9
@@ -3007,13 +3040,19 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 			amis = append(amis, a)
 		}
 	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
+		return
+	}
 	// Owner.N keeps images of those owners, "self" meaning the caller:
 	// the scope sweep's Owner.1=self sees none of the fixtures.
 	owners := queryListValues(req.Params, "Owner.")
 	out := ec2DescribeImagesResult{ImagesSet: []ec2ImageXML{}}
 	for _, a := range amis {
-		if len(owners) == 0 || slices.Contains(owners, a.OwnerID) || a.OwnerID == account && slices.Contains(owners, "self") {
-			out.ImagesSet = append(out.ImagesSet, ec2AMIToXML(a))
+		x := ec2AMIToXML(a)
+		if (len(owners) == 0 || slices.Contains(owners, a.OwnerID) || a.OwnerID == account && slices.Contains(owners, "self")) &&
+			imageFilters.matches(x, filters, tags) {
+			out.ImagesSet = append(out.ImagesSet, x)
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeImages", &out)
@@ -3071,7 +3110,7 @@ func ec2AMIToXML(a *repository.EC2AMI) ec2ImageXML {
 	return ec2ImageXML{
 		ImageId: a.ID, Name: a.Name, OwnerId: a.OwnerID,
 		VirtualizationType: a.VirtualizationType, RootDeviceName: a.RootDeviceName,
-		State: "available",
+		State: "available", ImageType: "machine",
 	}
 }
 

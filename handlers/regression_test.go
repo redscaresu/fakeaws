@@ -1632,3 +1632,19 @@ func TestRegressionBooleanAttributesOnlyTrueOrFalse(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "no attribute: %s", body)
 	assert.Equal(t, "MissingParameter", extractEC2Tag(body, "Code"), "no attribute")
 }
+
+// TestRegressionDescribeImagesNameFilter: DescribeImages refused every
+// Filter.N, so data.aws_ami's name filter answered 501 and no config
+// that looks an image up by name could plan. name is honoured, its *
+// crossing / as Ubuntu's image names need, and Owner.N amazon matches
+// the fixtures' literal owner.
+func TestRegressionDescribeImagesNameFilter(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	byName := func(owner, name string) url.Values {
+		return url.Values{"Owner.1": {owner}, "Filter.1.Name": {"name"}, "Filter.1.Value.1": {name}}
+	}
+	assert.Equal(t, []string{handlers.AL2023AMIID},
+		describeImageIDs(t, srv, byName("amazon", "al2023-ami-2023.*-x86_64")))
+	assert.ElementsMatch(t, []string{"ami-0ubuntu2004", "ami-0ubuntu2204"},
+		describeImageIDs(t, srv, byName("099720109477", "ubuntu/images/*")))
+}

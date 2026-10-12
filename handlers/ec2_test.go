@@ -2086,6 +2086,65 @@ func TestEC2_DescribeImagesReadsIncludeDeprecated(t *testing.T) {
 	assert.ElementsMatch(t, []string{"ami-0ubuntu2004", "ami-0ubuntu2204"}, out.IDs)
 }
 
+// describeImageIDs answers DescribeImages with params, which must
+// succeed, as its image ids.
+func describeImageIDs(t *testing.T, srv *httptest.Server, params url.Values) []string {
+	t.Helper()
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeImages", params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%v: %s", params, body)
+	var out struct {
+		IDs []string `xml:"imagesSet>item>imageId"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	return out.IDs
+}
+
+// TestEC2_DescribeImagesFilters: each imageFilters name selects the
+// fixtures whose row answers it; Owner.1=self with a name filter keeps
+// none, and a filter on a field AMI rows do not store, or
+// ExecutableBy.N, is refused by name.
+func TestEC2_DescribeImagesFilters(t *testing.T) {
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	filter := func(name, value string) url.Values {
+		return url.Values{"Filter.1.Name": {name}, "Filter.1.Value.1": {value}}
+	}
+	amazon := []string{"ami-0abcd1234", handlers.AL2023AMIID}
+	ubuntu := []string{"ami-0ubuntu2004", "ami-0ubuntu2204"}
+	for _, c := range []struct {
+		name, value string
+		want        []string
+	}{
+		{"image-id", "ami-0ubuntu2204", ubuntu[1:]},
+		{"owner-id", "099720109477", ubuntu},
+		{"owner-alias", "amazon", amazon},
+		{"virtualization-type", "hvm", append(amazon, ubuntu...)},
+		{"root-device-name", "/dev/sda1", ubuntu},
+		{"state", "available", append(amazon, ubuntu...)},
+		{"image-type", "machine", append(amazon, ubuntu...)},
+		{"image-type", "kernel", nil},
+		{"tag:Name", "*", nil},
+	} {
+		assert.ElementsMatch(t, c.want, describeImageIDs(t, srv, filter(c.name, c.value)), "%s=%s", c.name, c.value)
+	}
+
+	self := filter("name", "*")
+	self.Set("Owner.1", "self")
+	assert.Empty(t, describeImageIDs(t, srv, self), "none of the fixtures is the caller's")
+
+	for _, c := range []struct {
+		params url.Values
+		name   string
+	}{
+		{filter("architecture", "x86_64"), "architecture"},
+		{url.Values{"ExecutableBy.1": {"all"}}, "ExecutableBy.N"},
+	} {
+		resp, body := ec2Call(t, srv, tagRegion, "DescribeImages", c.params)
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s: %s", c.name, body)
+		assert.Equal(t, "DescribeImages: not modelled by fakeaws: "+c.name, extractEC2Tag(body, "Message"), c.name)
+		assert.Equal(t, "filter-refused", lastClass(t, srv), c.name)
+	}
+}
+
 // TestEC2_DescribeIdListReadsEveryIndex: VpcId.1 and VpcId.3 with no
 // VpcId.2 look up both.
 func TestEC2_DescribeIdListReadsEveryIndex(t *testing.T) {
