@@ -1321,10 +1321,11 @@ func TestRegressionDescribeLiteralNIndexRefused(t *testing.T) {
 	}
 }
 
-// TestRegressionNetworkDescribesHonourTagFilters: DescribeVpcs and
-// DescribeInternetGateways refused every Filter.N, and DescribeSubnets
-// and DescribeRouteTables refused tag:<Key>, so infrafactory's filtered
-// read of its own run's network got 501. Each now selects by tag.
+// TestRegressionNetworkDescribesHonourTagFilters: DescribeVpcs,
+// DescribeInternetGateways and DescribeSecurityGroups refused every
+// Filter.N, and DescribeSubnets and DescribeRouteTables refused
+// tag:<Key>, so infrafactory's filtered read of its own run's network
+// got 501. Each now selects by tag.
 func TestRegressionNetworkDescribesHonourTagFilters(t *testing.T) {
 	srv := newTestServerForRegression(t)
 	kinds := map[string]taggedKind{}
@@ -1339,6 +1340,7 @@ func TestRegressionNetworkDescribesHonourTagFilters(t *testing.T) {
 		{"subnet", func(d describedIDs) []string { return d.Subnets }},
 		{"internet-gateway", func(d describedIDs) []string { return d.Gateways }},
 		{"route-table", func(d describedIDs) []string { return d.RouteTables }},
+		{"security-group", func(d describedIDs) []string { return d.SecurityGroups }},
 	} {
 		kind, ok := kinds[tc.kind]
 		require.True(t, ok, "no taggedKinds entry for %s", tc.kind)
