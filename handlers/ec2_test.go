@@ -2034,6 +2034,9 @@ func TestAMIFixtures_LoadedAL2023ParameterRow(t *testing.T) {
 	resp, body = ssmCall(t, srv, "DescribeParameters", `{}`)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeParameters: %s", body)
 	assert.NotContains(t, string(body), al2023Parameter, "DescribeParameters lists the public parameter")
+	resp, body = doGet(t, srv, "/mock/state")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GET /mock/state: %s", body)
+	assert.NotContains(t, string(body), al2023Parameter, "/mock/state lists the public parameter")
 
 	resp, body = ssmCall(t, srv, "DeleteParameter", fmt.Sprintf(`{"Name":%q}`, al2023Parameter))
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "DeleteParameter: %s", body)
