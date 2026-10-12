@@ -137,3 +137,16 @@ func TestRestoreRefusesAnotherSchemaVersion(t *testing.T) {
 		})
 	}
 }
+
+// TestRestoreClearsAStaleJournal: a kill while stage switched the
+// .restore copy to WAL can leave <db>.restore-journal hot. Restore
+// removes it with the copy's other files, so it still succeeds.
+func TestRestoreClearsAStaleJournal(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	r := restoreRepo(t, dbPath)
+	require.NoError(t, os.WriteFile(dbPath+".restore-journal", []byte("left by a kill"), 0o600))
+
+	require.NoError(t, r.Restore(nil))
+	assert.Equal(t, []string{"vpc-snap"}, vpcIDs(t, r))
+	assert.Empty(t, stagedFiles(t, dbPath))
+}

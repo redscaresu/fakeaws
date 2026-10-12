@@ -566,9 +566,11 @@ func checkpointAll(db *sql.DB) error {
 	return nil
 }
 
-// removeDBFiles removes a db file and its WAL and shared-memory files.
+// removeDBFiles removes a db file and its WAL, shared-memory and
+// rollback-journal files. A kill while stage's openDB switches a copy
+// to WAL can leave its -journal hot, which checkSchemaVersion refuses.
 func removeDBFiles(path string) {
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
 		_ = os.Remove(p)
 	}
 }
