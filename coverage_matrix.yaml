@@ -380,7 +380,7 @@ entries:
     aws_resource_type: data.aws_security_group
     working_dir_name: ec2_data_sources
     misconfigured_exempt: true
-    misconfigured_exempt_reason: "DescribeSecurityGroups answers GroupName.N without a default VPC 400 VPCIdNotSpecified, pinned in TestContract_ec2_sg_group_name_default_vpc_only, and an unknown GroupId.N (data.aws_security_group id) 400 InvalidGroup.NotFound, which no test pins yet; fakeaws's own refusal of a filter it does not model is proved end to end in examples/filter_refused_test.go."
+    misconfigured_exempt_reason: "data.aws_security_group sends GroupId.N (id) and Filter.N group-name (name), vpc-id (vpc_id), tag:<key> (tags) and its filter blocks; an unknown GroupId.N answers 400 InvalidGroup.NotFound, which no test pins yet; fakeaws's own refusal of a filter it does not model is proved end to end in examples/filter_refused_test.go."
     updates_exempt: true
     updates_exempt_reason: "A data source has no update path."
     integration_test_func_name: "^(TestEC2_DescribeSecurityGroupsFilters|TestContract_ec2_sg_group_name_default_vpc_only)$"
@@ -388,7 +388,7 @@ entries:
     aws_resource_type: data.aws_availability_zones
     working_dir_name: ec2_data_sources
     misconfigured_exempt: true
-    misconfigured_exempt_reason: "DescribeAvailabilityZones answers an unknown ZoneName.N or ZoneId.N 400 InvalidParameterValue, pinned in TestEC2_DescribeAvailabilityZones; fakeaws's own refusal of a filter it does not model is proved end to end in examples/filter_refused_test.go."
+    misconfigured_exempt_reason: "data.aws_availability_zones sends only Filter.N and AllAvailabilityZones, and AWS refuses neither for a valid state; fakeaws's own refusal of a filter it does not model is proved end to end in examples/filter_refused_test.go."
     updates_exempt: true
     updates_exempt_reason: "A data source has no update path."
     integration_test_func_name: "^(TestEC2_DescribeAvailabilityZones|TestRegressionDescribeAvailabilityZonesAnswered)$"
