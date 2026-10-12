@@ -569,6 +569,7 @@ type r53ChangeTagsForResourceRequest struct {
 // fakeaws does not tag (health checks).
 func r53TagTarget(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if rt := chi.URLParam(r, "resourceType"); rt != "hostedzone" {
+		markClass(w, classFilterRefused)
 		awsproto.WriteServiceError(w, awsproto.ShapeXML, http.StatusBadRequest,
 			"InvalidInput", fmt.Sprintf("fakeaws does not tag Route53 resource type %q", rt))
 		return "", false

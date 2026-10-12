@@ -1098,6 +1098,7 @@ func (app *Application) ec2AllocateAddress(w http.ResponseWriter, account, regio
 	}
 	if domain != "vpc" {
 		// classic EIPs are out of scope at v1 per PLAN.md S44.
+		markClass(w, classFilterRefused)
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("Domain=%q not supported (v1 supports 'vpc' only): %w", domain, models.ErrConflict))
 		return
@@ -2212,7 +2213,8 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 			http.StatusBadRequest, "InvalidParameterCombination", err.Error())
 		return
 	}
-	if err != nil {
+	if err != nil { // a network interface fakeaws does not launch
+		markClass(w, classFilterRefused)
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -2446,6 +2448,7 @@ func (app *Application) ec2ModifyNetworkInterfaceAttribute(w http.ResponseWriter
 	id := req.Params.Get("NetworkInterfaceId")
 	groups := queryListValues(req.Params, "SecurityGroupId.")
 	if id == "" || len(groups) == 0 {
+		markClass(w, classFilterRefused)
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("NetworkInterfaceId and SecurityGroupId.N required (fakeaws models only the Groups attribute): %w", models.ErrConflict))
 		return

@@ -73,10 +73,10 @@ fakeaws/
 - **No silent 200**: every endpoint we don't model returns 501 with an
   `UNIMPLEMENTED` log line. Discovery surface for the next caller.
 - **Gap marks**: a gap site the request log must tell apart (a 404
-  default arm, a refused filter, an always-empty Describe) calls
-  `markClass`; concepts.md item 7 has the classes and the S3 known
-  ceilings (unknown-subresource `GET /{bucket}`, `ListObjects`,
-  `HeadObject`/`GetObject`), which still record `answered-from-rows`.
+  default arm, a refusal of something fakeaws does not model,
+  `ec2DescribeNone`) calls `markClass`; concepts.md item 7 has the
+  classes and the known ceilings left unmarked, which record
+  `answered-from-rows`.
 - **Examples are auto-discovered**: dropping a directory under
   `examples/{working,misconfigured,updates}/` registers it for the
   smoke gate (S43-T12). No per-service smoke ticket. Detail in

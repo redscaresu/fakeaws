@@ -16,22 +16,27 @@ const (
 	classAnsweredFromRows requestClass = "answered-from-rows"
 	classUnimplemented    requestClass = "unimplemented-501"
 
+	// Not every gap is marked: concepts.md item 7 names the known
+	// ceilings that still record answered-from-rows.
+
 	// CRITICAL[request-log-not-modelled-404]: the default arm of EC2,
 	// IAM, RDS, DynamoDB, SQS, Secrets Manager and KMS marks an
 	// unknown action not-modelled-404. Its 404 ResourceNotFoundException
 	// is wire-identical to a missing row's, so only the mark tells them
-	// apart.
+	// apart. A modelled action that stores nothing is not marked.
 	classNotModelled404 requestClass = "not-modelled-404"
 
-	// CRITICAL[request-log-filter-refused]: a filter or parameter fakeaws
-	// refuses rather than ignores marks filter-refused and answers as
-	// before: EC2's 409 ConflictException, SSM's 501. A modelled 409
-	// stays answered-from-rows.
+	// CRITICAL[request-log-filter-refused]: a site that refuses a filter,
+	// parameter or tag resource type fakeaws does not model (EC2 409, RDS
+	// and Route53 400, SSM 501) marks filter-refused and answers as
+	// before. A modelled 409 and a filter fakeaws ignores rather than
+	// refuses stay answered-from-rows.
 	classFilterRefused requestClass = "filter-refused"
 
-	// CRITICAL[request-log-empty-collection]: a Describe of a resource
-	// fakeaws never creates (ec2DescribeNone) marks empty-collection; an
-	// empty answer read from rows stays answered-from-rows.
+	// CRITICAL[request-log-empty-collection]: only ec2DescribeNone, the
+	// Describe of a resource fakeaws never creates, marks
+	// empty-collection. Other always-empty answers, and an empty answer
+	// read from rows, stay answered-from-rows.
 	classEmptyCollection requestClass = "empty-collection"
 )
 

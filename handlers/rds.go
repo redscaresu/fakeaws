@@ -170,6 +170,7 @@ func rdsTagTarget(w http.ResponseWriter, req awsproto.QueryRPCRequest) (rdsTagge
 			return kind, arn, true
 		}
 	}
+	markClass(w, classFilterRefused)
 	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusBadRequest,
 		"InvalidParameterValue", fmt.Sprintf("fakeaws does not tag the RDS resource %q", arn))
 	return rdsTaggedKind{}, "", false

@@ -370,6 +370,35 @@ func TestContract_request_log_filter_refused(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AllowReassociation: %s", body)
 	assert.Equal(t, "filter-refused", lastClass(t, srv), "AllowReassociation")
 
+	for _, c := range []struct {
+		name   string
+		status int
+		call   func() (*http.Response, []byte)
+	}{
+		{"AllocateAddress Domain=standard", http.StatusConflict, func() (*http.Response, []byte) {
+			return ec2Call(t, srv, region, "AllocateAddress", url.Values{"Domain": {"standard"}})
+		}},
+		{"RunInstances on an existing network interface", http.StatusConflict, func() (*http.Response, []byte) {
+			return ec2Call(t, srv, region, "RunInstances", url.Values{
+				"ImageId": {"ami-0abcd1234"}, "InstanceType": {"t3.micro"},
+				"NetworkInterface.1.DeviceIndex": {"0"}, "NetworkInterface.1.NetworkInterfaceId": {"eni-x"},
+			})
+		}},
+		{"ModifyNetworkInterfaceAttribute SourceDestCheck", http.StatusConflict, func() (*http.Response, []byte) {
+			return ec2Call(t, srv, region, "ModifyNetworkInterfaceAttribute", url.Values{"NetworkInterfaceId": {"eni-x"}, "SourceDestCheck.Value": {"false"}})
+		}},
+		{"RDS ListTagsForResource on a snapshot", http.StatusBadRequest, func() (*http.Response, []byte) {
+			return rdsCall(t, srv, region, "ListTagsForResource", url.Values{"ResourceName": {"arn:aws:rds:us-east-1:000000000000:snapshot:x"}})
+		}},
+		{"Route53 ListTagsForResource on a health check", http.StatusBadRequest, func() (*http.Response, []byte) {
+			return r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/tags/healthcheck/x", "")
+		}},
+	} {
+		resp, body := c.call()
+		assert.Equal(t, c.status, resp.StatusCode, "%s: %s", c.name, body)
+		assert.Equal(t, "filter-refused", lastClass(t, srv), c.name)
+	}
+
 	for _, c := range []struct{ name, op, body string }{
 		{"Filters", "DescribeParameters", `{"Filters":[{"Key":"Name","Values":["x"]}]}`},
 		{"non-Name ParameterFilter", "DescribeParameters", `{"ParameterFilters":[{"Key":"Type","Values":["String"]}]}`},
