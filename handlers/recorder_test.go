@@ -370,34 +370,39 @@ func TestContract_request_log_filter_refused(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "AllowReassociation: %s", body)
 	assert.Equal(t, "filter-refused", lastClass(t, srv), "AllowReassociation")
 
+	ami, nic := "ami-0abcd1234", "NetworkInterface.1."
 	for _, c := range []struct {
-		name   string
+		action string
+		params url.Values
 		status int
-		call   func() (*http.Response, []byte)
 	}{
-		{"AllocateAddress Domain=standard", http.StatusConflict, func() (*http.Response, []byte) {
-			return ec2Call(t, srv, region, "AllocateAddress", url.Values{"Domain": {"standard"}})
-		}},
-		{"RunInstances on an existing network interface", http.StatusConflict, func() (*http.Response, []byte) {
-			return ec2Call(t, srv, region, "RunInstances", url.Values{
-				"ImageId": {"ami-0abcd1234"}, "InstanceType": {"t3.micro"},
-				"NetworkInterface.1.DeviceIndex": {"0"}, "NetworkInterface.1.NetworkInterfaceId": {"eni-x"},
-			})
-		}},
-		{"ModifyNetworkInterfaceAttribute SourceDestCheck", http.StatusConflict, func() (*http.Response, []byte) {
-			return ec2Call(t, srv, region, "ModifyNetworkInterfaceAttribute", url.Values{"NetworkInterfaceId": {"eni-x"}, "SourceDestCheck.Value": {"false"}})
-		}},
-		{"RDS ListTagsForResource on a snapshot", http.StatusBadRequest, func() (*http.Response, []byte) {
-			return rdsCall(t, srv, region, "ListTagsForResource", url.Values{"ResourceName": {"arn:aws:rds:us-east-1:000000000000:snapshot:x"}})
-		}},
-		{"Route53 ListTagsForResource on a health check", http.StatusBadRequest, func() (*http.Response, []byte) {
-			return r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/tags/healthcheck/x", "")
-		}},
+		{"AllocateAddress", url.Values{"Domain": {"standard"}}, http.StatusConflict},
+		{"RunInstances", url.Values{"ImageId": {ami}, "InstanceType": {"t3.micro"}, nic + "DeviceIndex": {"0"}, nic + "NetworkInterfaceId": {"eni-x"}}, http.StatusConflict},
+		{"RunInstances", url.Values{"ImageId": {ami}, "InstanceType": {"t3.micro"}}, http.StatusConflict},
+		{"RunInstances", url.Values{"SubnetId": {"subnet-x"}, "ImageId": {ami}, "InstanceType": {"t3.micro"},
+			"TagSpecification.1.ResourceType": {"spot-instances-request"}, "TagSpecification.1.Tag.1.Key": {"k"}}, http.StatusBadRequest},
+		{"ModifyNetworkInterfaceAttribute", url.Values{"NetworkInterfaceId": {"eni-x"}, "SourceDestCheck.Value": {"false"}}, http.StatusConflict},
+		{"CreateVpc", url.Values{"Ipv4IpamPoolId": {"ipam-pool-x"}, "Ipv4NetmaskLength": {"16"}}, http.StatusConflict},
+		{"CreateSubnet", url.Values{"VpcId": {"vpc-x"}, "Ipv6Native": {"true"}}, http.StatusConflict},
+		{"AssociateRouteTable", url.Values{"RouteTableId": {"rtb-x"}, "GatewayId": {"igw-x"}}, http.StatusConflict},
+		{"CreateRoute", url.Values{"RouteTableId": {"rtb-x"}, "DestinationIpv6CidrBlock": {"::/0"}, "GatewayId": {"igw-x"}}, http.StatusConflict},
+		{"CreateSecurityGroup", url.Values{"GroupName": {"g"}, "GroupDescription": {"g"}}, http.StatusConflict},
+		{"DeleteSecurityGroup", url.Values{"GroupName": {"web"}}, http.StatusConflict},
+		{"AuthorizeSecurityGroupIngress", url.Values{"GroupName": {"web"}, "IpPermissions.1.IpProtocol": {"tcp"}}, http.StatusConflict},
+		{"AuthorizeSecurityGroupIngress", url.Values{"GroupId": {"sg-x"}, "IpProtocol": {"tcp"}, "FromPort": {"22"}, "ToPort": {"22"}, "CidrIp": {"0.0.0.0/0"}}, http.StatusConflict},
+		{"RevokeSecurityGroupIngress", url.Values{"GroupName": {"web"}}, http.StatusConflict},
+		{"CreateTags", url.Values{"ResourceId.1": {"vol-x"}, "Tag.1.Key": {"k"}}, http.StatusBadRequest},
 	} {
-		resp, body := c.call()
-		assert.Equal(t, c.status, resp.StatusCode, "%s: %s", c.name, body)
-		assert.Equal(t, "filter-refused", lastClass(t, srv), c.name)
+		resp, body := ec2Call(t, srv, region, c.action, c.params)
+		assert.Equal(t, c.status, resp.StatusCode, "%v: %s", c.params, body)
+		assert.Equal(t, "filter-refused", lastClass(t, srv), "%v", c.params)
 	}
+	resp, body = rdsCall(t, srv, region, "ListTagsForResource", url.Values{"ResourceName": {"arn:aws:rds:us-east-1:000000000000:snapshot:x"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "RDS tags on a snapshot: %s", body)
+	assert.Equal(t, "filter-refused", lastClass(t, srv), "RDS tags on a snapshot")
+	resp, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/tags/healthcheck/x", "")
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "Route53 tags on a health check: %s", body)
+	assert.Equal(t, "filter-refused", lastClass(t, srv), "Route53 tags on a health check")
 
 	for _, c := range []struct{ name, op, body string }{
 		{"Filters", "DescribeParameters", `{"Filters":[{"Key":"Name","Values":["x"]}]}`},
@@ -411,8 +416,12 @@ func TestContract_request_log_filter_refused(t *testing.T) {
 		assert.Equal(t, "filter-refused", lastClass(t, srv), c.name)
 	}
 
-	resp, body = ec2Call(t, srv, region, "CreateVpc", nil)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateVpc without CidrBlock: %s", body)
+	_, body = ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.1.0.0/16"}})
+	dup := url.Values{"GroupName": {"dup"}, "GroupDescription": {"dup"}, "VpcId": {extractEC2Tag(body, "vpcId")}}
+	resp, body = ec2Call(t, srv, region, "CreateSecurityGroup", dup)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	resp, body = ec2Call(t, srv, region, "CreateSecurityGroup", dup)
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "a duplicate group name in one VPC: %s", body)
 	assert.Equal(t, string(refused), string(body), "a modelled 409 is wire-identical to a refusal")
 	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "a modelled 409")
 }

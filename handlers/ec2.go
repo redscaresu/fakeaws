@@ -254,6 +254,7 @@ type ec2CreateVpcResult struct {
 func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	cidr := req.Params.Get("CidrBlock")
 	if cidr == "" {
+		markClass(w, classFilterRefused) // AWS also takes Ipv4IpamPoolId
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("CidrBlock required: %w", models.ErrConflict))
 		return
@@ -428,6 +429,7 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 	vpcID := req.Params.Get("VpcId")
 	cidr := req.Params.Get("CidrBlock")
 	if vpcID == "" || cidr == "" {
+		markClass(w, classFilterRefused) // AWS also takes Ipv6Native or Ipv4IpamPoolId
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("VpcId and CidrBlock required: %w", models.ErrConflict))
 		return
@@ -1002,6 +1004,7 @@ func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account, r
 	rtID := req.Params.Get("RouteTableId")
 	subnetID := req.Params.Get("SubnetId")
 	if rtID == "" || subnetID == "" {
+		markClass(w, classFilterRefused) // AWS also takes GatewayId
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("RouteTableId and SubnetId required: %w", models.ErrConflict))
 		return
@@ -1035,6 +1038,7 @@ func (app *Application) ec2CreateRoute(w http.ResponseWriter, account, region st
 		NetworkInterfaceID:   req.Params.Get("NetworkInterfaceId"),
 	}
 	if rt.RouteTableID == "" || rt.DestinationCidrBlock == "" {
+		markClass(w, classFilterRefused) // AWS also takes DestinationIpv6CidrBlock or DestinationPrefixListId
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("RouteTableId and DestinationCidrBlock required: %w", models.ErrConflict))
 		return
@@ -1560,6 +1564,7 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 	desc := req.Params.Get("GroupDescription")
 	vpcID := req.Params.Get("VpcId")
 	if groupName == "" || desc == "" || vpcID == "" {
+		markClass(w, classFilterRefused) // AWS puts a group without VpcId in the default VPC
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("GroupName, GroupDescription, and VpcId required: %w", models.ErrConflict))
 		return
@@ -1672,6 +1677,7 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, r
 	id := req.Params.Get("GroupId")
 	if id == "" {
 		// AWS also accepts GroupName for non-VPC SGs; v1 supports GroupId only.
+		markClass(w, classFilterRefused)
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("GroupId required: %w", models.ErrConflict))
 		return
@@ -1690,12 +1696,14 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, r
 func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
 	sgID := req.Params.Get("GroupId")
 	if sgID == "" {
+		markClass(w, classFilterRefused) // AWS also takes GroupName for ingress
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("GroupId required: %w", models.ErrConflict))
 		return
 	}
 	add := parseIpPermissions(req)
 	if len(add) == 0 {
+		markClass(w, classFilterRefused) // AWS also takes the legacy top-level IpProtocol, CidrIp, ...
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("at least one IpPermissions.<n>.* required: %w", models.ErrConflict))
 		return
@@ -1724,6 +1732,7 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
 	sgID := req.Params.Get("GroupId")
 	if sgID == "" {
+		markClass(w, classFilterRefused) // AWS also takes GroupName for ingress
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("GroupId required: %w", models.ErrConflict))
 		return
@@ -2151,6 +2160,9 @@ type ec2InstanceNetwork struct {
 	associatePublicIP string // "true", "false", or "" for the subnet's default
 }
 
+// errNICNotModelled refuses a network interface fakeaws does not launch.
+var errNICNotModelled = fmt.Errorf("fakeaws launches only a new primary network interface (NetworkInterface.1, DeviceIndex 0, deleted on termination): %w", models.ErrConflict)
+
 // errNICWithInstanceLevelPlacement is AWS's InvalidParameterCombination.
 var errNICWithInstanceLevelPlacement = errors.New("Network interfaces and an instance-level subnet ID, security groups or private IP may not be specified on the same request")
 
@@ -2174,7 +2186,7 @@ func parseInstanceNetwork(p url.Values) (ec2InstanceNetwork, error) {
 	const nic = "NetworkInterface.1."
 	if len(nics) > 1 || nics[0] != nic || p.Get(nic+"DeviceIndex") != "0" ||
 		p.Get(nic+"NetworkInterfaceId") != "" || p.Get(nic+"DeleteOnTermination") == "false" {
-		return ec2InstanceNetwork{}, fmt.Errorf("fakeaws launches only a new primary network interface (NetworkInterface.1, DeviceIndex 0, deleted on termination): %w", models.ErrConflict)
+		return ec2InstanceNetwork{}, errNICNotModelled
 	}
 	return ec2InstanceNetwork{
 		subnetID:          p.Get(nic + "SubnetId"),
@@ -2213,14 +2225,17 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 			http.StatusBadRequest, "InvalidParameterCombination", err.Error())
 		return
 	}
-	if err != nil { // a network interface fakeaws does not launch
+	if errors.Is(err, errNICNotModelled) {
 		markClass(w, classFilterRefused)
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	imageID := req.Params.Get("ImageId")
 	instanceType := req.Params.Get("InstanceType")
 	if nw.subnetID == "" || imageID == "" || instanceType == "" {
+		markClass(w, classFilterRefused) // AWS defaults the subnet (default VPC) and InstanceType
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("SubnetId, ImageId, InstanceType required: %w", models.ErrConflict))
 		return
@@ -3029,6 +3044,7 @@ func tagSpecifications(p url.Values, allowed ...string) (map[string][]repository
 func refuseTagSpecifications(w http.ResponseWriter, p url.Values, allowed ...string) (map[string][]repository.EC2Tag, bool) {
 	specs, msg := tagSpecifications(p, allowed...)
 	if msg != "" {
+		markClass(w, classFilterRefused)
 		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue", msg)
 		return nil, true
 	}
@@ -3084,6 +3100,7 @@ func (app *Application) taggableResources(w http.ResponseWriter, account, region
 	for _, id := range ids {
 		i := slices.IndexFunc(ec2TaggedKinds, func(k ec2TaggedKind) bool { return strings.HasPrefix(id, k.prefix) })
 		if i < 0 {
+			markClass(w, classFilterRefused)
 			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
 				"InvalidID", fmt.Sprintf("The ID '%s' is not valid", id))
 			return nil, false

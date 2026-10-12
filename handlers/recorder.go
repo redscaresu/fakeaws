@@ -26,11 +26,13 @@ const (
 	// apart. A modelled action that stores nothing is not marked.
 	classNotModelled404 requestClass = "not-modelled-404"
 
-	// CRITICAL[request-log-filter-refused]: a site that refuses a filter,
-	// parameter or tag resource type fakeaws does not model (EC2 409, RDS
-	// and Route53 400, SSM 501) marks filter-refused and answers as
-	// before. A modelled 409 and a filter fakeaws ignores rather than
-	// refuses stay answered-from-rows.
+	// CRITICAL[request-log-filter-refused]: a site that refuses what real
+	// AWS would accept but fakeaws does not model (a filter, a parameter,
+	// a tag resource type, or a required-parameter check stricter than
+	// AWS's) marks filter-refused and answers as before (EC2 409 or 400,
+	// RDS and Route53 400, SSM 501). A refusal AWS makes too, a modelled
+	// 409 and a filter fakeaws ignores rather than refuses stay
+	// answered-from-rows.
 	classFilterRefused requestClass = "filter-refused"
 
 	// CRITICAL[request-log-empty-collection]: only ec2DescribeNone, the
