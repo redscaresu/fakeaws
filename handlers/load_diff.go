@@ -371,22 +371,29 @@ func diffRootPath(t *Tree) string {
 // (vpcSet/item[2]/isDefault). A root's own value is named by
 // diffRootPath, and a member with no counterpart is named whole. Two
 // differently named XML roots are named and nothing under them compared.
-// diffAlwaysIgnored's fields and key's ignore entries (applied here and
-// nowhere else) are pruned from both trees before anything is compared.
-// A nil tree is an empty body.
+// diffAlwaysIgnored's fields and key's ignore entries are pruned from both
+// trees before anything is compared. A nil tree is an empty body.
 //
 // A path is names shown through diffLabel, never a value.
 func Diff(key LoadKey, recorded, rendered *Tree) (recordedOnly, renderedOnly []string) {
+	ignore := map[string]bool{}
+	for _, e := range loadIgnores {
+		if e.Key == key {
+			ignore[e.Path] = true
+		}
+	}
+	return diffIgnoring(ignore, recorded, rendered)
+}
+
+// diffIgnoring is Diff pruning the index-free paths ignore names, from
+// the roots: ignore entries apply through Diff, or through this re-rooted
+// at an item (loadRun.repeat), and nowhere else.
+func diffIgnoring(ignore map[string]bool, recorded, rendered *Tree) (recordedOnly, renderedOnly []string) {
 	recorded, rendered = diffOrEmpty(recorded), diffOrEmpty(rendered)
 	if recorded.name != "" && rendered.name != "" && recorded.name != rendered.name {
 		return []string{diffRootPath(recorded)}, []string{diffRootPath(rendered)}
 	}
-	d := treeDiffer{ignore: map[string]bool{}, forms: map[*Tree]string{}}
-	for _, e := range loadIgnores {
-		if e.Key == key {
-			d.ignore[e.Path] = true
-		}
-	}
+	d := treeDiffer{ignore: ignore, forms: map[*Tree]string{}}
 	recordedOnly, renderedOnly = d.node(d.pruneRoot(recorded), d.pruneRoot(rendered))
 	for i, p := range recordedOnly {
 		if p == "" {

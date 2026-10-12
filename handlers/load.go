@@ -5,12 +5,15 @@ package handlers
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/redscaresu/fakeaws/repository"
 )
@@ -46,14 +49,17 @@ type loadReference struct {
 	Unread bool
 }
 
-// loadItem is one item a loader wrote: its row, where its recorded
+// loadItem is one item a loader decoded: its row, where its recorded
 // subtree sits in the exchange's body (Tree.Subtree's path and index),
-// and the rows it references.
+// the rows it references, and write, which stores its rows through tx.
+// The load calls write once per row: an item another exchange already
+// loaded is compared, never written again.
 type loadItem struct {
 	loadRef
 	Path  string
 	Index int
 	Refs  []loadReference
+	write func(tx *repository.LoadTx) error
 }
 
 // loadRefusal is how a loader refuses an exchange on purpose: the load
@@ -76,20 +82,32 @@ type loader struct {
 	// stored before it; loaders on one table run in registration order.
 	table string
 	rank  int // repository.LoadRank(table), set by registerLoader
+	// typ is the type of row a read of it finds: a NotFound counts
+	// under it in the answer's absent.
+	typ string
 	// notFound are the error codes a non-2xx answers when the read
 	// found nothing.
 	notFound []string
 	// requestToken is the request param a next page carries (NextToken,
 	// Marker); responseToken is the response field a page answers it in
-	// (nextToken, Marker).
-	requestToken, responseToken string
-	// load writes ex's items as rows through tx, under env's account
-	// and, for a region-scoped row, env's region, and returns them.
-	load func(tx *repository.LoadTx, env *loadEnvelope, ex *loadExchange) ([]loadItem, error)
+	// (nextToken, Marker); truncated, for a service that answers one,
+	// is the field that answers true while more pages follow
+	// (IsTruncated).
+	requestToken, responseToken, truncated string
+	// decode returns ex's items, each writing its rows under env's
+	// account and, for a region-scoped row, env's region. It writes
+	// nothing itself.
+	decode func(env *loadEnvelope, ex *loadExchange) ([]loadItem, error)
 	// render reads the rows of ids back through tx and marshals them
 	// with the encoder the Describe or Get handler answers with, never
-	// from what load decoded.
+	// from what decode decoded.
 	render func(tx *repository.LoadTx, ids []string) ([]byte, error)
+}
+
+// loaderFor is key's loader; refusals has refused any exchange without
+// one.
+func loaderFor(key LoadKey) *loader {
+	return &loaders[slices.IndexFunc(loaders, func(l loader) bool { return l.key == key })]
 }
 
 // loaders is the registry, in the order a load runs them: by table
@@ -98,14 +116,26 @@ type loader struct {
 var loaders []loader
 
 // registerLoader adds l in rank order. It panics on a table resetTables
-// does not hold or a key already registered.
+// does not hold, a key already registered, a missing decode or render,
+// half a pair of page tokens, a truncated field with no response token,
+// or NotFound codes with no typ to count them under.
 func registerLoader(l loader) {
+	name := l.key.Service + " " + l.key.Action
 	rank, ok := repository.LoadRank(l.table)
 	if !ok {
-		panic(fmt.Sprintf("loader %s %s writes %q, which is not a reset table", l.key.Service, l.key.Action, l.table))
+		panic(fmt.Sprintf("loader %s writes %q, which is not a reset table", name, l.table))
 	}
-	if slices.ContainsFunc(loaders, func(have loader) bool { return have.key == l.key }) {
-		panic(fmt.Sprintf("loader %s %s registered twice", l.key.Service, l.key.Action))
+	switch {
+	case slices.ContainsFunc(loaders, func(have loader) bool { return have.key == l.key }):
+		panic(fmt.Sprintf("loader %s registered twice", name))
+	case l.decode == nil || l.render == nil:
+		panic(fmt.Sprintf("loader %s needs both decode and render", name))
+	case (l.requestToken == "") != (l.responseToken == ""):
+		panic(fmt.Sprintf("loader %s pages with only one of requestToken and responseToken", name))
+	case l.truncated != "" && l.responseToken == "":
+		panic(fmt.Sprintf("loader %s answers truncated %q but no responseToken", name, l.truncated))
+	case len(l.notFound) > 0 && l.typ == "":
+		panic(fmt.Sprintf("loader %s has notFound codes but no typ to count them under", name))
 	}
 	l.rank = rank
 	i := slices.IndexFunc(loaders, func(have loader) bool { return have.rank > rank })
@@ -115,9 +145,10 @@ func registerLoader(l loader) {
 	loaders = slices.Insert(loaders, i, l)
 }
 
-// loadAnswer is a load's 200, each part keyed by type: the items
-// loaded, the reads that found nothing, and the ids of references no
-// exchange held.
+// loadAnswer is a load's 200, each part keyed by type: the rows
+// loaded, the reads that found nothing (a NotFound, under its loader's
+// typ), and the ids, sorted, of references the reader never reads that
+// no exchange held.
 type loadAnswer struct {
 	Loaded     map[string]int      `json:"loaded"`
 	Absent     map[string]int      `json:"absent"`
@@ -209,8 +240,9 @@ func (env *loadEnvelope) refusals() []string {
 }
 
 // load replaces every row with env's in one transaction, running each
-// loader, parents first (the registry's order), on its exchanges in
-// recorded order. It holds identityMu exclusively, so no request reads
+// loader, parents first (the registry's order), on its 2xx exchanges in
+// recorded order, then checking every row's references and rendering
+// (loadRun.fill). It holds identityMu exclusively, so no request reads
 // between the delete and the commit. A committed load clears the
 // request log, as /mock/reset does: the traffic it holds was against
 // the replaced rows.
@@ -221,7 +253,13 @@ func (env *loadEnvelope) refusals() []string {
 func (app *Application) load(env *loadEnvelope) (*loadAnswer, []string, error) {
 	app.identityMu.Lock()
 	defer app.identityMu.Unlock()
-	run := loadRun{env: env, answer: &loadAnswer{Loaded: map[string]int{}, Absent: map[string]int{}, Unresolved: map[string][]string{}}}
+	run := loadRun{
+		env:    env,
+		answer: &loadAnswer{Loaded: map[string]int{}, Absent: map[string]int{}, Unresolved: map[string][]string{}},
+		trees:  map[int]*Tree{},
+		chain:  make([]int, len(env.Exchanges)),
+		rows:   map[loadRef]*loadRow{},
+	}
 	err := app.repo.Load(repository.Identity{AccountID: env.Account, Region: env.Region}, run.fill)
 	var abort *loadAbort
 	switch {
@@ -238,26 +276,42 @@ func (app *Application) load(env *loadEnvelope) (*loadAnswer, []string, error) {
 	return run.answer, nil, nil
 }
 
-// loadRun is one load's progress: its answer and its refusals so far.
+// loadRun is one load's progress: its answer, its refusals so far, each
+// exchange's parsed body and page chain, and the rows written.
 type loadRun struct {
 	env      *loadEnvelope
 	answer   *loadAnswer
 	refusals []string
+	trees    map[int]*Tree // by 2xx exchange whose body parsed
+	chain    []int         // by 2xx exchange: its chain's first page
+	rows     map[loadRef]*loadRow
+	order    []*loadRow // rows in the order they were written
 }
 
-// fill runs the loaders inside the load's transaction. A loadRefusal is
-// collected and the run goes on; a failure stops it there.
+// loadRow is a row the load wrote: the item, its exchange's index, and
+// the exchange each page chain that held it first held it in.
+type loadRow struct {
+	loadItem
+	exchange int
+	seen     map[int]int
+}
+
+// fill runs the loaders inside the load's transaction, then checks
+// every row's references and its rendering. A refusal is collected and
+// the run goes on; a failure stops it there.
 func (run *loadRun) fill(tx *repository.LoadTx) error {
-	byKey := map[LoadKey][]int{}
-	for i := range run.env.Exchanges {
-		key := run.env.Exchanges[i].key()
-		byKey[key] = append(byKey[key], i)
-	}
+	byKey := run.link()
 	for _, l := range loaders {
 		for _, i := range byKey[l.key] {
-			if err := run.exchange(tx, l, i); err != nil {
+			if err := run.exchange(tx, &l, i); err != nil {
 				return err
 			}
+		}
+	}
+	run.resolve()
+	for _, row := range run.order {
+		if err := run.diff(tx, row); err != nil {
+			return err
 		}
 	}
 	if len(run.refusals) > 0 {
@@ -266,30 +320,335 @@ func (run *loadRun) fill(tx *repository.LoadTx) error {
 	return nil
 }
 
-// exchange runs l on exchange i. A failed statement in tx is a
-// *loadAbort whatever l returned, so a loader cannot pass one off as a
-// refusal; so is any error but a loadRefusal, and so is a panic, whose
-// value (a decoder's, quoting the body) is dropped here rather than
-// reaching middleware.Recoverer's stack print.
-func (run *loadRun) exchange(tx *repository.LoadTx, l loader, i int) (abort error) {
+// refuse collects a refusal of exchange i.
+func (run *loadRun) refuse(i int, format string, args ...any) {
+	key := run.env.Exchanges[i].key()
+	run.refusals = append(run.refusals, fmt.Sprintf("exchange %d: %s %s: ", i, key.Service, key.Action)+fmt.Sprintf(format, args...))
+}
+
+// parseLoadBody parses body as protocol's services answer: JSON for
+// json, else XML.
+func parseLoadBody(protocol string, body []byte) (*Tree, error) {
+	if protocol == protocolJSON {
+		return ParseJSON(body)
+	}
+	return ParseXML(body)
+}
+
+// link answers each non-2xx exchange (absent, or refused naming its
+// status), parses each 2xx one's body, refusing one that does not parse
+// so no loader sees it, and links the rest into page chains, returning
+// them by key. Pages are one entry when their key is one and their
+// params are equal but for the request token.
+func (run *loadRun) link() map[LoadKey][]int {
+	type entry struct {
+		key    LoadKey
+		params string
+	}
+	byKey := map[LoadKey][]int{}
+	entries := map[entry][]int{}
+	var order []entry
+	for i := range run.env.Exchanges {
+		ex := &run.env.Exchanges[i]
+		l := loaderFor(ex.key())
+		if ex.Status < http.StatusOK || ex.Status >= http.StatusMultipleChoices {
+			run.status(l, i)
+			continue
+		}
+		t, err := parseLoadBody(ex.Protocol, []byte(ex.Body))
+		if err != nil {
+			run.refuse(i, "%v", err)
+			continue
+		}
+		run.trees[i] = t
+		byKey[l.key] = append(byKey[l.key], i)
+		params := ex.Params
+		if m, ok := params.(map[string]any); ok && l.requestToken != "" {
+			m = maps.Clone(m)
+			delete(m, l.requestToken)
+			params = m
+		}
+		b, _ := json.Marshal(params) // decoded JSON, so it marshals
+		e := entry{l.key, string(b)}
+		if _, ok := entries[e]; !ok {
+			order = append(order, e)
+		}
+		entries[e] = append(entries[e], i)
+	}
+	for _, e := range order {
+		run.pages(loaderFor(e.key), entries[e])
+	}
+	return byKey
+}
+
+// status answers non-2xx exchange i: absent under l's typ when its
+// error code is one of l's notFound, else refused naming its status.
+func (run *loadRun) status(l *loader, i int) {
+	ex := &run.env.Exchanges[i]
+	if t, err := parseLoadBody(ex.Protocol, []byte(ex.Body)); err == nil && slices.Contains(l.notFound, loadErrorCode(t)) {
+		run.answer.Absent[l.typ]++
+		return
+	}
+	run.refuse(i, "answered %d, which is not a NotFound", ex.Status)
+}
+
+// loadErrorCode is the AWS error code an error body answers: a JSON
+// body's __type between any namespace '#' and any ':' suffix, as the
+// AWS SDK reads it, or an XML body's Code.
+func loadErrorCode(t *Tree) string {
+	if t.json {
+		code := loadField(t, "__type")
+		code, _, _ = strings.Cut(code[strings.LastIndexByte(code, '#')+1:], ":")
+		return code
+	}
+	return loadField(t, "Code")
+}
+
+// loadField is the text of the first field named name in t outside any
+// set member: a response's paging field or an error's code, never an
+// item's field.
+func loadField(t *Tree, name string) string {
+	for _, k := range t.kids {
+		if k.member {
+			continue
+		}
+		if k.name == name && k.text != "" {
+			return k.text
+		}
+		if s := loadField(k, name); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// pages links one entry's pages, in recorded order, into chains: a page
+// carrying no request token starts one, and a page carrying the token
+// an earlier page answered (the latest, when two did) continues that
+// page's chain. A page carrying a token no earlier page answered is
+// refused as an orphan, in a chain of its own; a page answering more
+// pages, by a token or a truncated field, that no later page continues
+// is refused as truncated.
+func (run *loadRun) pages(l *loader, pages []int) {
+	answered := map[string]int{} // token → the latest page that answered it
+	continued := map[int]bool{}
+	var more []int // pages that answered more pages
+	for _, i := range pages {
+		run.chain[i] = i
+		if token := l.carried(&run.env.Exchanges[i]); token != "" {
+			if p, ok := answered[token]; ok {
+				run.chain[i], continued[p] = run.chain[p], true
+			} else {
+				run.refuse(i, "orphan page: no earlier page of its read answered the %s it carries", l.requestToken)
+			}
+		}
+		if l.responseToken == "" {
+			continue
+		}
+		next, flag := loadField(run.trees[i], l.responseToken), loadField(run.trees[i], l.truncated)
+		if next != "" || (l.truncated != "" && flag != "" && flag != "false") {
+			more = append(more, i)
+		}
+		if next != "" {
+			answered[next] = i
+		}
+	}
+	for _, i := range more {
+		if !continued[i] {
+			run.refuse(i, "truncated: it answers more pages, and no later page of its read carries its %s", l.responseToken)
+		}
+	}
+}
+
+// carried is the request token ex carries, "" for none: an absent, null
+// or empty token. Any other value is a token, as fmt spells it.
+func (l *loader) carried(ex *loadExchange) string {
+	params, _ := ex.Params.(map[string]any)
+	if token := params[l.requestToken]; token != nil && l.requestToken != "" {
+		return fmt.Sprint(token)
+	}
+	return ""
+}
+
+// guard runs step, l's decode, an item's write or l's render for
+// exchange i. A loadRefusal it returns is collected (refused). A failed
+// statement in tx, whatever step returned, is a *loadAbort, so a loader
+// cannot pass one off as a refusal; so is any error but a loadRefusal,
+// and so is a panic, whose value (a decoder's, quoting the body) is
+// dropped here rather than reaching middleware.Recoverer's stack print.
+func (run *loadRun) guard(tx *repository.LoadTx, l *loader, i int, step func() error) (refused bool, abort error) {
 	defer func() {
 		if recover() != nil {
-			abort = &loadAbort{index: i, key: l.key}
+			refused, abort = false, &loadAbort{index: i, key: l.key}
 		}
 	}()
-	items, err := l.load(tx, run.env, &run.env.Exchanges[i])
+	err := step()
 	var refusal loadRefusal
 	switch {
 	case tx.Failed(), err != nil && !errors.As(err, &refusal):
-		return &loadAbort{index: i, key: l.key}
+		return false, &loadAbort{index: i, key: l.key}
 	case err != nil:
-		run.refusals = append(run.refusals, fmt.Sprintf("exchange %d: %s %s: %s", i, l.key.Service, l.key.Action, refusal))
-		return nil
+		run.refuse(i, "%s", refusal)
+		return true, nil
+	}
+	return false, nil
+}
+
+// exchange decodes exchange i with l and writes each item whose row no
+// earlier item wrote.
+func (run *loadRun) exchange(tx *repository.LoadTx, l *loader, i int) error {
+	var items []loadItem
+	refused, err := run.guard(tx, l, i, func() (err error) {
+		items, err = l.decode(run.env, &run.env.Exchanges[i])
+		return err
+	})
+	if refused || err != nil {
+		return err
 	}
 	for _, item := range items {
+		if first, ok := run.rows[item.loadRef]; ok {
+			if err := run.repeat(first, i, &item); err != nil {
+				return err
+			}
+			continue
+		}
+		refused, err := run.guard(tx, l, i, func() error { return item.write(tx) })
+		if err != nil {
+			return err
+		}
+		if refused {
+			continue
+		}
+		row := &loadRow{loadItem: item, exchange: i, seen: map[int]int{run.chain[i]: i}}
+		run.rows[item.loadRef], run.order = row, append(run.order, row)
 		run.answer.Loaded[item.Type]++
 	}
 	return nil
+}
+
+// recorded is item's subtree in exchange i's body, or a *loadAbort when
+// the loader named a path the body does not hold.
+func (run *loadRun) recorded(i int, item *loadItem) (*Tree, error) {
+	if sub := run.trees[i].Subtree(item.Path, item.Index); sub != nil {
+		return sub, nil
+	}
+	return nil, &loadAbort{index: i, key: run.env.Exchanges[i].key()}
+}
+
+// repeat answers item of exchange i, whose row first already wrote.
+// Within one page chain it is refused, naming it. Across chains it loads
+// once when the two recorded items are equal by Diff, else it is refused
+// naming it and both exchanges. The items compare below their paths,
+// unnamed, so one item two actions answer (GetRole's Role, ListRoles'
+// member) compares by its fields, under both keys' ignore entries.
+func (run *loadRun) repeat(first *loadRow, i int, item *loadItem) error {
+	if at, ok := first.seen[run.chain[i]]; ok {
+		run.refuse(i, "%s %s repeats in its page chain, first at exchange %d", item.Type, item.ID, at)
+		return nil
+	}
+	first.seen[run.chain[i]] = i
+	was, err := run.recorded(first.exchange, &first.loadItem)
+	if err != nil {
+		return err
+	}
+	now, err := run.recorded(i, item)
+	if err != nil {
+		return err
+	}
+	key := run.env.Exchanges[first.exchange].key()
+	ignore := map[string]bool{}
+	for _, e := range loadIgnores {
+		for _, side := range []struct {
+			key  LoadKey
+			path string
+		}{{key, first.Path}, {run.env.Exchanges[i].key(), item.Path}} {
+			if rel, ok := strings.CutPrefix(e.Path, side.path+"/"); ok && e.Key == side.key {
+				ignore[rel] = true
+			}
+		}
+	}
+	if rec, ren := diffIgnoring(ignore, itemNode(was, first.Path), itemNode(now, item.Path)); len(rec)+len(ren) > 0 {
+		run.refuse(i, "%s %s differs from exchange %d's (%s %s)", item.Type, item.ID, first.exchange, key.Service, key.Action)
+	}
+	return nil
+}
+
+// itemNode is the node a Subtree chain at path ends at, unnamed, so two
+// actions' items compare by their fields whatever each calls them.
+func itemNode(chain *Tree, path string) *Tree {
+	for range strings.Count(path, "/") + 1 {
+		chain = chain.kids[0]
+	}
+	n := *chain
+	n.name, n.member, n.index = "", false, 0
+	return &n
+}
+
+// resolve checks every row's references: one naming no loaded row is
+// refused naming both, unless it is flagged Unread, which the answer
+// lists under unresolved.
+func (run *loadRun) resolve() {
+	for _, row := range run.order {
+		for _, ref := range row.Refs {
+			switch _, loaded := run.rows[ref.loadRef]; {
+			case loaded:
+			case ref.Unread:
+				run.answer.Unresolved[ref.Type] = append(run.answer.Unresolved[ref.Type], ref.ID)
+			default:
+				run.refuse(row.exchange, "%s %s references %s %s, which no exchange loaded", row.Type, row.ID, ref.Type, ref.ID)
+			}
+		}
+	}
+	for typ, ids := range run.answer.Unresolved {
+		slices.Sort(ids)
+		run.answer.Unresolved[typ] = slices.Compact(ids)
+	}
+}
+
+// diff renders row through its loader and refuses each path where the
+// rendering and the recorded subtree differ, naming row's type and the
+// path: one only the recording holds is a field the model cannot hold,
+// and one only the rendering holds a field fakeaws would mint.
+func (run *loadRun) diff(tx *repository.LoadTx, row *loadRow) error {
+	l := loaderFor(run.env.Exchanges[row.exchange].key())
+	recorded, err := run.recorded(row.exchange, &row.loadItem)
+	if err != nil {
+		return err
+	}
+	var body []byte
+	refused, err := run.guard(tx, l, row.exchange, func() (err error) {
+		body, err = l.render(tx, []string{row.ID})
+		return err
+	})
+	if refused || err != nil {
+		return err
+	}
+	rendered, err := parseLoadBody(run.env.Exchanges[row.exchange].Protocol, body)
+	if err != nil {
+		return &loadAbort{index: row.exchange, key: l.key}
+	}
+	got := rendered.Subtree(row.Path, 0)
+	if got != nil {
+		alignSubtree(recorded, got, row.Path)
+	}
+	recordedOnly, renderedOnly := Diff(l.key, recorded, got)
+	for _, p := range recordedOnly {
+		run.refuse(row.exchange, "%s: the model cannot hold recorded %s", row.Type, p)
+	}
+	for _, p := range renderedOnly {
+		run.refuse(row.exchange, "%s: fakeaws would answer %s, which the recording does not hold", row.Type, p)
+	}
+	return nil
+}
+
+// alignSubtree gives each node of rendered's Subtree chain at path the
+// index of recorded's, so a path names the item as the recording does,
+// though its rendering held it alone.
+func alignSubtree(recorded, rendered *Tree, path string) {
+	for range strings.Count(path, "/") + 1 {
+		recorded, rendered = recorded.kids[0], rendered.kids[0]
+		rendered.index = recorded.index
+	}
 }
 
 func writeLoadRefused(w http.ResponseWriter, refusals []string) {
