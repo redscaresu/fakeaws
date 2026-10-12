@@ -176,3 +176,48 @@ func TestSSMParameterDeleteNeverTouchesPublic(t *testing.T) {
 	require.NoError(t, err, "DeleteSSMParameter removed the public row")
 	assert.Equal(t, "v", got.Value)
 }
+
+// A loaded row answers its recorded ARN: ssmRefMatch finds it by that
+// ARN and its name, never by the ARN its name derives.
+func TestSSMParameterLoadedRowMatchesItsRecordedARN(t *testing.T) {
+	const public = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+	recorded := "arn:aws:ssm:eu-west-1::parameter" + public
+	r := setupRepo(t)
+	in := &SSMParameter{Name: public, Type: "String", Value: "ami-0abcdef1234567890", Version: 61, DataType: "text",
+		LastModified: "1727130213.462", ARN: recorded, Region: testRegion, Tags: map[string]string{}}
+	require.NoError(t, r.Load(Identity{AccountID: testAccount, Region: testRegion}, func(tx *LoadTx) error {
+		if err := LoadSSMParameter(tx, testAccount, in); err != nil {
+			return err
+		}
+		account, got, err := LoadedSSMParameter(tx, public)
+		require.NoError(t, err)
+		assert.Equal(t, testAccount, account)
+		assert.Equal(t, in, got, "the load's read-back")
+		return nil
+	}))
+
+	for _, ref := range []string{public, recorded} {
+		got, err := r.GetSSMParameter(testAccount, testRegion, ref)
+		if assert.NoError(t, err, ref) {
+			assert.Equal(t, recorded, got.ARN, ref)
+		}
+	}
+	_, err := r.GetSSMParameter(testAccount, testRegion, "arn:aws:ssm:"+testRegion+"::parameter"+public)
+	assert.ErrorIs(t, err, models.ErrNotFound, "the derived ARN")
+	assert.ErrorIs(t, r.PatchSSMParameterTags(testAccount, testRegion, recorded, map[string]any{"a": "1"}), models.ErrNotFound,
+		"a public row is never tagged, by its recorded ARN either")
+}
+
+// A loaded row with no recorded ARN derives it, as a PutParameter row
+// does, and an empty reference never finds it.
+func TestSSMParameterLoadedRowWithoutARNDerivesIt(t *testing.T) {
+	const public = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+	r := setupRepo(t)
+	require.NoError(t, r.Load(Identity{AccountID: testAccount, Region: testRegion}, func(tx *LoadTx) error {
+		return LoadSSMParameter(tx, testAccount, &SSMParameter{Name: public, Type: "String", Region: testRegion, Tags: map[string]string{}})
+	}))
+	_, err := r.GetSSMParameter(testAccount, testRegion, "arn:aws:ssm:"+testRegion+"::parameter"+public)
+	assert.NoError(t, err, "the derived ARN")
+	_, err = r.GetSSMParameter(testAccount, testRegion, "")
+	assert.ErrorIs(t, err, models.ErrNotFound, "an empty reference")
+}

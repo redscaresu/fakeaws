@@ -1,4 +1,4 @@
-dbSchemaVersion 2
+dbSchemaVersion 3
 
 === table audit
 CREATE TABLE audit (
@@ -636,6 +636,7 @@ CREATE TABLE ssm_parameters (
 		tier            TEXT NOT NULL,
 		tags            TEXT NOT NULL,
 		last_modified   TEXT NOT NULL,
+		arn             TEXT,
 		PRIMARY KEY (account_id, region, name)
 	)
 

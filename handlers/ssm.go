@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -148,7 +149,7 @@ func (app *Application) ssmPutParameter(w http.ResponseWriter, account, region s
 	version, err := app.repo.PutSSMParameter(account, &repository.SSMParameterPut{
 		Name: in.Name, Type: in.Type, Value: in.Value, AllowedPattern: in.AllowedPattern,
 		Description: in.Description, DataType: in.DataType, KeyID: in.KeyId, Tier: in.Tier,
-		Tags: tags, Region: region, Now: time.Now().UTC().Format(time.RFC3339),
+		Tags: tags, Region: region, Now: strconv.FormatInt(time.Now().Unix(), 10),
 	}, in.Overwrite)
 	if errors.Is(err, models.ErrConflict) {
 		ssmError(w, "ParameterAlreadyExists", "The parameter already exists. To overwrite this value, set the overwrite option in the request to true.")
@@ -186,13 +187,28 @@ func (app *Application) ssmGetParameter(w http.ResponseWriter, account, region s
 		ssmNotFound(w, in.Name, err)
 		return
 	}
-	// SecureString values come back as stored, WithDecryption or not.
-	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameter": map[string]any{
-		"ARN":  awsproto.BuildSSMParameterARN(region, repository.SSMParameterARNAccount(account, p.Name), p.Name),
+	awsproto.WriteJSON11Response(w, http.StatusOK, ssmGetParameterBody(account, p))
+}
+
+// ssmGetParameterBody is GetParameter's answer for p, stored under
+// account: what the handler answers and the loader's rendering.
+// SecureString values come back as stored, WithDecryption or not.
+func ssmGetParameterBody(account string, p *repository.SSMParameter) map[string]any {
+	return map[string]any{"Parameter": map[string]any{
+		"ARN":  ssmParameterARN(account, p),
 		"Name": p.Name, "Type": p.Type, "DataType": p.DataType,
 		"Value": p.Value, "Version": p.Version,
-		"LastModifiedDate": secretEpoch(p.LastModified),
-	}})
+		"LastModifiedDate": json.Number(p.LastModified),
+	}}
+}
+
+// ssmParameterARN is p's recorded ARN when it has one, else the ARN
+// derived from its name, region and account.
+func ssmParameterARN(account string, p *repository.SSMParameter) string {
+	if p.ARN != "" {
+		return p.ARN
+	}
+	return awsproto.BuildSSMParameterARN(p.Region, repository.SSMParameterARNAccount(account, p.Name), p.Name)
 }
 
 // ssmDescribeParameters answers the provider's lookup, ParameterFilters
@@ -235,18 +251,18 @@ func (app *Application) ssmDescribeParameters(w http.ResponseWriter, account, re
 		if slices.ContainsFunc(in.ParameterFilters, func(f filter) bool { return !slices.Contains(f.Values, p.Name) }) {
 			continue
 		}
-		out = append(out, ssmParameterMetadata(account, region, p))
+		out = append(out, ssmParameterMetadata(account, p))
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameters": out})
 }
 
-func ssmParameterMetadata(account, region string, p repository.SSMParameter) map[string]any {
+func ssmParameterMetadata(account string, p repository.SSMParameter) map[string]any {
 	m := map[string]any{
-		"ARN":  awsproto.BuildSSMParameterARN(region, repository.SSMParameterARNAccount(account, p.Name), p.Name),
+		"ARN":  ssmParameterARN(account, &p),
 		"Name": p.Name, "Type": p.Type, "Version": p.Version,
 		"Description": p.Description, "AllowedPattern": p.AllowedPattern,
 		"DataType": p.DataType, "Tier": p.Tier, "Policies": []any{},
-		"LastModifiedDate": secretEpoch(p.LastModified),
+		"LastModifiedDate": json.Number(p.LastModified),
 	}
 	if p.Type == "SecureString" {
 		m["KeyId"] = p.KeyID

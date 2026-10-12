@@ -316,7 +316,7 @@ func newSSMPublicApp(t *testing.T) (*handlers.Application, *httptest.Server) {
 	for _, name := range []string{publicParameter, privateTwin} {
 		_, err := app.Repository().PutSSMParameter(awsproto.FakeAccountID, &repository.SSMParameterPut{
 			Name: name, Type: "String", Value: "ami-0123456789abcdef0", Region: "us-east-1",
-			Tags: map[string]string{"k": "v"}, Now: "2026-10-12T00:00:00Z",
+			Tags: map[string]string{"k": "v"}, Now: "1791763200",
 		}, false)
 		require.NoError(t, err)
 	}
@@ -476,7 +476,7 @@ func TestSSM_ParameterMetadataARN(t *testing.T) {
 		publicParameter: "arn:aws:ssm:us-east-1::parameter" + publicParameter,
 		privateTwin:     "arn:aws:ssm:us-east-1:" + awsproto.FakeAccountID + ":parameter" + privateTwin,
 	} {
-		got := handlers.SSMParameterMetadata(awsproto.FakeAccountID, "us-east-1", repository.SSMParameter{Name: name, Type: "String"})
+		got := handlers.SSMParameterMetadata(awsproto.FakeAccountID, repository.SSMParameter{Name: name, Type: "String", Region: "us-east-1"})
 		assert.Equal(t, want, got["ARN"], name)
 	}
 }
