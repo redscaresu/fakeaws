@@ -10,7 +10,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 
+	"github.com/redscaresu/fakeaws/handlers/awsproto"
 	"github.com/redscaresu/fakeaws/models"
 )
 
@@ -105,10 +107,54 @@ func (r *Repository) PutSSMParameter(account string, p *SSMParameterPut, overwri
 	return version, mapInsertError(err)
 }
 
-// ssmRefMatch matches a row by name or by its ARN (the provider passes
-// the ARN after an import by ARN), so an ARN in another region or
-// account never matches. Bind the reference twice.
-const ssmRefMatch = `(name = ? OR 'arn:aws:ssm:' || region || ':' || account_id || ':parameter/' || ltrim(name, '/') = ?)`
+// publicSSMParameterPrefix begins the name of every AWS public
+// parameter, such as /aws/service/ami-amazon-linux-latest/<image>.
+const publicSSMParameterPrefix = "/aws/service/"
+
+// ssmAccountOwned matches only the account's own rows, never a public
+// parameter's: no write through the repository reaches one. GLOB, unlike
+// LIKE, is case-sensitive, as IsPublicSSMParameter is.
+const ssmAccountOwned = `name NOT GLOB '` + publicSSMParameterPrefix + `*'`
+
+// IsPublicSSMParameter reports whether name is an AWS public parameter:
+// AWS's, not the account's, so it is read-only, never listed, and its
+// ARN has no account. A loaded database stores one as a row.
+func IsPublicSSMParameter(name string) bool {
+	return strings.HasPrefix(name, publicSSMParameterPrefix)
+}
+
+// SSMParameterARNAccount is the account in name's ARN: none for a public
+// parameter, account otherwise.
+func SSMParameterARNAccount(account, name string) string {
+	if IsPublicSSMParameter(name) {
+		return ""
+	}
+	return account
+}
+
+// ssmRefMatch matches a row by a name or ARN reference (the provider
+// passes the ARN after an import by ARN); bind it with ssmRefArgs.
+const ssmRefMatch = `name IN (?, ?, ?)`
+
+// ssmRefArgs binds ssmRefMatch for ref: ref as a name, and each name
+// ref could be the ARN of (parameter/x is /x's and x's) kept only when
+// awsproto.BuildSSMParameterARN builds exactly ref for it, in this region
+// under this account or, for a public parameter, none. So an ARN in
+// another region or account, a public parameter's ARN with an account,
+// or an ARN not in the builder's form matches nothing.
+func ssmRefArgs(account, region, ref string) []any {
+	args := []any{ref, nil, nil}
+	_, path, ok := strings.Cut(ref, ":parameter/")
+	if !ok {
+		return args
+	}
+	for i, name := range []string{"/" + path, path} {
+		if awsproto.BuildSSMParameterARN(region, SSMParameterARNAccount(account, name), name) == ref {
+			args[i+1] = name
+		}
+	}
+	return args
+}
 
 const ssmSelect = `SELECT name, type, value, version, description, allowed_pattern, data_type, key_id, tier, tags, region, last_modified FROM ssm_parameters`
 
@@ -126,7 +172,8 @@ func scanSSMParameter(row interface{ Scan(...any) error }) (SSMParameter, error)
 // GetSSMParameter looks a parameter up by name or ARN and returns
 // models.ErrNotFound when neither matches.
 func (r *Repository) GetSSMParameter(account, region, ref string) (*SSMParameter, error) {
-	p, err := scanSSMParameter(r.db.QueryRow(ssmSelect+` WHERE account_id = ? AND region = ? AND `+ssmRefMatch, account, region, ref, ref))
+	args := append([]any{account, region}, ssmRefArgs(account, region, ref)...)
+	p, err := scanSSMParameter(r.db.QueryRow(ssmSelect+` WHERE account_id = ? AND region = ? AND `+ssmRefMatch, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
@@ -155,9 +202,10 @@ func (r *Repository) ListSSMParameters(account, region string) ([]SSMParameter, 
 	return out, rows.Err()
 }
 
-// DeleteSSMParameter returns models.ErrNotFound for an unknown name.
+// DeleteSSMParameter returns models.ErrNotFound for an unknown name or
+// a public parameter, which is AWS's and never deleted.
 func (r *Repository) DeleteSSMParameter(account, region, name string) error {
-	res, err := r.db.Exec(`DELETE FROM ssm_parameters WHERE account_id = ? AND region = ? AND name = ?`, account, region, name)
+	res, err := r.db.Exec(`DELETE FROM ssm_parameters WHERE account_id = ? AND region = ? AND name = ? AND `+ssmAccountOwned, account, region, name)
 	if err != nil {
 		return err
 	}
@@ -169,14 +217,15 @@ func (r *Repository) DeleteSSMParameter(account, region, name string) error {
 
 // PatchSSMParameterTags applies an RFC 7396 merge patch to a parameter's
 // tags in one statement: a string value sets that tag, nil removes it.
-// ref is a name or ARN; models.ErrNotFound when neither matches.
+// ref is a name or ARN; models.ErrNotFound when neither matches or it is
+// a public parameter, which is AWS's and never tagged.
 func (r *Repository) PatchSSMParameterTags(account, region, ref string, patch map[string]any) error {
 	b, err := json.Marshal(patch)
 	if err != nil {
 		return err
 	}
-	res, err := r.db.Exec(`UPDATE ssm_parameters SET tags = json_patch(tags, ?) WHERE account_id = ? AND region = ? AND `+ssmRefMatch,
-		string(b), account, region, ref, ref)
+	args := append([]any{string(b), account, region}, ssmRefArgs(account, region, ref)...)
+	res, err := r.db.Exec(`UPDATE ssm_parameters SET tags = json_patch(tags, ?) WHERE account_id = ? AND region = ? AND `+ssmRefMatch+` AND `+ssmAccountOwned, args...)
 	if err != nil {
 		return err
 	}
