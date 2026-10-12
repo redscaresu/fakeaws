@@ -74,7 +74,7 @@ func parseEC2Filters(p url.Values) []ec2Filter {
 }
 
 // ec2Wildcard compiles an AWS filter value: * matches any run of
-// characters, / included, ? exactly one, and a backslash makes the
+// characters, / included, ? zero or one, and a backslash makes the
 // next character literal. Not path.Match, whose * stops at /. It
 // errors on a value too large to compile (millions of *).
 func ec2Wildcard(value string) (*regexp.Regexp, error) {
@@ -91,7 +91,7 @@ func ec2Wildcard(value string) (*regexp.Regexp, error) {
 		case r == '*':
 			b.WriteString(`.*`)
 		case r == '?':
-			b.WriteString(`.`)
+			b.WriteString(`.?`)
 		default:
 			b.WriteString(regexp.QuoteMeta(string(r)))
 		}
