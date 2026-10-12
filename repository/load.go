@@ -6,6 +6,7 @@ package repository
 import (
 	"database/sql"
 	"fmt"
+	"slices"
 )
 
 // LoadTx is a load's transaction. A loader reads and writes only
@@ -19,6 +20,15 @@ type LoadTx struct{ tx *sql.Tx }
 // of execer, so the inserts a lone write uses serve a load too.
 func (lt *LoadTx) Exec(query string, args ...any) (sql.Result, error) {
 	return lt.tx.Exec(query, args...)
+}
+
+// LoadRank is table's place in the order a load writes tables in:
+// resetTables reversed, so a table comes after every table it references
+// (TestLoad_ResetTablesChildrenFirst pins that). ok is false for a table
+// resetTables does not hold.
+func LoadRank(table string) (rank int, ok bool) {
+	i := slices.Index(resetTables, table)
+	return len(resetTables) - 1 - i, i >= 0
 }
 
 // loadUnlink clears a table's references to its own rows before Load

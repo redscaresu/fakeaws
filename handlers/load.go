@@ -56,10 +56,25 @@ type loadItem struct {
 	Refs  []loadReference
 }
 
+// loadRefusal is how a loader refuses an exchange on purpose: the load
+// collects it, runs on to name every refusal, then rolls back and
+// answers 400. Any other error a loader returns aborts the load at once
+// with a 500: SQLite may have rolled the transaction back itself
+// (SQLITE_FULL, IOERR, BUSY, NOMEM), and a later write would then
+// commit on its own.
+type loadRefusal string
+
+func (r loadRefusal) Error() string { return string(r) }
+
 // loader loads the exchanges of one {service, action}. A loader file,
 // handlers/load_<service>_*.go, registers its loaders from init.
 type loader struct {
 	key LoadKey
+	// table is the most-parent table the loader writes. Loaders run
+	// parents first, by repository.LoadRank, so a row's parent rows are
+	// stored before it; loaders on one table run in registration order.
+	table string
+	rank  int // repository.LoadRank(table), set by registerLoader
 	// notFound are the error codes a non-2xx answers when the read
 	// found nothing.
 	notFound []string
@@ -76,16 +91,27 @@ type loader struct {
 	render func(tx *repository.LoadTx, ids []string) ([]byte, error)
 }
 
-// loaders is the registry, in registration order, which is the order a
-// load runs them in: a loader whose rows reference another's registers
-// after it.
+// loaders is the registry, in the order a load runs them: by table
+// rank, then registration order. Init order is file-name order, so it
+// never decides which table loads first.
 var loaders []loader
 
+// registerLoader adds l in rank order. It panics on a table resetTables
+// does not hold or a key already registered.
 func registerLoader(l loader) {
+	rank, ok := repository.LoadRank(l.table)
+	if !ok {
+		panic(fmt.Sprintf("loader %s %s writes %q, which is not a reset table", l.key.Service, l.key.Action, l.table))
+	}
 	if slices.ContainsFunc(loaders, func(have loader) bool { return have.key == l.key }) {
 		panic(fmt.Sprintf("loader %s %s registered twice", l.key.Service, l.key.Action))
 	}
-	loaders = append(loaders, l)
+	l.rank = rank
+	i := slices.IndexFunc(loaders, func(have loader) bool { return have.rank > rank })
+	if i < 0 {
+		i = len(loaders)
+	}
+	loaders = slices.Insert(loaders, i, l)
 }
 
 // loadAnswer is a load's 200, each part keyed by type: the items
@@ -101,8 +127,9 @@ type loadAnswer struct {
 var errLoadRefused = errors.New("load refused")
 
 // handleMockLoad replaces every row with a recorded read of at most
-// loadMaxBytes (413 over it): 200 with a loadAnswer, or 400 listing
-// every refusal, after which nothing has changed.
+// loadMaxBytes (413 over it): 200 with a loadAnswer, 400 listing every
+// refusal, or 500 when a loader or the transaction fails; after a 400 or
+// a 500 nothing has changed.
 func (app *Application) handleMockLoad(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, app.loadMaxBytes))
 	if errors.As(err, new(*http.MaxBytesError)) {
@@ -135,9 +162,13 @@ func (app *Application) handleMockLoad(w http.ResponseWriter, r *http.Request) {
 }
 
 // refusals names every field of env that is invalid and every exchange
-// no loader is registered for.
+// no loader is registered for. An absent or null exchanges is refused,
+// so an envelope cut short never loads as empty; [] loads nothing.
 func (env *loadEnvelope) refusals() []string {
 	var out []string
+	if env.Exchanges == nil {
+		out = append(out, "exchanges is required: [] loads nothing")
+	}
 	if err := CheckAccountID(env.Account); err != nil {
 		out = append(out, "account "+err.Error())
 	}
@@ -153,44 +184,71 @@ func (env *loadEnvelope) refusals() []string {
 	return out
 }
 
-// load replaces every row with env's in one transaction, running the
-// loaders in registry order, each on its exchanges in recorded order.
-// It holds identityMu exclusively, so no request reads between the
-// delete and the commit.
+// load replaces every row with env's in one transaction, running each
+// loader, parents first (the registry's order), on its exchanges in
+// recorded order. It
+// holds identityMu exclusively, so no request reads between the delete
+// and the commit. A committed load clears the request log, as
+// /mock/reset does: the traffic it holds was against the replaced rows.
 func (app *Application) load(env *loadEnvelope) (*loadAnswer, []string, error) {
 	app.identityMu.Lock()
 	defer app.identityMu.Unlock()
-	answer := &loadAnswer{Loaded: map[string]int{}, Absent: map[string]int{}, Unresolved: map[string][]string{}}
-	var refusals []string
-	err := app.repo.Load(repository.Identity{AccountID: env.Account, Region: env.Region}, func(tx *repository.LoadTx) error {
-		for _, l := range loaders {
-			for i := range env.Exchanges {
-				ex := &env.Exchanges[i]
-				if ex.key() != l.key {
-					continue
-				}
-				items, err := l.load(tx, env, ex)
-				if err != nil {
-					refusals = append(refusals, fmt.Sprintf("exchange %d: %s %s: %v", i, ex.Service, ex.Action, err))
-					continue
-				}
-				for _, item := range items {
-					answer.Loaded[item.Type]++
-				}
-			}
-		}
-		if len(refusals) > 0 {
-			return errLoadRefused
-		}
-		return nil
-	})
-	if len(refusals) > 0 {
-		return nil, refusals, nil
+	run := loadRun{env: env, answer: &loadAnswer{Loaded: map[string]int{}, Absent: map[string]int{}, Unresolved: map[string][]string{}}}
+	err := app.repo.Load(repository.Identity{AccountID: env.Account, Region: env.Region}, run.fill)
+	if errors.Is(err, errLoadRefused) {
+		return nil, run.refusals, nil
 	}
 	if err != nil {
 		return nil, nil, err
 	}
-	return answer, nil, nil
+	app.requests.clear()
+	return run.answer, nil, nil
+}
+
+// loadRun is one load's progress: its answer and its refusals so far.
+type loadRun struct {
+	env      *loadEnvelope
+	answer   *loadAnswer
+	refusals []string
+}
+
+// fill runs the loaders inside the load's transaction. A loadRefusal is
+// collected and the run goes on; any other error stops it there.
+func (run *loadRun) fill(tx *repository.LoadTx) error {
+	byKey := map[LoadKey][]int{}
+	for i := range run.env.Exchanges {
+		key := run.env.Exchanges[i].key()
+		byKey[key] = append(byKey[key], i)
+	}
+	for _, l := range loaders {
+		for _, i := range byKey[l.key] {
+			if err := run.exchange(tx, l, i); err != nil {
+				return err
+			}
+		}
+	}
+	if len(run.refusals) > 0 {
+		return errLoadRefused
+	}
+	return nil
+}
+
+// exchange runs l on exchange i.
+func (run *loadRun) exchange(tx *repository.LoadTx, l loader, i int) error {
+	ex := &run.env.Exchanges[i]
+	items, err := l.load(tx, run.env, ex)
+	var refusal loadRefusal
+	if errors.As(err, &refusal) {
+		run.refusals = append(run.refusals, fmt.Sprintf("exchange %d: %s %s: %s", i, ex.Service, ex.Action, refusal))
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("exchange %d: %s %s: %w", i, ex.Service, ex.Action, err)
+	}
+	for _, item := range items {
+		run.answer.Loaded[item.Type]++
+	}
+	return nil
 }
 
 func writeLoadRefused(w http.ResponseWriter, refusals []string) {
