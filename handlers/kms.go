@@ -6,54 +6,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/redscaresu/fakeaws/handlers/awsproto"
 	"github.com/redscaresu/fakeaws/models"
+	"github.com/redscaresu/fakeaws/repository"
 )
 
 // KMS dispatcher. JSON 1.1 with X-Amz-Target: TrentService.<Operation>.
 // Endpoint: /kms/region/<region>. We don't model key material or
 // rotation — just enough state for aws_kms_key + aws_kms_alias to
-// round-trip through plan/apply/destroy.
-
-type kmsKey struct {
-	KeyID string
-	ARN   string
-	// Account is the account the key was created under; the key keeps
-	// it, as kmsStore is not in the database the identity guards.
-	Account string
-	State   string
-	Created time.Time
-	Deleted *time.Time
-	// RotationEnabled mirrors the AWS KMS GetKeyRotationStatus field.
-	// terraform-provider-aws calls EnableKeyRotation / DisableKeyRotation
-	// then polls GetKeyRotationStatus waiting for the state to flip; the
-	// resource Update wait-loop times out after 10m otherwise. Persisting
-	// this field across the Update/Get cycle closes the gap.
-	RotationEnabled bool
-	// Tags mirrors the AWS KMS resource tag set. terraform-provider-aws
-	// calls TagResource / UntagResource on Update and polls
-	// ListResourceTags waiting for the set to converge; without
-	// persistence the resource Update wait-loop diverges and apply
-	// times out. Same fix shape as RotationEnabled (S77).
-	Tags map[string]string
-	// Description is what CreateKey or UpdateKeyDescription last sent;
-	// DescribeKey echoes it so a described aws_kms_key has no drift.
-	Description string
-}
-
-type kmsState struct {
-	mu   sync.Mutex
-	keys map[string]*kmsKey
-}
-
-// kmsStore holds in-process key state for the dispatcher. A single
-// app instance shares one map across all KMS requests.
-var kmsStore = &kmsState{keys: make(map[string]*kmsKey)}
+// round-trip through plan/apply/destroy. Keys are kms_keys rows
+// (repository/kms.go), under the stored account and the request's
+// region, so /mock/reset, snapshot, restore and the identity guard's
+// empty check cover them like every other service's rows.
 
 func (app *Application) registerKMSRoutes(r chi.Router) {
 	r.Post("/kms/region/{region}", app.handleKMS)
@@ -76,24 +44,26 @@ func (app *Application) handleKMS(w http.ResponseWriter, r *http.Request) {
 		app.kmsCreateKey(w, account, region, req)
 	case "DescribeKey":
 		app.kmsDescribeKey(w, account, region, req)
+	case "ListKeys":
+		app.kmsListKeys(w, account, region)
 	case "GetKeyPolicy":
-		app.kmsGetKeyPolicy(w, account, region, req)
+		kmsGetKeyPolicy(w, account)
 	case "PutKeyPolicy":
 		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
 	case "GetKeyRotationStatus":
-		app.kmsGetKeyRotationStatus(w, req)
+		app.kmsGetKeyRotationStatus(w, account, region, req)
 	case "EnableKeyRotation":
-		app.kmsSetKeyRotation(w, req, true)
+		app.kmsSetKeyRotation(w, account, region, req, true)
 	case "DisableKeyRotation":
-		app.kmsSetKeyRotation(w, req, false)
+		app.kmsSetKeyRotation(w, account, region, req, false)
 	case "UpdateKeyDescription":
-		app.kmsUpdateKeyDescription(w, req)
+		app.kmsUpdateKeyDescription(w, account, region, req)
 	case "ListResourceTags":
-		app.kmsListResourceTags(w, req)
+		app.kmsListResourceTags(w, account, region, req)
 	case "TagResource":
-		app.kmsTagResource(w, req)
+		app.kmsTagResource(w, account, region, req)
 	case "UntagResource":
-		app.kmsUntagResource(w, req)
+		app.kmsUntagResource(w, account, region, req)
 	case "ListAliases":
 		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Aliases": []any{}})
 	case "CreateAlias", "UpdateAlias", "DeleteAlias":
@@ -111,6 +81,21 @@ func (app *Application) handleKMS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// kmsKeyError answers err for keyID: NotFoundException when no key
+// matches, matching AWS KMS.
+func kmsKeyError(w http.ResponseWriter, keyID string, err error) {
+	awsproto.WriteAWSError(w, awsproto.ShapeJSON11, fmt.Errorf("key %q: %w", keyID, err))
+}
+
+// kmsUpdate applies mutate to the key and answers {}.
+func (app *Application) kmsUpdate(w http.ResponseWriter, account, region, keyID string, mutate func(*repository.KMSKey)) {
+	if err := app.repo.UpdateKMSKey(account, region, keyID, mutate); err != nil {
+		kmsKeyError(w, keyID, err)
+		return
+	}
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+}
+
 func (app *Application) kmsCreateKey(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
 		Description string `json:"Description"`
@@ -124,11 +109,9 @@ func (app *Application) kmsCreateKey(w http.ResponseWriter, account, region stri
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	keyID := hex.EncodeToString(b[:4]) + "-" + hex.EncodeToString(b[4:6]) + "-" + hex.EncodeToString(b[6:8]) + "-" + hex.EncodeToString(b[8:10]) + "-" + hex.EncodeToString(b[10:16])
-	arn := fmt.Sprintf("arn:aws:kms:%s:%s:key/%s", region, account, keyID)
-	k := &kmsKey{
+	k := &repository.KMSKey{
 		KeyID:       keyID,
-		ARN:         arn,
-		Account:     account,
+		Region:      region,
 		State:       "Enabled",
 		Created:     time.Now().UTC(),
 		Tags:        map[string]string{},
@@ -137,12 +120,12 @@ func (app *Application) kmsCreateKey(w http.ResponseWriter, account, region stri
 	for _, t := range in.Tags {
 		k.Tags[t.TagKey] = t.TagValue
 	}
-	kmsStore.mu.Lock()
-	kmsStore.keys[keyID] = k
-	kmsStore.mu.Unlock()
-
+	if err := app.repo.CreateKMSKey(account, k); err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
+		return
+	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
-		"KeyMetadata": kmsKeyMetadata(k),
+		"KeyMetadata": kmsKeyMetadata(account, k),
 	})
 }
 
@@ -151,34 +134,38 @@ func (app *Application) kmsDescribeKey(w http.ResponseWriter, account, region st
 		KeyId string `json:"KeyId"`
 	}
 	_ = json.Unmarshal(req.Body, &in)
-	kmsStore.mu.Lock()
-	k, ok := kmsStore.keys[in.KeyId]
-	kmsStore.mu.Unlock()
-	if !ok {
-		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
-			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
+	k, err := app.repo.GetKMSKey(account, region, in.KeyId)
+	if err != nil {
+		kmsKeyError(w, in.KeyId, err)
 		return
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
-		"KeyMetadata": kmsKeyMetadata(k),
+		"KeyMetadata": kmsKeyMetadata(account, k),
 	})
 }
 
-func (app *Application) kmsGetKeyPolicy(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
-	// Default key policy — terraform-provider-aws decodes this on
-	// every Read and just stores it. Real AWS returns the resource
-	// policy JSON; we hand back the canonical default-allow shape.
-	// The root principal is the key's account; an unknown KeyId still
-	// gets the policy, under the stored account.
-	var in struct {
-		KeyId string `json:"KeyId"`
+// kmsListKeys lists every key in the region, PendingDeletion included
+// as AWS does, in one page: Limit and Marker are ignored.
+func (app *Application) kmsListKeys(w http.ResponseWriter, account, region string) {
+	keys, err := app.repo.ListKMSKeys(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
+		return
 	}
-	_ = json.Unmarshal(req.Body, &in)
-	kmsStore.mu.Lock()
-	if k, ok := kmsStore.keys[in.KeyId]; ok {
-		account = k.Account
+	out := []map[string]string{}
+	for _, k := range keys {
+		out = append(out, map[string]string{"KeyId": k.KeyID, "KeyArn": awsproto.BuildKMSKeyARN(region, account, k.KeyID)})
 	}
-	kmsStore.mu.Unlock()
+	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Keys": out, "Truncated": false})
+}
+
+// kmsGetKeyPolicy answers the default key policy — terraform-provider-aws
+// decodes this on every Read and just stores it. Real AWS returns the
+// resource policy JSON; we hand back the canonical default-allow shape.
+// The root principal is the stored account, for any KeyId: every key is
+// a row under it, as the identity guard refuses an account change while
+// one exists.
+func kmsGetKeyPolicy(w http.ResponseWriter, account string) {
 	policy := `{"Version":"2012-10-17","Statement":[{"Sid":"Enable IAM User Permissions","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::` + account + `:root"},"Action":"kms:*","Resource":"*"}]}`
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
 		"Policy":     policy,
@@ -204,28 +191,22 @@ func (app *Application) kmsScheduleKeyDeletion(w http.ResponseWriter, account, r
 	if in.PendingWindowInDays == 0 {
 		deletionDate = time.Now().UTC().Add(7 * 24 * time.Hour)
 	}
-	kmsStore.mu.Lock()
-	k, ok := kmsStore.keys[in.KeyId]
-	if ok {
-		// Soft-delete: real AWS keeps the key visible in PendingDeletion
-		// state for 7-30 days. terraform-provider-aws's destroy wait
-		// polls DescribeKey expecting KeyState="PendingDeletion" — if
-		// we hard-delete and return 404, the wait-loop errors with
-		// ResourceNotFoundException. Persist the state transition so
-		// DescribeKey can report it. kmsStore is process memory, so
-		// /mock/reset leaves the key here (AccountID's note records
-		// that gap).
+	// Soft-delete: real AWS keeps the key visible in PendingDeletion
+	// state for 7-30 days. terraform-provider-aws's destroy wait
+	// polls DescribeKey expecting KeyState="PendingDeletion" — if
+	// we hard-delete and return 404, the wait-loop errors with
+	// ResourceNotFoundException. Persist the state transition so
+	// DescribeKey can report it; /mock/reset deletes the row.
+	err := app.repo.UpdateKMSKey(account, region, in.KeyId, func(k *repository.KMSKey) {
 		k.State = "PendingDeletion"
-		k.Deleted = &deletionDate
-	}
-	kmsStore.mu.Unlock()
-	if !ok {
-		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
-			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
+		k.DeletionDate = &deletionDate
+	})
+	if err != nil {
+		kmsKeyError(w, in.KeyId, err)
 		return
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
-		"KeyId":        k.KeyID,
+		"KeyId":        in.KeyId,
 		"DeletionDate": float64(deletionDate.Unix()),
 	})
 }
@@ -237,70 +218,41 @@ func (app *Application) kmsScheduleKeyDeletion(w http.ResponseWriter, account, r
 // value was hard-coded to false and apply timed out after 10m.
 //
 // Returns NotFoundException for unknown key ids — matches AWS KMS.
-func (app *Application) kmsGetKeyRotationStatus(w http.ResponseWriter, req awsproto.XAmzTargetRequest) {
+func (app *Application) kmsGetKeyRotationStatus(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
 		KeyId string `json:"KeyId"`
 	}
 	_ = json.Unmarshal(req.Body, &in)
-	kmsStore.mu.Lock()
-	k, ok := kmsStore.keys[in.KeyId]
-	enabled := false
-	if ok {
-		enabled = k.RotationEnabled
-	}
-	kmsStore.mu.Unlock()
-	if !ok {
-		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
-			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
+	k, err := app.repo.GetKMSKey(account, region, in.KeyId)
+	if err != nil {
+		kmsKeyError(w, in.KeyId, err)
 		return
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
-		"KeyRotationEnabled": enabled,
+		"KeyRotationEnabled": k.RotationEnabled,
 	})
 }
 
 // kmsSetKeyRotation handles both EnableKeyRotation (enable=true) and
 // DisableKeyRotation (enable=false). Persists the change so the next
 // GetKeyRotationStatus reflects it.
-func (app *Application) kmsSetKeyRotation(w http.ResponseWriter, req awsproto.XAmzTargetRequest, enable bool) {
+func (app *Application) kmsSetKeyRotation(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest, enable bool) {
 	var in struct {
 		KeyId string `json:"KeyId"`
 	}
 	_ = json.Unmarshal(req.Body, &in)
-	kmsStore.mu.Lock()
-	k, ok := kmsStore.keys[in.KeyId]
-	if ok {
-		k.RotationEnabled = enable
-	}
-	kmsStore.mu.Unlock()
-	if !ok {
-		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
-			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
-		return
-	}
-	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+	app.kmsUpdate(w, account, region, in.KeyId, func(k *repository.KMSKey) { k.RotationEnabled = enable })
 }
 
 // kmsUpdateKeyDescription replaces the key's description. The provider
 // polls DescribeKey after this call until the description matches.
-func (app *Application) kmsUpdateKeyDescription(w http.ResponseWriter, req awsproto.XAmzTargetRequest) {
+func (app *Application) kmsUpdateKeyDescription(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
 		KeyId       string `json:"KeyId"`
 		Description string `json:"Description"`
 	}
 	_ = json.Unmarshal(req.Body, &in)
-	kmsStore.mu.Lock()
-	k, ok := kmsStore.keys[in.KeyId]
-	if ok {
-		k.Description = in.Description
-	}
-	kmsStore.mu.Unlock()
-	if !ok {
-		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
-			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
-		return
-	}
-	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+	app.kmsUpdate(w, account, region, in.KeyId, func(k *repository.KMSKey) { k.Description = in.Description })
 }
 
 // kmsListResourceTags returns the persisted tag set for the requested
@@ -311,27 +263,19 @@ func (app *Application) kmsUpdateKeyDescription(w http.ResponseWriter, req awspr
 // timed out after a few minutes.
 //
 // Returns NotFoundException for unknown key ids — matches AWS KMS.
-func (app *Application) kmsListResourceTags(w http.ResponseWriter, req awsproto.XAmzTargetRequest) {
+func (app *Application) kmsListResourceTags(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
 		KeyId string `json:"KeyId"`
 	}
 	_ = json.Unmarshal(req.Body, &in)
-	kmsStore.mu.Lock()
-	k, ok := kmsStore.keys[in.KeyId]
-	var tags []map[string]string
-	if ok {
-		for kk, vv := range k.Tags {
-			tags = append(tags, map[string]string{"TagKey": kk, "TagValue": vv})
-		}
-	}
-	kmsStore.mu.Unlock()
-	if !ok {
-		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
-			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
+	k, err := app.repo.GetKMSKey(account, region, in.KeyId)
+	if err != nil {
+		kmsKeyError(w, in.KeyId, err)
 		return
 	}
-	if tags == nil {
-		tags = []map[string]string{}
+	tags := []map[string]string{}
+	for kk, vv := range k.Tags {
+		tags = append(tags, map[string]string{"TagKey": kk, "TagValue": vv})
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
 		"Tags": tags,
@@ -341,7 +285,7 @@ func (app *Application) kmsListResourceTags(w http.ResponseWriter, req awsproto.
 // kmsTagResource adds or overwrites tags on the requested key.
 // AWS allows the same TagKey to appear multiple times in a single
 // request (last write wins); we mirror that by iterating in order.
-func (app *Application) kmsTagResource(w http.ResponseWriter, req awsproto.XAmzTargetRequest) {
+func (app *Application) kmsTagResource(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
 		KeyId string `json:"KeyId"`
 		Tags  []struct {
@@ -350,50 +294,32 @@ func (app *Application) kmsTagResource(w http.ResponseWriter, req awsproto.XAmzT
 		} `json:"Tags"`
 	}
 	_ = json.Unmarshal(req.Body, &in)
-	kmsStore.mu.Lock()
-	k, ok := kmsStore.keys[in.KeyId]
-	if ok {
+	app.kmsUpdate(w, account, region, in.KeyId, func(k *repository.KMSKey) {
 		if k.Tags == nil {
 			k.Tags = map[string]string{}
 		}
 		for _, t := range in.Tags {
 			k.Tags[t.TagKey] = t.TagValue
 		}
-	}
-	kmsStore.mu.Unlock()
-	if !ok {
-		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
-			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
-		return
-	}
-	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+	})
 }
 
 // kmsUntagResource removes the listed tag keys. Real AWS silently
 // ignores unknown keys; we mirror that.
-func (app *Application) kmsUntagResource(w http.ResponseWriter, req awsproto.XAmzTargetRequest) {
+func (app *Application) kmsUntagResource(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
 		KeyId   string   `json:"KeyId"`
 		TagKeys []string `json:"TagKeys"`
 	}
 	_ = json.Unmarshal(req.Body, &in)
-	kmsStore.mu.Lock()
-	k, ok := kmsStore.keys[in.KeyId]
-	if ok {
+	app.kmsUpdate(w, account, region, in.KeyId, func(k *repository.KMSKey) {
 		for _, kk := range in.TagKeys {
 			delete(k.Tags, kk)
 		}
-	}
-	kmsStore.mu.Unlock()
-	if !ok {
-		awsproto.WriteAWSError(w, awsproto.ShapeJSON11,
-			fmt.Errorf("key %q: %w", in.KeyId, models.ErrNotFound))
-		return
-	}
-	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
+	})
 }
 
-func kmsKeyMetadata(k *kmsKey) map[string]any {
+func kmsKeyMetadata(account string, k *repository.KMSKey) map[string]any {
 	// CreationDate is `DateType` in the KMS smithy spec which the AWS
 	// SDK decodes as a Unix epoch number (seconds + fractional). The
 	// terraform-provider-aws kms.CreateKey wait-loop deserializes the
@@ -401,9 +327,9 @@ func kmsKeyMetadata(k *kmsKey) map[string]any {
 	// RFC3339 string surfaces as "expected DateType to be a JSON
 	// Number, got string instead" and apply fails on aws-full-stack.
 	md := map[string]any{
-		"AWSAccountId":          k.Account,
+		"AWSAccountId":          account,
 		"KeyId":                 k.KeyID,
-		"Arn":                   k.ARN,
+		"Arn":                   awsproto.BuildKMSKeyARN(k.Region, account, k.KeyID),
 		"CreationDate":          float64(k.Created.Unix()),
 		"Enabled":               k.State == "Enabled",
 		"Description":           k.Description,
@@ -416,8 +342,8 @@ func kmsKeyMetadata(k *kmsKey) map[string]any {
 		"MultiRegion":           false,
 		"EncryptionAlgorithms":  []string{"SYMMETRIC_DEFAULT"},
 	}
-	if k.Deleted != nil {
-		md["DeletionDate"] = float64(k.Deleted.Unix())
+	if k.DeletionDate != nil {
+		md["DeletionDate"] = float64(k.DeletionDate.Unix())
 	}
 	return md
 }

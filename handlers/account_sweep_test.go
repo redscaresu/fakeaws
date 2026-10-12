@@ -99,6 +99,7 @@ func TestContract_responses_carry_the_stored_account(t *testing.T) {
 	var key struct{ KeyMetadata struct{ KeyId string } }
 	require.NoError(t, json.Unmarshal(swept("KMS CreateKey")(kmsCall(t, srv, region, "CreateKey", `{}`)), &key))
 	swept("KMS DescribeKey")(kmsCall(t, srv, region, "DescribeKey", `{"KeyId":"`+key.KeyMetadata.KeyId+`"}`))
+	swept("KMS ListKeys")(kmsCall(t, srv, region, "ListKeys", `{}`))
 	swept("KMS GetKeyPolicy")(kmsCall(t, srv, region, "GetKeyPolicy", `{"KeyId":"`+key.KeyMetadata.KeyId+`","PolicyName":"default"}`))
 
 	noAccount("SSM PutParameter")(ssmCall(t, srv, "PutParameter", `{"Name":"/sweep","Type":"String","Value":"v"}`))

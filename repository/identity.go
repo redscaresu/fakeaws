@@ -29,8 +29,7 @@ func init() {
 // emptyExclusions are the reset tables isEmpty skips whole: bookkeeping
 // and the identity itself. It also skips ec2_amis rows whose id is a
 // fixture AMI id. A story that seeds rows at boot adds them here, or no
-// database reads as empty. KMS keys live in kmsStore, not in rows, so
-// isEmpty does not see them.
+// database reads as empty.
 var emptyExclusions = map[string]bool{"operations": true, "audit": true, "identity": true}
 
 // GetIdentity returns the stored identity, or sql.ErrNoRows when none

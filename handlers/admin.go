@@ -298,11 +298,7 @@ func decodeAdminBody(w http.ResponseWriter, r *http.Request, v any) bool {
 //
 // MUST[responses-carry-the-stored-account]: a resource created under
 // the stored identity is answered with that account, in its responses
-// and in /mock/state, never with awsproto.FakeAccountID. KMS keys are
-// the exception: kmsStore is process memory, outside /mock/reset,
-// snapshot, restore and the empty-database check of
-// identity-change-refused-on-non-empty-db, so a key created before an
-// identity change keeps the account it was created under.
+// and in /mock/state, never with awsproto.FakeAccountID.
 func (app *Application) AccountID() (string, error) {
 	id, err := app.repo.GetIdentity()
 	if errors.Is(err, sql.ErrNoRows) {

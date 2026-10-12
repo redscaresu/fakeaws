@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -245,4 +246,90 @@ func TestKMS_KeyDescriptionRoundTrip(t *testing.T) {
 
 	resp, body = kmsCall(t, srv, region, "UpdateKeyDescription", `{"KeyId":"missing","Description":"x"}`)
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "UpdateKeyDescription on unknown key: %s", body)
+}
+
+// kmsCreateKey creates a key with description in us-east-1 and returns
+// its id.
+func kmsCreateKey(t *testing.T, srv *httptest.Server, description string) string {
+	t.Helper()
+	var key struct{ KeyMetadata struct{ KeyId string } }
+	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, "us-east-1", "CreateKey", `{"Description":"`+description+`"}`)), &key))
+	return key.KeyMetadata.KeyId
+}
+
+// kmsListKeyIDs returns ListKeys' key ids in us-east-1.
+func kmsListKeyIDs(t *testing.T, srv *httptest.Server) []string {
+	t.Helper()
+	var out struct {
+		Keys      []struct{ KeyId, KeyArn string }
+		Truncated bool
+	}
+	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, "us-east-1", "ListKeys", `{}`)), &out))
+	assert.False(t, out.Truncated)
+	ids := []string{}
+	for _, k := range out.Keys {
+		assert.Contains(t, k.KeyArn, ":key/"+k.KeyId)
+		ids = append(ids, k.KeyId)
+	}
+	return ids
+}
+
+// TestKMS_ResetDeletesKeys: /mock/reset deletes every key, so an
+// identity change after it is accepted and no key answers under either
+// account.
+func TestKMS_ResetDeletesKeys(t *testing.T) {
+	app, srv := newTestApp(t, ":memory:")
+	keyID := kmsCreateKey(t, srv, "reset")
+	require.Equal(t, []string{keyID}, kmsListKeyIDs(t, srv))
+
+	mustOK(t)(doPost(t, srv, "/mock/reset"))
+	assert.Empty(t, kmsListKeyIDs(t, srv), "after reset")
+	mustOK(t)(doPostJSON(t, srv, "/mock/identity", `{"account_id":"`+otherAccount+`"}`))
+	assert.Empty(t, kmsListKeyIDs(t, srv), "under the new account")
+	resp, body := kmsCall(t, srv, "us-east-1", "DescribeKey", `{"KeyId":"`+keyID+`"}`)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeKey after reset: %s", body)
+	var rows int
+	require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM kms_keys`).Scan(&rows))
+	assert.Zero(t, rows, "kms_keys rows under any account")
+}
+
+// TestKMS_SnapshotRestoreCarriesKeys: a key created before a snapshot
+// comes back from a restore as it was; one created after is gone.
+func TestKMS_SnapshotRestoreCarriesKeys(t *testing.T) {
+	srv := newTestServer(t, filepath.Join(t.TempDir(), "kms.db"))
+	before := kmsCreateKey(t, srv, "before")
+	described := mustOK(t)(kmsCall(t, srv, "us-east-1", "DescribeKey", `{"KeyId":"`+before+`"}`))
+	mustOK(t)(doPost(t, srv, "/mock/snapshot"))
+	after := kmsCreateKey(t, srv, "after")
+	require.ElementsMatch(t, []string{before, after}, kmsListKeyIDs(t, srv))
+
+	mustOK(t)(doPost(t, srv, "/mock/restore"))
+	assert.Equal(t, []string{before}, kmsListKeyIDs(t, srv))
+	assert.JSONEq(t, string(described), string(mustOK(t)(kmsCall(t, srv, "us-east-1", "DescribeKey", `{"KeyId":"`+before+`"}`))))
+	resp, body := kmsCall(t, srv, "us-east-1", "DescribeKey", `{"KeyId":"`+after+`"}`)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeKey of the key created after the snapshot: %s", body)
+}
+
+// TestKMS_ApplicationsKeepSeparateKeys: two Applications in one process
+// never see each other's keys.
+func TestKMS_ApplicationsKeepSeparateKeys(t *testing.T) {
+	srvA, srvB := newTestServer(t, ":memory:"), newTestServer(t, ":memory:")
+	keyA := kmsCreateKey(t, srvA, "a")
+	keyB := kmsCreateKey(t, srvB, "b")
+	assert.Equal(t, []string{keyA}, kmsListKeyIDs(t, srvA))
+	assert.Equal(t, []string{keyB}, kmsListKeyIDs(t, srvB))
+	resp, body := kmsCall(t, srvB, "us-east-1", "DescribeKey", `{"KeyId":"`+keyA+`"}`)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "A's key on B: %s", body)
+}
+
+// TestKMS_KeysAreRegional: a key answers only in the region it was
+// created in, as in AWS.
+func TestKMS_KeysAreRegional(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	keyID := kmsCreateKey(t, srv, "regional")
+	var listed struct{ Keys []any }
+	require.NoError(t, json.Unmarshal(mustOK(t)(kmsCall(t, srv, "eu-west-1", "ListKeys", `{}`)), &listed))
+	assert.Empty(t, listed.Keys)
+	resp, body := kmsCall(t, srv, "eu-west-1", "DescribeKey", `{"KeyId":"`+keyID+`"}`)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeKey in another region: %s", body)
 }
