@@ -244,9 +244,12 @@ func TestMockLoad_RefusalsChangeNothing(t *testing.T) {
 			[]string{"exchange 1: fakeaws-test Refuse: first", "exchange 2: fakeaws-test Refuse: second"}},
 		"refusals before a failure, and where it stopped": {loadEnvelope(loadAccount, loadRegion,
 			loadExchange("fakeaws-test", "Refuse", "vpc-0parent is refused"),
-			loadExchange("fakeaws-test", "PutSubnet", "subnet-0child vpc-0parent")),
+			loadExchange("fakeaws-test", "Fail", "")),
 			[]string{"exchange 0: fakeaws-test Refuse: vpc-0parent is refused",
-				"exchange 1: fakeaws-test PutSubnet failed; the load stopped there and wrote nothing"}},
+				"exchange 1: fakeaws-test Fail failed; the load stopped there and wrote nothing"}},
+		"a parent read finds no row": {loadEnvelope(loadAccount, loadRegion,
+			loadExchange("fakeaws-test", "PutSubnet", "subnet-0orphan vpc-0absent")),
+			[]string{"exchange 0: fakeaws-test PutSubnet: subnet subnet-0orphan names vpc vpc-0absent, which is not loaded"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := postLoad(t, srv, tc.body)
@@ -276,14 +279,15 @@ func TestMockLoad_LoaderErrorAbortsWith500(t *testing.T) {
 }
 
 // TestMockLoad_FailedStatementAbortsEvenAsARefusal: QuoteFailure ends
-// the transaction, runs a statement that fails, and returns that as a
-// refusal, quoted or wrapped. The load aborts all the same, and PutVpc,
-// which runs after it, never writes.
+// the transaction, runs a statement that fails (an Exec, a QueryRow's
+// Scan, a Query, a Query row's Scan), and returns that as a refusal,
+// quoted or wrapped. The load aborts all the same, and PutVpc, which
+// runs after it, never writes.
 func TestMockLoad_FailedStatementAbortsEvenAsARefusal(t *testing.T) {
 	app, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	seedLoadRows(t, srv)
 	before := loadedState(t, app, srv)
-	for _, form := range []string{"quote", "wrap"} {
+	for _, form := range []string{"quote", "wrap", "queryrow", "query", "scan"} {
 		t.Run(form, func(t *testing.T) {
 			status, body := postLoad(t, srv, loadEnvelope(loadAccount, loadRegion,
 				loadExchange("fakeaws-test", "PutVpc", "vpc-0late"), loadExchange("fakeaws-test", "QuoteFailure", form)))
@@ -317,8 +321,12 @@ func (b *lockedBuffer) String() string {
 
 // TestMockLoad_FailureLogsOnlyTheExchange: a failed load's log line, and
 // its answer, name the exchange's index and loader and nothing of the
-// failure, which can quote the recorded body; a failure of the
-// transaction itself says only that.
+// failure, which can quote the recorded body, whether the loader
+// returned it (Fail) or panicked with it (Panic); a failure of the
+// transaction itself says only that. A panic that reached
+// middleware.Recoverer would answer an empty 500 and print its value to
+// the stderr Recoverer bound at init, so the abort's answer is what
+// shows it was caught first.
 func TestMockLoad_FailureLogsOnlyTheExchange(t *testing.T) {
 	logged := &lockedBuffer{}
 	log.SetOutput(logged)
@@ -326,15 +334,23 @@ func TestMockLoad_FailureLogsOnlyTheExchange(t *testing.T) {
 	const marker = "marker-4f7c-real-account-value"
 
 	app, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
-	status, body := postLoad(t, srv, loadEnvelope(loadAccount, loadRegion, loadExchange("fakeaws-test", "Fail", marker)))
-	assert.Equal(t, http.StatusInternalServerError, status, body)
-	assert.NotContains(t, body, marker)
-	assert.Contains(t, logged.String(), "POST /mock/load: exchange 0: fakeaws-test Fail failed; the load stopped there and wrote nothing\n")
-	assert.NotContains(t, logged.String(), marker)
+	seedLoadRows(t, srv)
+	before := loadedState(t, app, srv)
+	for _, action := range []string{"Fail", "Panic"} {
+		t.Run(action, func(t *testing.T) {
+			status, body := postLoad(t, srv, loadEnvelope(loadAccount, loadRegion, loadExchange("fakeaws-test", action, marker)))
+			assert.Equal(t, http.StatusInternalServerError, status, body)
+			want := "exchange 0: fakeaws-test " + action + " failed; the load stopped there and wrote nothing"
+			assert.JSONEq(t, `{"status":"error","message":"`+want+`"}`, body)
+			assert.Contains(t, logged.String(), "POST /mock/load: "+want+"\n")
+			assert.NotContains(t, logged.String(), marker)
+			assert.Equal(t, before, loadedState(t, app, srv), "a failed load changed something")
+		})
+	}
 
 	_, err := app.Repository().DB().Exec(`DROP TABLE audit`)
 	require.NoError(t, err)
-	status, body = postLoad(t, srv, loadEnvelope(loadAccount, loadRegion))
+	status, body := postLoad(t, srv, loadEnvelope(loadAccount, loadRegion))
 	assert.Equal(t, http.StatusInternalServerError, status, body)
 	assert.Contains(t, logged.String(), "POST /mock/load: the load's transaction failed and wrote nothing\n")
 	assert.NotContains(t, logged.String(), "no such table")

@@ -268,8 +268,15 @@ func (run *loadRun) fill(tx *repository.LoadTx) error {
 
 // exchange runs l on exchange i. A failed statement in tx is a
 // *loadAbort whatever l returned, so a loader cannot pass one off as a
-// refusal; so is any error but a loadRefusal.
-func (run *loadRun) exchange(tx *repository.LoadTx, l loader, i int) error {
+// refusal; so is any error but a loadRefusal, and so is a panic, whose
+// value (a decoder's, quoting the body) is dropped here rather than
+// reaching middleware.Recoverer's stack print.
+func (run *loadRun) exchange(tx *repository.LoadTx, l loader, i int) (abort error) {
+	defer func() {
+		if recover() != nil {
+			abort = &loadAbort{index: i, key: l.key}
+		}
+	}()
 	items, err := l.load(tx, run.env, &run.env.Exchanges[i])
 	var refusal loadRefusal
 	switch {

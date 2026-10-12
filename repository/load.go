@@ -5,7 +5,9 @@ package repository
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"iter"
 	"slices"
 )
 
@@ -13,8 +15,9 @@ import (
 // through it: the db has one connection, which the transaction holds,
 // so a loader that reaches the Repository's own handle (any Repository
 // method, or the handlers' account read) waits for it forever.
-// Per-service files (load_<service>.go) add typed reads and writes on
-// top of the methods here.
+// Per-service files (load_<service>.go) build typed reads and writes on
+// Exec, QueryRow and Query; Render reads the stored rows back through
+// them.
 //
 // It remembers a failed statement. SQLite ends the transaction itself
 // on some failures (SQLITE_FULL, IOERR, BUSY, NOMEM), after which a
@@ -32,6 +35,54 @@ type LoadTx struct {
 func (lt *LoadTx) Exec(query string, args ...any) (sql.Result, error) {
 	res, err := lt.sqlTx.Exec(query, args...)
 	return res, lt.fail(err)
+}
+
+// QueryRow runs a one-row query inside the load's transaction. Its
+// failure surfaces at the row's Scan, which records it as Exec does.
+func (lt *LoadTx) QueryRow(query string, args ...any) *LoadRow {
+	return &LoadRow{lt: lt, row: lt.sqlTx.QueryRow(query, args...)}
+}
+
+// LoadRow is QueryRow's row.
+type LoadRow struct {
+	lt  *LoadTx
+	row *sql.Row
+}
+
+// Scan copies the row into dest, as sql.Row's Scan does, and records
+// any failure but sql.ErrNoRows: no row is an answer (a parent not
+// stored), on which a loader may refuse.
+func (r *LoadRow) Scan(dest ...any) error {
+	err := r.row.Scan(dest...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	return r.lt.fail(err)
+}
+
+// Query runs a query inside the load's transaction and yields, for each
+// row it selects, that row's Scan. A failure of the query, a Scan or the
+// rows is recorded as Exec's is; the query's and the rows' are yielded
+// with a nil Scan and end the rows. The rows are closed however the
+// loop ends.
+func (lt *LoadTx) Query(query string, args ...any) iter.Seq2[func(dest ...any) error, error] {
+	return func(yield func(func(dest ...any) error, error) bool) {
+		rows, err := lt.sqlTx.Query(query, args...)
+		if err != nil {
+			yield(nil, lt.fail(err))
+			return
+		}
+		defer rows.Close()
+		scan := func(dest ...any) error { return lt.fail(rows.Scan(dest...)) }
+		for rows.Next() {
+			if !yield(scan, nil) {
+				return
+			}
+		}
+		if err := rows.Err(); err != nil {
+			yield(nil, lt.fail(err))
+		}
+	}
 }
 
 // Failed reports whether a statement has failed in this transaction.
