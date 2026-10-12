@@ -111,7 +111,7 @@ Behind `-admin-token` when it is set.
 |---|---|
 | `POST /mock/reset` | Deletes every row, the stored identity included, and the snapshot baseline. |
 | `POST /mock/snapshot`, `POST /mock/restore` | Save and bring back a file database (409 on `:memory:`). |
-| `GET /mock/state`, `GET /mock/state/{service}` | The state documented in `handlers/admin.go`, or one service's block. A table or row it cannot read answers 500 naming the service, with no state; one service's block reads only that service's tables. |
+| `GET /mock/state`, `GET /mock/state/{service}` | The state documented in `handlers/admin.go`, or one service's block. A failed table read or row decode answers 500 naming the service, with no state; one service's block reads only that service's tables. |
 | `POST /mock/images` | Seeds one AMI (see CHANGELOG). |
 | `POST /mock/identity` | `{"account_id": "123456789012", "region": "eu-west-1"}` (region optional) stores the identity: 200, 400 naming a bad field, 409 naming both ids when the account differs and the database holds rows (the boot AMI fixtures and the operations and audit logs do not count). Snapshot, restore and restart keep it; `/mock/reset` deletes it, returning to `000000000000`. |
 

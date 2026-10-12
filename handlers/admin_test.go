@@ -73,7 +73,7 @@ func TestAdminMockState_UnknownServiceReturnsEmptyBlock(t *testing.T) {
 // check would pass.
 func TestAdminMockState_UnreadableTableIs500(t *testing.T) {
 	const region = "us-east-1"
-	for _, c := range []struct {
+	cases := []struct {
 		name, service, breakSQL string
 		setup                   func(t *testing.T, srv *httptest.Server)
 	}{
@@ -100,7 +100,10 @@ func TestAdminMockState_UnreadableTableIs500(t *testing.T) {
 		{name: "route53", service: "route53", breakSQL: `DROP TABLE route53_hosted_zones`},
 		{name: "secretsmanager", service: "secretsmanager", breakSQL: `DROP TABLE secretsmanager_secrets`},
 		{name: "ssm", service: "ssm", breakSQL: `DROP TABLE ssm_parameters`},
-	} {
+	}
+	covered := map[string]bool{}
+	for _, c := range cases {
+		covered[c.service] = true
 		t.Run(c.name, func(t *testing.T) {
 			app, srv := newTestApp(t, ":memory:")
 			if c.setup != nil {
@@ -118,6 +121,15 @@ func TestAdminMockState_UnreadableTableIs500(t *testing.T) {
 				assert.Contains(t, got["message"], "read "+c.service+" state", "GET %s", path)
 			}
 		})
+	}
+
+	// Every service block a healthy /mock/state answers has a case.
+	var state map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(mustOK(t)(doGet(t, newTestServer(t, ":memory:"), "/mock/state")), &state))
+	for key, raw := range state {
+		if strings.HasPrefix(string(raw), "{") {
+			assert.True(t, covered[key], "no case breaks a %s table", key)
+		}
 	}
 }
 

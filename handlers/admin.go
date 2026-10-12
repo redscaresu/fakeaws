@@ -465,8 +465,10 @@ func (app *Application) writeState(w http.ResponseWriter, service string) {
 // handlers yet).
 //
 // Each service's gather<Service>StateReal, in its own file, returns
-// its block, or the first repository read error, never a partial
-// block: an unreadable table must not look empty to an orphan check.
+// its block, or its first failed read, never a partial block: a table
+// that fails to read must not look empty to an orphan check. A child
+// table is read per parent row, so with no parent rows it is not read
+// and adds nothing to the block.
 // collectState stops at the first error, naming the service, so
 // /mock/state answers 500 and no state at all.
 //
