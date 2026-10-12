@@ -87,8 +87,8 @@ func New(dbPath string) (*Repository, error) {
 }
 
 // openDB opens the SQLite handle with the mandatory pragmas. Used by
-// New and by Restore (which closes and reopens after moving its copy of
-// the snapshot baseline over the live file).
+// New and by Restore (which closes and reopens after copying its
+// prepared copy of the snapshot baseline into the live file).
 func openDB(dbPath string) (*sql.DB, error) {
 	// SQLite gives -wal and -shm the db file's mode, so a db created
 	// 0600 here keeps all three owner-only. An existing db keeps its mode.
@@ -373,9 +373,12 @@ func (r *Repository) Snapshot() error {
 
 // Restore reverses a prior Snapshot: copies the snapshot baseline to
 // <dbPath>.restore, runs prepare (nil for none) on that copy, then
-// closes the live db, renames the copy over the live path, reopens, and
-// re-applies migrations. A failed copy or prepare leaves the live db as
-// it was. Returns models.ErrNotFound if no baseline exists.
+// closes the live db, copies the prepared bytes into the live path,
+// reopens, and re-applies migrations. The live path is written, never
+// replaced, so a symlinked db or a bind-mounted single file keeps
+// working. A failed copy or prepare leaves the live db as it was, and
+// the .restore files are removed either way. Returns models.ErrNotFound
+// if no baseline exists.
 func (r *Repository) Restore(prepare func(staged *Repository) error) error {
 	if r.dbPath == ":memory:" {
 		return fmt.Errorf("restore requires file-backed db, got :memory:: %w", models.ErrConflict)
@@ -388,22 +391,20 @@ func (r *Repository) Restore(prepare func(staged *Repository) error) error {
 		return err
 	}
 	staged := r.dbPath + ".restore"
+	defer removeDBFiles(staged)
 	if err := stage(snap, staged, prepare); err != nil {
-		removeDBFiles(staged)
 		return err
 	}
 
 	if err := r.db.Close(); err != nil {
-		removeDBFiles(staged)
 		return fmt.Errorf("close before restore: %w", err)
 	}
-	if err := os.Rename(staged, r.dbPath); err != nil {
-		removeDBFiles(staged)
+	if err := copyFile(staged, r.dbPath); err != nil {
 		// Try to reopen so the repository is at least usable.
 		if reopened, openErr := openDB(r.dbPath); openErr == nil {
 			r.db = reopened
 		}
-		return fmt.Errorf("move restored db over live db: %w", err)
+		return fmt.Errorf("copy restored db over live db: %w", err)
 	}
 	// Best-effort: clear WAL/SHM journals from the previous handle so
 	// the new handle starts fresh.
@@ -430,9 +431,9 @@ func (r *Repository) Restore(prepare func(staged *Repository) error) error {
 	return nil
 }
 
-// stage copies snap to staged and runs prepare on it. Closing the copy,
-// its last connection, checkpoints the WAL into the file, which is all
-// Restore moves.
+// stage copies snap to staged and runs prepare on it, then checkpoints
+// the copy's WAL into its file, which is all Restore copies, and fails
+// unless every frame was checkpointed.
 func stage(snap, staged string, prepare func(*Repository) error) error {
 	removeDBFiles(staged)
 	if err := copyFile(snap, staged); err != nil {
@@ -445,7 +446,24 @@ func stage(snap, staged string, prepare func(*Repository) error) error {
 	if err != nil {
 		return fmt.Errorf("open restored copy: %w", err)
 	}
-	return errors.Join(prepare(repo), repo.Close())
+	err = prepare(repo)
+	if err == nil {
+		err = checkpointAll(repo.db)
+	}
+	return errors.Join(err, repo.Close())
+}
+
+// checkpointAll moves every WAL frame of db into its file and truncates
+// the WAL, and is an error unless all of them moved.
+func checkpointAll(db *sql.DB) error {
+	var busy, logFrames, checkpointed int
+	if err := db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return fmt.Errorf("checkpoint restored copy: %w", err)
+	}
+	if busy != 0 || logFrames != checkpointed {
+		return fmt.Errorf("checkpoint restored copy: busy=%d, %d of %d WAL frames checkpointed", busy, checkpointed, logFrames)
+	}
+	return nil
 }
 
 // removeDBFiles removes a db file and its WAL and shared-memory files.
