@@ -58,9 +58,10 @@ type loadItem struct {
 
 // loadRefusal is how a loader refuses an exchange on purpose: the load
 // collects it, runs on to name every refusal, then rolls back and
-// answers 400. Any other error a loader returns aborts the load at once
-// with a 500: SQLite may have rolled the transaction back itself
-// (SQLITE_FULL, IOERR, BUSY, NOMEM), and a later write would then
+// answers 400. Any other error a loader returns, or any failed statement
+// in its transaction whatever it returns (repository.LoadTx.Failed),
+// aborts the load at once: SQLite may have rolled the transaction back
+// itself (SQLITE_FULL, IOERR, BUSY, NOMEM), and a later write would then
 // commit on its own.
 type loadRefusal string
 
@@ -126,10 +127,31 @@ type loadAnswer struct {
 // errLoadRefused rolls back a load whose loaders refused an exchange.
 var errLoadRefused = errors.New("load refused")
 
+// loadAbort is a load stopped by a loader's failure. It holds the
+// exchange's index and its loader's key, and nothing of the failure: its
+// text can quote a real account's body, so it is never logged or
+// answered.
+type loadAbort struct {
+	index int
+	key   LoadKey
+}
+
+func (a *loadAbort) Error() string {
+	return fmt.Sprintf("exchange %d: %s %s failed; the load stopped there and wrote nothing", a.index, a.key.Service, a.key.Action)
+}
+
+// errLoadTransaction stands for any failure of the load's transaction
+// itself (its delete, identity write or commit), whose text is not
+// logged or answered either.
+var errLoadTransaction = errors.New("the load's transaction failed and wrote nothing")
+
 // handleMockLoad replaces every row with a recorded read of at most
-// loadMaxBytes (413 over it): 200 with a loadAnswer, 400 listing every
-// refusal, or 500 when a loader or the transaction fails; after a 400 or
-// a 500 nothing has changed.
+// loadMaxBytes (413 over it): 200 with a loadAnswer; 400 listing every
+// refusal, and where the load stopped when a loader failed after them;
+// or 500 when a loader fails before any refusal, or the transaction
+// does. After a 400 or a 500 nothing has changed. The log line of a
+// failure is app.load's error, which names at most an exchange's index
+// and its loader's key.
 func (app *Application) handleMockLoad(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, app.loadMaxBytes))
 	if errors.As(err, new(*http.MaxBytesError)) {
@@ -150,12 +172,14 @@ func (app *Application) handleMockLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	answer, refusals, err := app.load(&env)
+	if err != nil {
+		log.Printf("POST /mock/load: %v", err)
+	}
 	switch {
 	case len(refusals) > 0:
 		writeLoadRefused(w, refusals)
 	case err != nil:
-		log.Printf("POST /mock/load: %v", err)
-		writeAdminError(w, http.StatusInternalServerError, "the load could not be written")
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
 	default:
 		writeJSONStatus(w, http.StatusOK, answer)
 	}
@@ -186,20 +210,29 @@ func (env *loadEnvelope) refusals() []string {
 
 // load replaces every row with env's in one transaction, running each
 // loader, parents first (the registry's order), on its exchanges in
-// recorded order. It
-// holds identityMu exclusively, so no request reads between the delete
-// and the commit. A committed load clears the request log, as
-// /mock/reset does: the traffic it holds was against the replaced rows.
+// recorded order. It holds identityMu exclusively, so no request reads
+// between the delete and the commit. A committed load clears the
+// request log, as /mock/reset does: the traffic it holds was against
+// the replaced rows.
+//
+// It returns the answer; or the refusals; or a *loadAbort, with the
+// refusals so far and the abort's own line after them when there are
+// any; or errLoadTransaction. Its error is only ever one of those two.
 func (app *Application) load(env *loadEnvelope) (*loadAnswer, []string, error) {
 	app.identityMu.Lock()
 	defer app.identityMu.Unlock()
 	run := loadRun{env: env, answer: &loadAnswer{Loaded: map[string]int{}, Absent: map[string]int{}, Unresolved: map[string][]string{}}}
 	err := app.repo.Load(repository.Identity{AccountID: env.Account, Region: env.Region}, run.fill)
-	if errors.Is(err, errLoadRefused) {
+	var abort *loadAbort
+	switch {
+	case errors.Is(err, errLoadRefused):
 		return nil, run.refusals, nil
-	}
-	if err != nil {
-		return nil, nil, err
+	case errors.As(err, &abort) && len(run.refusals) > 0:
+		return nil, append(run.refusals, abort.Error()), abort
+	case errors.As(err, &abort):
+		return nil, nil, abort
+	case err != nil:
+		return nil, nil, errLoadTransaction
 	}
 	app.requests.clear()
 	return run.answer, nil, nil
@@ -213,7 +246,7 @@ type loadRun struct {
 }
 
 // fill runs the loaders inside the load's transaction. A loadRefusal is
-// collected and the run goes on; any other error stops it there.
+// collected and the run goes on; a failure stops it there.
 func (run *loadRun) fill(tx *repository.LoadTx) error {
 	byKey := map[LoadKey][]int{}
 	for i := range run.env.Exchanges {
@@ -233,17 +266,18 @@ func (run *loadRun) fill(tx *repository.LoadTx) error {
 	return nil
 }
 
-// exchange runs l on exchange i.
+// exchange runs l on exchange i. A failed statement in tx is a
+// *loadAbort whatever l returned, so a loader cannot pass one off as a
+// refusal; so is any error but a loadRefusal.
 func (run *loadRun) exchange(tx *repository.LoadTx, l loader, i int) error {
-	ex := &run.env.Exchanges[i]
-	items, err := l.load(tx, run.env, ex)
+	items, err := l.load(tx, run.env, &run.env.Exchanges[i])
 	var refusal loadRefusal
-	if errors.As(err, &refusal) {
-		run.refusals = append(run.refusals, fmt.Sprintf("exchange %d: %s %s: %s", i, ex.Service, ex.Action, refusal))
+	switch {
+	case tx.Failed(), err != nil && !errors.As(err, &refusal):
+		return &loadAbort{index: i, key: l.key}
+	case err != nil:
+		run.refusals = append(run.refusals, fmt.Sprintf("exchange %d: %s %s: %s", i, l.key.Service, l.key.Action, refusal))
 		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("exchange %d: %s %s: %w", i, ex.Service, ex.Action, err)
 	}
 	for _, item := range items {
 		run.answer.Loaded[item.Type]++

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -241,6 +242,11 @@ func TestMockLoad_RefusalsChangeNothing(t *testing.T) {
 		"loaders' refusals roll back their writes": {loadEnvelope(loadAccount, loadRegion, vpc,
 			loadExchange("fakeaws-test", "Refuse", "first"), loadExchange("fakeaws-test", "Refuse", "second")),
 			[]string{"exchange 1: fakeaws-test Refuse: first", "exchange 2: fakeaws-test Refuse: second"}},
+		"refusals before a failure, and where it stopped": {loadEnvelope(loadAccount, loadRegion,
+			loadExchange("fakeaws-test", "Refuse", "vpc-0parent is refused"),
+			loadExchange("fakeaws-test", "PutSubnet", "subnet-0child vpc-0parent")),
+			[]string{"exchange 0: fakeaws-test Refuse: vpc-0parent is refused",
+				"exchange 1: fakeaws-test PutSubnet failed; the load stopped there and wrote nothing"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := postLoad(t, srv, tc.body)
@@ -267,6 +273,72 @@ func TestMockLoad_LoaderErrorAbortsWith500(t *testing.T) {
 	require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM ec2_vpcs WHERE id = 'vpc-0late'`).Scan(&late))
 	assert.Zero(t, late, "a loader ran after the failure and its write committed")
 	assert.Equal(t, before, loadedState(t, app, srv), "a failed load changed something")
+}
+
+// TestMockLoad_FailedStatementAbortsEvenAsARefusal: QuoteFailure ends
+// the transaction, runs a statement that fails, and returns that as a
+// refusal, quoted or wrapped. The load aborts all the same, and PutVpc,
+// which runs after it, never writes.
+func TestMockLoad_FailedStatementAbortsEvenAsARefusal(t *testing.T) {
+	app, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	seedLoadRows(t, srv)
+	before := loadedState(t, app, srv)
+	for _, form := range []string{"quote", "wrap"} {
+		t.Run(form, func(t *testing.T) {
+			status, body := postLoad(t, srv, loadEnvelope(loadAccount, loadRegion,
+				loadExchange("fakeaws-test", "PutVpc", "vpc-0late"), loadExchange("fakeaws-test", "QuoteFailure", form)))
+			assert.Equal(t, http.StatusInternalServerError, status, body)
+			var late int
+			require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM ec2_vpcs WHERE id = 'vpc-0late'`).Scan(&late))
+			assert.Zero(t, late, "a loader ran after the failed statement and its write committed")
+			assert.Equal(t, before, loadedState(t, app, srv), "a failed load changed something")
+		})
+	}
+}
+
+// lockedBuffer is a log destination the server's goroutines write while
+// the test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestMockLoad_FailureLogsOnlyTheExchange: a failed load's log line, and
+// its answer, name the exchange's index and loader and nothing of the
+// failure, which can quote the recorded body; a failure of the
+// transaction itself says only that.
+func TestMockLoad_FailureLogsOnlyTheExchange(t *testing.T) {
+	logged := &lockedBuffer{}
+	log.SetOutput(logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	const marker = "marker-4f7c-real-account-value"
+
+	app, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	status, body := postLoad(t, srv, loadEnvelope(loadAccount, loadRegion, loadExchange("fakeaws-test", "Fail", marker)))
+	assert.Equal(t, http.StatusInternalServerError, status, body)
+	assert.NotContains(t, body, marker)
+	assert.Contains(t, logged.String(), "POST /mock/load: exchange 0: fakeaws-test Fail failed; the load stopped there and wrote nothing\n")
+	assert.NotContains(t, logged.String(), marker)
+
+	_, err := app.Repository().DB().Exec(`DROP TABLE audit`)
+	require.NoError(t, err)
+	status, body = postLoad(t, srv, loadEnvelope(loadAccount, loadRegion))
+	assert.Equal(t, http.StatusInternalServerError, status, body)
+	assert.Contains(t, logged.String(), "POST /mock/load: the load's transaction failed and wrote nothing\n")
+	assert.NotContains(t, logged.String(), "no such table")
+	assert.NotContains(t, body, "no such table")
 }
 
 func TestMockLoad_SecondLoadReplacesTheFirst(t *testing.T) {

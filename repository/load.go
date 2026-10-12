@@ -13,13 +13,36 @@ import (
 // through it: the db has one connection, which the transaction holds,
 // so a loader that reaches the Repository's own handle (any Repository
 // method, or the handlers' account read) waits for it forever.
-// Per-service files (load_<service>.go) add the typed reads and writes.
-type LoadTx struct{ tx *sql.Tx }
+// Per-service files (load_<service>.go) add typed reads and writes on
+// top of the methods here.
+//
+// It remembers a failed statement. SQLite ends the transaction itself
+// on some failures (SQLITE_FULL, IOERR, BUSY, NOMEM), after which a
+// later write would commit on its own, so a load stops once Failed is
+// true, whatever error, refusal or nil the loader returned. Only this
+// file touches sqlTx (TestLoadTx_OnlyLoadGoTouchesTheTx), and every
+// method here records its statement's failure through fail.
+type LoadTx struct {
+	sqlTx  *sql.Tx
+	failed bool
+}
 
 // Exec runs a statement inside the load's transaction. It is the Exec
 // of execer, so the inserts a lone write uses serve a load too.
 func (lt *LoadTx) Exec(query string, args ...any) (sql.Result, error) {
-	return lt.tx.Exec(query, args...)
+	res, err := lt.sqlTx.Exec(query, args...)
+	return res, lt.fail(err)
+}
+
+// Failed reports whether a statement has failed in this transaction.
+func (lt *LoadTx) Failed() bool { return lt.failed }
+
+// fail records err, when there is one, and returns it.
+func (lt *LoadTx) fail(err error) error {
+	if err != nil {
+		lt.failed = true
+	}
+	return err
 }
 
 // LoadRank is table's place in the order a load writes tables in:
@@ -64,7 +87,7 @@ func (r *Repository) Load(id Identity, fill func(*LoadTx) error) error {
 		id.AccountID, id.Region); err != nil {
 		return fmt.Errorf("load: store identity: %w", err)
 	}
-	if err := fill(&LoadTx{tx: tx}); err != nil {
+	if err := fill(&LoadTx{sqlTx: tx}); err != nil {
 		return err
 	}
 	return tx.Commit()

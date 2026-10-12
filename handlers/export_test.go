@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,12 +36,16 @@ var SSMParameterMetadata = ssmParameterMetadata
 // loader files land. Each writes under the envelope's account and region.
 // PutSubnet is registered first on purpose: loaders run by table, so
 // PutVpc's VPC is stored before the subnet "<subnet-id> <vpc-id>" names.
-// On ec2_vpcs they run in registration order: Fail, then PutVpc, then
-// Refuse.
+// On ec2_vpcs they run in registration order: Fail, QuoteFailure,
+// PutVpc, then Refuse.
 //   - fakeaws-test PutSubnet stores that subnet.
 //   - fakeaws-test Fail ends the transaction as SQLite does itself on
-//     SQLITE_FULL or IOERR, then fails with a plain error, so a later
-//     write would commit on its own.
+//     SQLITE_FULL or IOERR, then fails with a plain error quoting its
+//     body, as a decode error can, so a later write would commit on its
+//     own.
+//   - fakeaws-test QuoteFailure ends the transaction too, runs a
+//     statement that fails, and returns that failure as a loadRefusal:
+//     quoted when its body is "quote", wrapped with %w when "wrap".
 //   - fakeaws-test PutVpc stores the VPC its body names, then runs the
 //     hook HoldLoad set, inside the load's transaction.
 //   - fakeaws-test Refuse refuses its exchange with its body.
@@ -74,11 +78,25 @@ func init() {
 	registerLoader(loader{
 		key:   LoadKey{"fakeaws-test", "Fail"},
 		table: "ec2_vpcs",
-		load: func(tx *repository.LoadTx, _ *loadEnvelope, _ *loadExchange) ([]loadItem, error) {
+		load: func(tx *repository.LoadTx, _ *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 			if _, err := tx.Exec(`ROLLBACK`); err != nil {
 				return nil, err
 			}
-			return nil, errors.New("disk I/O error")
+			return nil, fmt.Errorf("cannot decode %q", ex.Body)
+		},
+	})
+	registerLoader(loader{
+		key:   LoadKey{"fakeaws-test", "QuoteFailure"},
+		table: "ec2_vpcs",
+		load: func(tx *repository.LoadTx, _ *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
+			if _, err := tx.Exec(`ROLLBACK`); err != nil {
+				return nil, err
+			}
+			_, err := tx.Exec(`INSERT INTO no_such_table VALUES (1)`)
+			if ex.Body == "wrap" {
+				return nil, fmt.Errorf("%w: %w", loadRefusal("a refusal"), err)
+			}
+			return nil, loadRefusal("a refusal: " + err.Error())
 		},
 	})
 	registerLoader(loader{

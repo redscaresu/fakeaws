@@ -3,8 +3,12 @@ package repository
 import (
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -101,4 +105,23 @@ func TestLoadTx_ExposesNoDB(t *testing.T) {
 			assert.False(t, m.Type.Out(j) == db, "%s returns a *sql.DB", m.Name)
 		}
 	}
+}
+
+// TestLoadTx_OnlyLoadGoTouchesTheTx: every statement a loader runs goes
+// through a load.go method that records its failure (LoadTx.Failed), so
+// no read or write added elsewhere can let a loader run on, or refuse,
+// past a failed one.
+func TestLoadTx_OnlyLoadGoTouchesTheTx(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	field := regexp.MustCompile(`\.sqlTx\b`)
+	for _, path := range files {
+		if path == "load.go" || strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.False(t, field.Match(src), "%s touches LoadTx's sqlTx; add the statement to load.go, through fail", path)
+	}
+	require.Contains(t, files, "load.go")
 }

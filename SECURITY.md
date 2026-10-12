@@ -37,6 +37,8 @@ With `-db <file>`, the db holds every secret a run wrote (Secrets Manager values
 
 `POST /mock/load` (off unless `-load-max-bytes` is set, and refused at startup without an admin token) writes a real account's read into the database: with `-db <file>`, into that file and its `-wal`, and into the `.snapshot` a later `/mock/snapshot` writes. fakeaws creates both 0600, as above. Prefer `-db :memory:` for a loaded read, so it never reaches disk (snapshot and restore then answer 409).
 
+A `/mock/reset` or a second load only `DELETE`s rows: in a file-backed db, the freed pages and the `-wal` keep the previous read's values until the file is deleted, and the `.snapshot` keeps them until it is replaced or deleted. Deleting the `-db` file with its `-wal`, `-shm` and `.snapshot` (or using `:memory:`) is the only way to erase a loaded read. A failed load logs only the failing exchange's index, service and action, never the failure's text, which can quote the recorded body.
+
 ## Pre-commit hook
 
 `make install-hooks` configures `gitleaks protect --staged` to block accidental AWS-credential commits. The hook also runs `go test ./...`. Full-history `gitleaks detect` is run periodically — last clean sweep recorded in this repo's git log under the `S48-T8` commit message.
