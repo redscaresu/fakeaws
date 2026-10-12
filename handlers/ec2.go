@@ -3,6 +3,7 @@ package handlers
 import (
 	"cmp"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -1164,7 +1165,8 @@ type ec2DescribeAddressesResult struct {
 // the allocation id so DescribeAddresses returns something stable.
 // Using the documentation/test-net 203.0.113.0/24 (TEST-NET-3, RFC 5737)
 // per concepts.md "Standing patterns" item 8 — never expose a real
-// routable IP.
+// routable IP. Two ids can derive one IP; for an address, CreateEIP
+// steps past an IP already held in the region.
 func ec2DerivePublicIP(allocID string) string {
 	sum := 0
 	for _, b := range []byte(allocID) {
@@ -2831,18 +2833,16 @@ type ec2DescribeKeyPairsResult struct {
 	KeySet []ec2KeyPairXML `xml:"keySet>item"`
 }
 
+// ec2KeyFingerprint is the first 16 bytes of the public key's SHA-256,
+// colon-separated hex: AWS's MD5 fingerprint shape, distinct per key so
+// the fingerprint filter selects one. The provider treats it as opaque.
 func ec2KeyFingerprint(publicKey string) string {
-	// AWS ImportKeyPair returns an MD5 fingerprint of the public key
-	// per the docs; we don't import md5 here (reasonable cryptographic
-	// hygiene at the wire-mock layer) — produce a deterministic
-	// hex-from-content fingerprint instead. The provider treats it as
-	// opaque, so the shape is what matters.
-	sum := byte(0)
-	for _, b := range []byte(publicKey) {
-		sum = (sum*31 + b)
+	sum := sha256.Sum256([]byte(publicKey))
+	parts := make([]string, 16)
+	for i, b := range sum[:16] {
+		parts[i] = fmt.Sprintf("%02x", b)
 	}
-	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
-		sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum, sum)
+	return strings.Join(parts, ":")
 }
 
 func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {

@@ -2735,6 +2735,12 @@ func TestEC2_DescribeAddressesFilters(t *testing.T) {
 	resp, body := ec2Call(t, srv, tagRegion, "DescribeAddresses", url.Values{"AllocationId.1": {b}})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeAddresses: %s", body)
 	ipB := extractEC2Tag(body, "publicIp")
+	// a is associated, so instance-id, network-interface-id and
+	// private-ip-address each select it and not the unassociated b.
+	net, _ := filteredNet(t, srv, tagRegion, "1")
+	inst := runInstance(t, srv, tagRegion, topLevelParams(net.subnet, net.sgs))
+	nic, _ := describeInstance(t, srv, tagRegion, inst)
+	createOK(t, srv, "AssociateAddress", "associationId", url.Values{"AllocationId": {a}, "InstanceId": {inst}})
 
 	for _, tc := range []struct {
 		params url.Values
@@ -2745,9 +2751,11 @@ func TestEC2_DescribeAddressesFilters(t *testing.T) {
 		{ec2FilterParams("public-ip", ipB), []string{b}},
 		{ec2FilterParams("domain", "vpc"), []string{a, b}},
 		{ec2FilterParams("tag:Name", "a"), []string{a}},
-		{ec2FilterParams("instance-id", "*"), nil},
-		{ec2FilterParams("network-interface-id", "*"), nil},
-		{ec2FilterParams("private-ip-address", "*"), nil},
+		{ec2FilterParams("instance-id", inst), []string{a}},
+		{ec2FilterParams("network-interface-id", nic.ENIs[0].ID), []string{a}},
+		{ec2FilterParams("private-ip-address", nic.PrivateIpAddress), []string{a}},
+		{ec2FilterParams("instance-id", "*"), []string{a}},
+		{ec2FilterParams("network-interface-id", "i-*"), nil},
 	} {
 		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeAddresses", tc.params).Addresses, "%v", tc.params)
 	}
@@ -2793,5 +2801,44 @@ func TestEC2_DescribeKeyPairsFilters(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s: %s", param, body)
 		assert.Equal(t, "InvalidKeyPair.NotFound", extractEC2Tag(body, "Code"), param)
 		assert.Contains(t, extractEC2Tag(body, "Message"), key, param)
+	}
+}
+
+// TestEC2_AllocateAddressPublicIPsDistinct: the derived public IP
+// collides within 203.0.113.0/24 (a ~50% chance by 20 addresses), and
+// AWS never gives two allocations one IP, so PublicIp.1 must select
+// exactly one address.
+func TestEC2_AllocateAddressPublicIPsDistinct(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	byIP := map[string]string{}
+	for range 40 {
+		resp, body := ec2Call(t, srv, tagRegion, "AllocateAddress", url.Values{"Domain": {"vpc"}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "AllocateAddress: %s", body)
+		ip := extractEC2Tag(body, "publicIp")
+		assert.NotContains(t, byIP, ip, "two allocations hold %s", ip)
+		byIP[ip] = extractEC2Tag(body, "allocationId")
+	}
+	for ip, alloc := range byIP {
+		assert.Equal(t, []string{alloc}, describeIDs(t, srv, "DescribeAddresses", url.Values{"PublicIp.1": {ip}}).Addresses, ip)
+	}
+}
+
+// TestEC2_DescribeKeyPairsFingerprintSelectsOneKey: the two key
+// materials shared one fingerprint under the old one-byte hash, so the
+// fingerprint filter alone returned both.
+func TestEC2_DescribeKeyPairsFingerprintSelectsOneKey(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	const material = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI"
+	ids := map[string]string{}
+	fingerprints := map[string]string{}
+	for _, name := range []string{"aa", "bB"} {
+		resp, body := ec2Call(t, srv, tagRegion, "ImportKeyPair", url.Values{"KeyName": {name}, "PublicKeyMaterial": {material + name}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "ImportKeyPair: %s", body)
+		ids[name], fingerprints[name] = extractEC2Tag(body, "keyPairId"), extractEC2Tag(body, "keyFingerprint")
+	}
+	assert.Regexp(t, `^[0-9a-f]{2}(:[0-9a-f]{2}){15}$`, fingerprints["aa"], "16 colon-separated hex bytes")
+	assert.NotEqual(t, fingerprints["aa"], fingerprints["bB"])
+	for name, fp := range fingerprints {
+		assert.Equal(t, []string{ids[name]}, describeIDs(t, srv, "DescribeKeyPairs", ec2FilterParams("fingerprint", fp)).KeyPairs, name)
 	}
 }
