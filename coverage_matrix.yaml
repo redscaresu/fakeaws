@@ -219,8 +219,7 @@ entries:
     scenario_resource_type: compute
     working_dir_name: basic_instance
     misconfigured_dir_name: instance_missing_subnet
-    updates_exempt: true
-    updates_exempt_reason: "Instance attribute updates are no-ops at v1 (state machine handles lifecycle); update_security_group_rules covers the SG-membership update flow that AWS provider applies to instances."
+    updates_dir_name: update_instance_attributes
     integration_test_func_name: "^TestEC2_RunInstancesAndTerminate$"
 
 

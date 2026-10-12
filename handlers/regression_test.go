@@ -21,6 +21,8 @@ package handlers_test
 // Both audits ship in handlers/regression_audit_test.go (S43-T10).
 
 import (
+	"encoding/xml"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1350,4 +1352,223 @@ func TestRegressionNetworkDescribesHonourTagFilters(t *testing.T) {
 		got := tc.ids(describeIDs(t, srv, action, ec2FilterParams("tag:Name", "picked")))
 		assert.Equal(t, []string{picked}, got, action)
 	}
+}
+
+// instanceAttribute is DescribeInstanceAttribute's <value> for name.
+func instanceAttribute(t *testing.T, srv *httptest.Server, id, name string) string {
+	t.Helper()
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeInstanceAttribute", url.Values{"InstanceId": {id}, "Attribute": {name}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", name, body)
+	return extractEC2Tag(body, "value")
+}
+
+// TestRegressionModifyInstanceAttributeRefusesWhatItDoesNotStore:
+// ModifyInstanceAttribute answered 200 to UserData.Value,
+// InstanceType.Value, GroupId.N, the legacy Attribute and Value form
+// and every other param it does not store, and dropped them. Each is
+// refused, filter-refused, and nothing in the request is written.
+func TestRegressionModifyInstanceAttributeRefusesWhatItDoesNotStore(t *testing.T) {
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	n := newInstanceNet(t, srv, tagRegion, "10.0.0.0/16", "10.0.1.0/24")
+	id := runInstance(t, srv, tagRegion, topLevelParams(n.subnet, n.sgs))
+	for _, c := range []struct {
+		params  url.Values
+		refused string
+	}{
+		{url.Values{"UserData.Value": {"ZWNobw=="}}, "UserData.Value"},
+		{url.Values{"InstanceType.Value": {"t3.large"}}, "InstanceType.Value"},
+		{url.Values{"GroupId.1": {n.sgs[0]}, "GroupId.2": {n.sgs[1]}}, "GroupId.N"},
+		{url.Values{"Attribute": {"disableApiStop"}, "Value": {"true"}}, "Attribute, Value"},
+		{url.Values{"BlockDeviceMapping.1.DeviceName": {"/dev/xvda"}, "BlockDeviceMapping.1.Ebs.DeleteOnTermination": {"false"}},
+			"BlockDeviceMapping.N.DeviceName, BlockDeviceMapping.N.Ebs.DeleteOnTermination"},
+	} {
+		c.params.Set("InstanceId", id)
+		c.params.Set("DisableApiStop.Value", "true")
+		resp, body := ec2Call(t, srv, tagRegion, "ModifyInstanceAttribute", c.params)
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s: %s", c.refused, body)
+		assert.Equal(t, "ModifyInstanceAttribute: not modelled by fakeaws: "+c.refused, extractEC2Tag(body, "Message"))
+		assert.Equal(t, "filter-refused", lastClass(t, srv), c.refused)
+		assert.Equal(t, "false", instanceAttribute(t, srv, id, "disableApiStop"), "%s: nothing written", c.refused)
+	}
+}
+
+// TestRegressionModifyInstanceAttributeTerminatedOrUnknown:
+// ModifyInstanceAttribute on an unknown instance answered 404
+// ResourceNotFoundException, and on a terminated one stored every
+// attribute but SourceDestCheck. An unknown instance is EC2's 400
+// InvalidInstanceID.NotFound, and a terminated one refuses every
+// attribute with IncorrectInstanceState, writing nothing.
+//
+// UNVERIFIED(aws-code): IncorrectInstanceState from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func TestRegressionModifyInstanceAttributeTerminatedOrUnknown(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	n := newInstanceNet(t, srv, tagRegion, "10.0.0.0/16", "10.0.1.0/24")
+	id := runInstance(t, srv, tagRegion, topLevelParams(n.subnet, n.sgs))
+	resp, body := ec2Call(t, srv, tagRegion, "TerminateInstances", url.Values{"InstanceId.1": {id}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "TerminateInstances: %s", body)
+
+	for param, v := range map[string]string{
+		"SourceDestCheck": "false", "DisableApiTermination": "true", "DisableApiStop": "true",
+		"EbsOptimized": "true", "InstanceInitiatedShutdownBehavior": "terminate",
+	} {
+		resp, body := ec2Call(t, srv, tagRegion, "ModifyInstanceAttribute", url.Values{"InstanceId": {id}, param + ".Value": {v}})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s: %s", param, body)
+		assert.Equal(t, "IncorrectInstanceState", extractEC2Tag(body, "Code"), param)
+	}
+	for name, want := range map[string]string{
+		"disableApiTermination": "false", "disableApiStop": "false", "ebsOptimized": "false", "instanceInitiatedShutdownBehavior": "stop",
+	} {
+		assert.Equal(t, want, instanceAttribute(t, srv, id, name), "%s: nothing written to a terminated instance", name)
+	}
+
+	resp, body = ec2Call(t, srv, tagRegion, "ModifyInstanceAttribute", url.Values{"InstanceId": {"i-missing"}, "DisableApiStop.Value": {"true"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "unknown instance: %s", body)
+	assert.Equal(t, "InvalidInstanceID.NotFound", extractEC2Tag(body, "Code"), "unknown instance")
+}
+
+// TestRegressionShutdownBehaviorOnlyStopOrTerminate: RunInstances and
+// ModifyInstanceAttribute stored any InstanceInitiatedShutdownBehavior,
+// and DescribeInstanceAttribute answered it. Anything but stop or
+// terminate is InvalidParameterValue, and nothing is created or
+// written.
+//
+// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func TestRegressionShutdownBehaviorOnlyStopOrTerminate(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	n := newInstanceNet(t, srv, tagRegion, "10.0.0.0/16", "10.0.1.0/24")
+	launch := topLevelParams(n.subnet, n.sgs)
+	launch.Set("InstanceInitiatedShutdownBehavior", "hibernate")
+	resp, body := ec2Call(t, srv, tagRegion, "RunInstances", launch)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "RunInstances: %s", body)
+	assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"), "RunInstances")
+	_, body = ec2Call(t, srv, tagRegion, "DescribeInstances", nil)
+	assert.NotContains(t, string(body), "<instanceId>", "RunInstances created nothing")
+
+	id := runInstance(t, srv, tagRegion, topLevelParams(n.subnet, n.sgs))
+	resp, body = ec2Call(t, srv, tagRegion, "ModifyInstanceAttribute", url.Values{"InstanceId": {id}, "InstanceInitiatedShutdownBehavior.Value": {"hibernate"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "ModifyInstanceAttribute: %s", body)
+	assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"), "ModifyInstanceAttribute")
+	assert.Equal(t, "stop", instanceAttribute(t, srv, id, "instanceInitiatedShutdownBehavior"), "nothing written")
+}
+
+// TestRegressionTerminationProtection: TerminateInstances terminated
+// an instance whose disableApiTermination was set. It is refused with
+// OperationNotPermitted, and so is the whole call: an unprotected
+// instance named with it keeps running. Clearing the attribute lets
+// both terminate, the one named twice included.
+//
+// UNVERIFIED(aws-code): OperationNotPermitted from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func TestRegressionTerminationProtection(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	n := newInstanceNet(t, srv, tagRegion, "10.0.0.0/16", "10.0.1.0/24")
+	free := runInstance(t, srv, tagRegion, topLevelParams(n.subnet, n.sgs))
+	launch := topLevelParams(n.subnet, n.sgs)
+	launch.Set("DisableApiTermination", "true")
+	locked := runInstance(t, srv, tagRegion, launch)
+	terminate := url.Values{"InstanceId.1": {free}, "InstanceId.2": {locked}, "InstanceId.3": {free}}
+
+	resp, body := ec2Call(t, srv, tagRegion, "TerminateInstances", terminate)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, "OperationNotPermitted", extractEC2Tag(body, "Code"))
+	assert.Contains(t, extractEC2Tag(body, "Message"), locked)
+	for _, id := range []string{free, locked} {
+		_, raw := describeInstance(t, srv, tagRegion, id)
+		assert.Contains(t, raw, "<name>running</name>", "%s still running", id)
+	}
+
+	resp, body = ec2Call(t, srv, tagRegion, "ModifyInstanceAttribute", url.Values{"InstanceId": {locked}, "DisableApiTermination.Value": {"false"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ModifyInstanceAttribute: %s", body)
+	resp, body = ec2Call(t, srv, tagRegion, "TerminateInstances", terminate)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+}
+
+// terminated is each instancesSet item of a TerminateInstances answer
+// as instance id → previous state.
+func terminated(t *testing.T, body []byte) map[string]string {
+	t.Helper()
+	var out struct {
+		Items []struct {
+			ID       string `xml:"instanceId"`
+			Previous string `xml:"previousState>name"`
+			Current  string `xml:"currentState>name"`
+		} `xml:"instancesSet>item"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	got := map[string]string{}
+	for _, it := range out.Items {
+		assert.Equal(t, "terminated", it.Current, it.ID)
+		got[it.ID] = it.Previous
+	}
+	return got
+}
+
+// TestRegressionTerminateInstancesDecidesInItsTransaction:
+// TerminateInstances read each instance's state before its
+// transaction, so a terminate landing in between turned the second
+// into a 409, and an unknown id answered 200 terminated/terminated.
+// Back-to-back terminates both answer 200, the second
+// terminated/terminated; an id that never existed is 400
+// InvalidInstanceID.NotFound and terminates none of the others.
+func TestRegressionTerminateInstancesDecidesInItsTransaction(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	n := newInstanceNet(t, srv, tagRegion, "10.0.0.0/16", "10.0.1.0/24")
+	id := runInstance(t, srv, tagRegion, topLevelParams(n.subnet, n.sgs))
+	for _, want := range []string{"running", "terminated"} {
+		resp, body := ec2Call(t, srv, tagRegion, "TerminateInstances", url.Values{"InstanceId.1": {id}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+		assert.Equal(t, map[string]string{id: want}, terminated(t, body))
+	}
+
+	live := runInstance(t, srv, tagRegion, topLevelParams(n.subnet, n.sgs))
+	for _, ids := range [][]string{{"i-neverexisted"}, {live, "i-neverexisted"}} {
+		params := url.Values{}
+		for i, id := range ids {
+			params.Set(fmt.Sprintf("InstanceId.%d", i+1), id)
+		}
+		resp, body := ec2Call(t, srv, tagRegion, "TerminateInstances", params)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%v: %s", ids, body)
+		assert.Equal(t, "InvalidInstanceID.NotFound", extractEC2Tag(body, "Code"), "%v", ids)
+		assert.Contains(t, extractEC2Tag(body, "Message"), "i-neverexisted", "%v", ids)
+	}
+	_, raw := describeInstance(t, srv, tagRegion, live)
+	assert.Contains(t, raw, "<name>running</name>", "named with an unknown id, the live instance is not terminated")
+}
+
+// TestRegressionBooleanAttributesOnlyTrueOrFalse: a boolean attribute
+// read any value but "true" as false, so DisableApiTermination=True
+// was stored as false. RunInstances and ModifyInstanceAttribute accept
+// only true or false; anything else, an empty value included, is
+// InvalidParameterValue, and nothing is created or written.
+//
+// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func TestRegressionBooleanAttributesOnlyTrueOrFalse(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	n := newInstanceNet(t, srv, tagRegion, "10.0.0.0/16", "10.0.1.0/24")
+	launch := topLevelParams(n.subnet, n.sgs)
+	launch.Set("DisableApiTermination", "True")
+	resp, body := ec2Call(t, srv, tagRegion, "RunInstances", launch)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "RunInstances: %s", body)
+	assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"), "RunInstances")
+	_, body = ec2Call(t, srv, tagRegion, "DescribeInstances", nil)
+	assert.NotContains(t, string(body), "<instanceId>", "RunInstances created nothing")
+
+	id := runInstance(t, srv, tagRegion, topLevelParams(n.subnet, n.sgs))
+	for _, params := range []url.Values{
+		{"DisableApiTermination.Value": {"True"}},
+		{"DisableApiStop.Value": {"1"}},
+		{"EbsOptimized.Value": {""}},
+		{"SourceDestCheck.Value": {"FALSE"}},
+	} {
+		params.Set("InstanceId", id)
+		resp, body := ec2Call(t, srv, tagRegion, "ModifyInstanceAttribute", params)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%v: %s", params, body)
+		assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"), "%v", params)
+	}
+	assert.Equal(t, "false", instanceAttribute(t, srv, id, "disableApiTermination"), "nothing written")
+	assert.Equal(t, "false", instanceAttribute(t, srv, id, "disableApiStop"), "nothing written")
+	assert.Equal(t, "true", instanceAttribute(t, srv, id, "sourceDestCheck"), "nothing written")
+
+	resp, body = ec2Call(t, srv, tagRegion, "ModifyInstanceAttribute", url.Values{"InstanceId": {id}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "no attribute: %s", body)
+	assert.Equal(t, "MissingParameter", extractEC2Tag(body, "Code"), "no attribute")
 }

@@ -172,6 +172,7 @@ Update scenarios that verify in-place resource modifications work correctly. Eac
 | Example | What it demonstrates |
 |---|---|
 | `updates/update_iam_role_description` | Patch the description on an existing IAM role |
+| `updates/update_instance_attributes` | Flip an instance's `disable_api_termination` (set at launch), `disable_api_stop`, `instance_initiated_shutdown_behavior` and `source_dest_check` through ModifyInstanceAttribute; each plan is empty only if DescribeInstanceAttribute answers what was stored. `disable_api_stop` is stored, not enforced: fakeaws has no StopInstances |
 | `updates/update_rds_parameter_group` | Modify a parameter in an RDS DB parameter group |
 | `updates/update_s3_bucket_versioning` | Toggle S3 bucket versioning on/off |
 | `updates/update_secret_value` | Rotate a Secrets Manager secret's value via PutSecretValue (M62: AWSCURRENT→AWSPREVIOUS staging) |
