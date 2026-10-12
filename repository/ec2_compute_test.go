@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -113,6 +114,40 @@ func TestInstanceTerminalStateRefusesTransition(t *testing.T) {
 // TestPrivateIP pins the subnet allocator: AWS keeps the first four
 // addresses and the last one, so a /28 holds 11 ENIs, and a requested
 // address must be one of those and free.
+// TestUpdateInstanceAttributesKeepsAConcurrentState: a terminate that
+// arrives while an attribute update is between its read and its write
+// waits for it, rather than landing there and being overwritten by the
+// stale state the update read into data.
+func TestUpdateInstanceAttributesKeepsAConcurrentState(t *testing.T) {
+	r := setupRepo(t)
+	_, subnetID := setupVPCSubnet(t, r)
+	require.NoError(t, r.CreateInstance(testAccount, &EC2Instance{
+		ID: "i-1", SubnetID: subnetID, AMIID: "ami-1", InstanceType: "t3.micro",
+		Region: testRegion, ARN: "arn", State: "running", CreatedAt: "t",
+	}, &EC2NetworkInterface{ID: "eni-1"}))
+
+	terminated := make(chan error, 1)
+	require.NoError(t, r.UpdateInstanceAttributes(testAccount, testRegion, "i-1", func(a *EC2InstanceAttributes) {
+		go func() { terminated <- r.SetInstanceState(testAccount, testRegion, "i-1", "terminated") }()
+		select { // without the update's transaction the terminate finishes here
+		case err := <-terminated:
+			terminated <- err
+		case <-time.After(200 * time.Millisecond):
+		}
+		a.DisableAPITermination = true
+	}))
+	select {
+	case err := <-terminated:
+		require.NoError(t, err, "terminate")
+	case <-time.After(10 * time.Second):
+		t.Fatal("terminate never finished")
+	}
+	got, err := r.GetInstance(testAccount, testRegion, "i-1")
+	require.NoError(t, err)
+	assert.Equal(t, "terminated", got.State, "the terminate is not undone")
+	assert.True(t, got.DisableAPITermination, "the update is kept")
+}
+
 func TestPrivateIP(t *testing.T) {
 	used := map[string]bool{}
 	for i := 4; i <= 14; i++ {

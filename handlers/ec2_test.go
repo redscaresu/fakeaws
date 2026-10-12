@@ -1312,8 +1312,86 @@ func TestEC2_DescribeInstanceAttribute_UserData(t *testing.T) {
 	resp, body := ec2Call(t, srv, region, "DescribeInstanceAttribute", url.Values{
 		"InstanceId": {"i-missing"}, "Attribute": {"userData"},
 	})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "unknown instance: %s", body)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "unknown instance: %s", body)
 	assert.Equal(t, "InvalidInstanceID.NotFound", extractEC2Tag(body, "Code"))
+}
+
+func TestContract_ec2_instance_attributes_from_rows(t *testing.T) {
+	const region = "us-east-1"
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	n := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+	attribute := func(id, name string) (*http.Response, []byte) {
+		return ec2Call(t, srv, region, "DescribeInstanceAttribute", url.Values{"InstanceId": {id}, "Attribute": {name}})
+	}
+	values := func(id string) map[string]string {
+		t.Helper()
+		out := map[string]string{}
+		for _, name := range []string{"sourceDestCheck", "disableApiTermination", "disableApiStop", "instanceInitiatedShutdownBehavior", "ebsOptimized"} {
+			resp, body := attribute(id, name)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", name, body)
+			out[name] = extractEC2Tag(body, "value")
+		}
+		return out
+	}
+
+	// The provider sends EbsOptimized=false and DisableApiTermination=false on every launch.
+	launch := topLevelParams(n.subnet, n.sgs)
+	launch.Set("EbsOptimized", "false")
+	launch.Set("DisableApiTermination", "false")
+	id := runInstance(t, srv, region, launch)
+	assert.Equal(t, map[string]string{
+		"sourceDestCheck": "true", "disableApiTermination": "false", "disableApiStop": "false",
+		"instanceInitiatedShutdownBehavior": "stop", "ebsOptimized": "false",
+	}, values(id), "AWS's defaults when nothing is set")
+	_, raw := describeInstance(t, srv, region, id)
+	assert.NotContains(t, raw, "ebsOptimized", "DescribeInstances is unchanged when nothing is set")
+
+	modified := map[string]string{
+		"sourceDestCheck": "false", "disableApiTermination": "true", "disableApiStop": "true",
+		"instanceInitiatedShutdownBehavior": "terminate", "ebsOptimized": "false",
+	}
+	for _, param := range []string{"SourceDestCheck", "DisableApiTermination", "DisableApiStop", "InstanceInitiatedShutdownBehavior"} {
+		attr := strings.ToLower(param[:1]) + param[1:]
+		resp, body := ec2Call(t, srv, region, "ModifyInstanceAttribute", url.Values{"InstanceId": {id}, param + ".Value": {modified[attr]}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "ModifyInstanceAttribute %s: %s", param, body)
+		assert.Equal(t, modified[attr], values(id)[attr], "%s after ModifyInstanceAttribute", attr)
+	}
+	assert.Equal(t, modified, values(id), "one ModifyInstanceAttribute leaves the others")
+
+	launch = topLevelParams(n.subnet, n.sgs)
+	for param, v := range map[string]string{"DisableApiTermination": "true", "DisableApiStop": "true", "EbsOptimized": "true", "InstanceInitiatedShutdownBehavior": "terminate"} {
+		launch.Set(param, v)
+	}
+	launched := runInstance(t, srv, region, launch)
+	assert.Equal(t, map[string]string{
+		"sourceDestCheck": "true", "disableApiTermination": "true", "disableApiStop": "true",
+		"instanceInitiatedShutdownBehavior": "terminate", "ebsOptimized": "true",
+	}, values(launched), "what RunInstances set")
+	_, raw = describeInstance(t, srv, region, launched)
+	assert.Contains(t, raw, "<ebsOptimized>true</ebsOptimized>", "DescribeInstances")
+
+	resp, body := ec2Call(t, srv, region, "TerminateInstances", url.Values{"InstanceId.1": {launched}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "TerminateInstances: %s", body)
+	resp, body = attribute(launched, "sourceDestCheck")
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "terminated: %s", body)
+	assert.NotContains(t, string(body), "sourceDestCheck", "a terminated instance has no ENI")
+
+	for _, name := range []string{"userData", "disableApiTermination", "sourceDestCheck", "instanceType"} {
+		resp, body := attribute("i-missing", name)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "unknown instance %s: %s", name, body)
+		assert.Equal(t, "InvalidInstanceID.NotFound", extractEC2Tag(body, "Code"), name)
+		assert.Equal(t, "answered-from-rows", lastClass(t, srv), name)
+	}
+	resp, body = ec2Call(t, srv, region, "DescribeInstances", url.Values{"InstanceId.1": {"i-missing"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "DescribeInstances unknown instance: %s", body)
+	assert.Equal(t, "InvalidInstanceID.NotFound", extractEC2Tag(body, "Code"), "DescribeInstances")
+
+	for _, name := range []string{"instanceType", "groupSet", "kernel", ""} {
+		resp, body := attribute(id, name)
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%q: %s", name, body)
+		assert.Equal(t, "DescribeInstanceAttribute: not modelled by fakeaws: Attribute="+name, extractEC2Tag(body, "Message"), name)
+		assert.Equal(t, "filter-refused", lastClass(t, srv), name)
+	}
 }
 
 // ----- Tags -----

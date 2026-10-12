@@ -112,6 +112,19 @@ type EC2Instance struct {
 	Region                 string `json:"region"`
 	ARN                    string `json:"arn"`
 	CreatedAt              string `json:"created_at"`
+	EC2InstanceAttributes
+}
+
+// EC2InstanceAttributes are the attributes RunInstances and
+// ModifyInstanceAttribute set and DescribeInstanceAttribute answers
+// (sourceDestCheck lives on the primary ENI). Each lives only in the
+// row's data, so UpdateInstanceAttributes cannot desync a column. The
+// zero value is AWS's default.
+type EC2InstanceAttributes struct {
+	DisableAPITermination bool   `json:"disable_api_termination,omitempty"`
+	DisableAPIStop        bool   `json:"disable_api_stop,omitempty"`
+	EBSOptimized          bool   `json:"ebs_optimized,omitempty"`
+	ShutdownBehavior      string `json:"shutdown_behavior,omitempty"`
 }
 
 // EC2NetworkInterface is an instance's primary ENI (device index 0),
@@ -310,12 +323,42 @@ func (r *Repository) ListInstances(account, region string) ([]*EC2Instance, erro
 	return out, rows.Err()
 }
 
-// SetInstanceState is the only mutation supported on running
-// instances at v1 — the state machine is collapsed to
-// pending → running → shutting-down → terminated. ModifyInstanceAttribute
-// is a no-op (concepts.md "Standing patterns" item 9 — terminal-state
-// refusal is enforced here). Terminating deletes the instance's ENIs
-// and clears its EIP associations in the same transaction.
+// UpdateInstanceAttributes applies change to the instance's
+// attributes and saves its data. It reads and writes in one
+// transaction (SetMaxOpenConns(1): only tx may touch the db until
+// Commit), so a state change cannot land between them and be
+// overwritten by the stale state in data.
+func (r *Repository) UpdateInstanceAttributes(account, region, id string, change func(*EC2InstanceAttributes)) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var data string
+	err = tx.QueryRow(`SELECT data FROM ec2_instances WHERE account_id = ? AND region = ? AND id = ?`, account, region, id).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return models.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	var inst EC2Instance
+	if err := json.Unmarshal([]byte(data), &inst); err != nil {
+		return err
+	}
+	change(&inst.EC2InstanceAttributes)
+	body, _ := json.Marshal(&inst)
+	if _, err := tx.Exec(`UPDATE ec2_instances SET data = ? WHERE account_id = ? AND id = ?`, string(body), account, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SetInstanceState moves an instance through the state machine,
+// collapsed to pending → running → shutting-down → terminated
+// (concepts.md "Standing patterns" item 9 — terminal-state refusal is
+// enforced here). Terminating deletes the instance's ENIs and clears
+// its EIP associations in the same transaction.
 func (r *Repository) SetInstanceState(account, region, id, state string) error {
 	current, err := r.GetInstance(account, region, id)
 	if err != nil {
