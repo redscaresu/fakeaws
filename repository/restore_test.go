@@ -130,7 +130,7 @@ func TestRestoreRefusesAnotherSchemaVersion(t *testing.T) {
 
 			err := r.Restore(prepare)
 			require.ErrorIs(t, err, models.ErrConflict)
-			assert.Contains(t, err.Error(), fmt.Sprintf("database schema version 1, fakeaws needs %d", dbSchemaVersion))
+			assert.Contains(t, err.Error(), fmt.Sprintf("%s.snapshot: database schema version 1, fakeaws needs %d", dbPath, dbSchemaVersion))
 			assert.ElementsMatch(t, []string{"vpc-snap", "vpc-live"}, vpcIDs(t, r), "the live db as it was")
 			assert.Equal(t, fmt.Sprint(dbSchemaVersion), storedVersion(t, r))
 			assert.Empty(t, stagedFiles(t, dbPath))

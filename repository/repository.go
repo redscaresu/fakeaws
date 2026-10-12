@@ -85,12 +85,17 @@ const dbSchemaVersion = 2
 // file to VACUUM INTO. For e2e scenarios that want snapshot/restore, pass a
 // filesystem path.
 func New(dbPath string) (*Repository, error) {
-	db, err := openDB(dbPath)
-	if err != nil {
+	return newRepository(dbPath, dbPath)
+}
+
+// newRepository is New, with name the file a refusal names: stage opens
+// a .restore copy and names the snapshot it copied.
+func newRepository(dbPath, name string) (*Repository, error) {
+	if err := checkSchemaVersion(dbPath, name); err != nil {
 		return nil, err
 	}
-	if err := checkSchemaVersion(db); err != nil {
-		_ = db.Close()
+	db, err := openDB(dbPath)
+	if err != nil {
 		return nil, err
 	}
 	r := &Repository{db: db, dbPath: dbPath}
@@ -112,7 +117,7 @@ func openDB(dbPath string) (*sql.DB, error) {
 			return nil, fmt.Errorf("create db file: %w", err)
 		}
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dsn(dbPath, ""))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -133,6 +138,20 @@ func openDB(dbPath string) (*sql.DB, error) {
 		}
 	}
 	return db, nil
+}
+
+// dsn is the SQLite URI of the file at dbPath, taken literally (a '?'
+// or a "file:" in it is part of the name), with query params; ":memory:"
+// is itself. openDB and checkSchemaVersion both open through it, so they
+// read the same file.
+func dsn(dbPath, params string) string {
+	if dbPath == ":memory:" {
+		return dbPath
+	}
+	if abs, err := filepath.Abs(dbPath); err == nil {
+		dbPath = abs
+	}
+	return (&url.URL{Scheme: "file", Path: dbPath, RawQuery: params}).String()
 }
 
 // universalMigrations are the always-on tables (operations, audit,
@@ -167,14 +186,38 @@ var universalMigrations = []string{
 		version INTEGER NOT NULL PRIMARY KEY,
 		applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 	)`,
-	fmt.Sprintf(`INSERT OR IGNORE INTO schema_version(version) VALUES (%d)`, dbSchemaVersion),
 }
 
 // checkSchemaVersion passes a db with no tables, which migrate makes
 // new, and a db whose schema_version holds one row, dbSchemaVersion.
-// Anything else is models.ErrConflict naming the stored and wanted
-// versions, and nothing is written.
-func checkSchemaVersion(db *sql.DB) error {
+// Anything else is models.ErrConflict naming name and the stored and
+// wanted versions. It reads dbPath through a read-only handle, before
+// openDB's pragmas, so a refusal writes nothing: immutable (no -wal or
+// -shm made) unless a -wal is there, which may hold the db's only copy
+// of its tables, as after a kill before any checkpoint.
+func checkSchemaVersion(dbPath, name string) error {
+	if dbPath == ":memory:" {
+		return nil
+	}
+	// SQLite keeps the -wal beside the file a symlinked path resolves to.
+	file, err := filepath.EvalSymlinks(dbPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("resolve db path: %w", err)
+	}
+	params := "mode=ro"
+	if _, err := os.Stat(file + "-wal"); errors.Is(err, fs.ErrNotExist) {
+		params += "&immutable=1"
+	} else if err != nil {
+		return fmt.Errorf("stat db wal: %w", err)
+	}
+	db, err := sql.Open("sqlite", dsn(file, params))
+	if err != nil {
+		return fmt.Errorf("open sqlite read-only: %w", err)
+	}
+	defer db.Close()
 	var entries, versionTables int
 	if err := db.QueryRow(`SELECT COUNT(*), COUNT(*) FILTER (WHERE type = 'table' AND name = 'schema_version') FROM sqlite_master`).
 		Scan(&entries, &versionTables); err != nil {
@@ -190,8 +233,8 @@ func checkSchemaVersion(db *sql.DB) error {
 		}
 	}
 	if stored != strconv.Itoa(dbSchemaVersion) {
-		return fmt.Errorf("%w: database schema version %s, fakeaws needs %d: reset or delete the file",
-			models.ErrConflict, stored, dbSchemaVersion)
+		return fmt.Errorf("%w: %s: database schema version %s, fakeaws needs %d: reset or delete the file",
+			models.ErrConflict, name, stored, dbSchemaVersion)
 	}
 	return nil
 }
@@ -202,20 +245,27 @@ func checkSchemaVersion(db *sql.DB) error {
 var registeredMigrations []string
 
 // migrate runs the universal migrations followed by every registered
-// service migration. Idempotent — every statement uses CREATE TABLE
-// IF NOT EXISTS / INSERT OR IGNORE.
+// service migration, then stores dbSchemaVersion. Idempotent — every
+// statement uses CREATE TABLE IF NOT EXISTS / INSERT OR IGNORE.
 //
 // It runs only on a db checkSchemaVersion passed: it adds a table the
-// db lacks but changes none it has.
+// db lacks but changes none it has. It is one transaction, so a new db
+// it fails on, or is killed in, is left with no tables, and opens as new.
 func (r *Repository) migrate() error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	stmts := append([]string(nil), universalMigrations...)
 	stmts = append(stmts, registeredMigrations...)
+	stmts = append(stmts, fmt.Sprintf(`INSERT OR IGNORE INTO schema_version(version) VALUES (%d)`, dbSchemaVersion))
 	for _, s := range stmts {
-		if _, err := r.db.Exec(s); err != nil {
+		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("migrate: %s: %w", oneLine(s), err)
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func oneLine(s string) string {
@@ -414,9 +464,10 @@ func (r *Repository) Snapshot() error {
 
 // Restore reverses a prior Snapshot: copies the snapshot baseline to
 // <dbPath>.restore, opens that copy as New does, which refuses it with
-// models.ErrConflict unless it is at dbSchemaVersion, runs prepare (nil
-// for none) on it, then closes the live db, copies the prepared bytes
-// into the live path, reopens, and re-applies migrations. The live path
+// models.ErrConflict, naming the snapshot, unless it is at
+// dbSchemaVersion, runs prepare (nil for none) on it, then closes the
+// live db, copies the prepared bytes into the live path, reopens, and
+// re-applies migrations. The live path
 // is written, never replaced, so a symlinked db or a bind-mounted single
 // file keeps working. A refused copy, a failed copy or a failed prepare
 // leaves the live db as it was, and the .restore files are removed
@@ -473,16 +524,16 @@ func (r *Repository) Restore(prepare func(staged *Repository) error) error {
 	return nil
 }
 
-// stage copies snap to staged, opens it with New, which refuses it
-// unless it is at dbSchemaVersion, and runs prepare (if any) on it, then
-// checkpoints the copy's WAL into its file, which is all Restore copies,
-// and fails unless every frame was checkpointed.
+// stage copies snap to staged, opens it as New does, which refuses it,
+// naming snap, unless it is at dbSchemaVersion, and runs prepare (if
+// any) on it, then checkpoints the copy's WAL into its file, which is
+// all Restore copies, and fails unless every frame was checkpointed.
 func stage(snap, staged string, prepare func(*Repository) error) error {
 	removeDBFiles(staged)
 	if err := copyFile(snap, staged); err != nil {
 		return fmt.Errorf("copy snapshot: %w", err)
 	}
-	repo, err := New(staged)
+	repo, err := newRepository(staged, snap)
 	if err != nil {
 		return fmt.Errorf("open restored copy: %w", err)
 	}

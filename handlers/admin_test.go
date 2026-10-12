@@ -425,7 +425,7 @@ func TestAdminMockRestore_AnotherSchemaVersionIs409(t *testing.T) {
 
 	resp, body = doPost(t, srv, "/mock/restore")
 	assert.Equal(t, http.StatusConflict, resp.StatusCode, "restore: %s", body)
-	assert.Contains(t, string(body), "database schema version 1, fakeaws needs "+want)
+	assert.Contains(t, string(body), dbPath+".snapshot: database schema version 1, fakeaws needs "+want)
 	_, after := doGet(t, srv, "/mock/state")
 	assert.Equal(t, string(before), string(after), "/mock/state as it was")
 }

@@ -77,31 +77,105 @@ func TestRepositoryAdminLifecycle(t *testing.T) {
 }
 
 // TestNewRefusesAnotherSchemaVersion: a file db whose schema_version is
-// not exactly one row, dbSchemaVersion, is refused naming the stored and
-// wanted versions, and the file is left byte for byte as it was.
+// not exactly one row, dbSchemaVersion, is refused naming the file and
+// the stored and wanted versions. The file is left byte for byte as it
+// was, in WAL or rollback-journal mode, and no -wal or -shm appears. A
+// '?', '#' or '%' in the path is part of the file's name.
 func TestNewRefusesAnotherSchemaVersion(t *testing.T) {
-	cases := []struct{ name, stmt, stored string }{
-		{"older", `UPDATE schema_version SET version = 1`, "1"},
-		{"newer", fmt.Sprintf(`UPDATE schema_version SET version = %d`, dbSchemaVersion+1), fmt.Sprint(dbSchemaVersion + 1)},
-		{"no row", `DELETE FROM schema_version`, "none"},
-		{"two rows", `INSERT INTO schema_version (version) VALUES (1)`, fmt.Sprintf("1, %d", dbSchemaVersion)},
-		{"no table", `DROP TABLE schema_version`, "none"},
+	cases := []struct {
+		name, file, stored string
+		stmts              []string
+	}{
+		{"older", "state.db", "1", []string{`UPDATE schema_version SET version = 1`}},
+		{"older, rollback journal", "state.db", "1", []string{`PRAGMA journal_mode = DELETE`, `UPDATE schema_version SET version = 1`}},
+		{"older, odd path", "state ?#%.db", "1", []string{`UPDATE schema_version SET version = 1`}},
+		{"newer", "state.db", fmt.Sprint(dbSchemaVersion + 1), []string{fmt.Sprintf(`UPDATE schema_version SET version = %d`, dbSchemaVersion+1)}},
+		{"no row", "state.db", "none", []string{`DELETE FROM schema_version`}},
+		{"two rows", "state.db", fmt.Sprintf("1, %d", dbSchemaVersion), []string{`INSERT INTO schema_version (version) VALUES (1)`}},
+		{"no table", "state.db", "none", []string{`DROP TABLE schema_version`}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			dbPath := filepath.Join(t.TempDir(), "state.db")
+			dbPath := filepath.Join(t.TempDir(), c.file)
 			r, err := New(dbPath)
 			require.NoError(t, err)
 			require.NoError(t, r.Close())
-			execOnFile(t, dbPath, c.stmt)
+			execOnFile(t, dbPath, c.stmts...)
+			require.NoFileExists(t, dbPath+"-wal")
+			require.NoFileExists(t, dbPath+"-shm")
 			before := sha256File(t, dbPath)
 
 			_, err = New(dbPath)
 			require.ErrorIs(t, err, models.ErrConflict)
-			assert.Contains(t, err.Error(), fmt.Sprintf("database schema version %s, fakeaws needs %d: reset or delete the file", c.stored, dbSchemaVersion))
+			assert.Contains(t, err.Error(), fmt.Sprintf("%s: database schema version %s, fakeaws needs %d: reset or delete the file", dbPath, c.stored, dbSchemaVersion))
 			assert.Equal(t, before, sha256File(t, dbPath), "the file is left as it was")
+			assert.NoFileExists(t, dbPath+"-wal")
+			assert.NoFileExists(t, dbPath+"-shm")
 		})
 	}
+}
+
+// killedDB copies the db at live and its -wal to dbPath, as a kill
+// before any checkpoint would leave them: the tables only in the -wal.
+func killedDB(t *testing.T, live *Repository, dbPath string) {
+	t.Helper()
+	require.NoError(t, copyFile(live.dbPath, dbPath))
+	require.NoError(t, copyFile(live.dbPath+"-wal", dbPath+"-wal"))
+}
+
+// TestNewReadsTheVersionInTheWAL: a killed db's version is read from its
+// -wal, through a symlink too. Version 1 is refused with the file left
+// as it was; dbSchemaVersion opens.
+func TestNewReadsTheVersionInTheWAL(t *testing.T) {
+	for _, link := range []bool{false, true} {
+		t.Run(fmt.Sprintf("symlink=%v", link), func(t *testing.T) {
+			dir := t.TempDir()
+			live, err := New(filepath.Join(dir, "live.db"))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = live.Close() })
+			current, older := filepath.Join(dir, "current.db"), filepath.Join(dir, "older.db")
+			killedDB(t, live, current)
+			_, err = live.db.Exec(`UPDATE schema_version SET version = 1`)
+			require.NoError(t, err)
+			killedDB(t, live, older)
+			if link {
+				for _, p := range []*string{&current, &older} {
+					l := *p + ".link"
+					require.NoError(t, os.Symlink(*p, l))
+					*p = l
+				}
+			}
+			before := sha256File(t, older)
+
+			_, err = New(older)
+			require.ErrorIs(t, err, models.ErrConflict)
+			assert.Contains(t, err.Error(), fmt.Sprintf("%s: database schema version 1, fakeaws needs %d", older, dbSchemaVersion))
+			assert.Equal(t, before, sha256File(t, older), "the file is left as it was")
+
+			r, err := New(current)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = r.Close() })
+			assert.Equal(t, fmt.Sprint(dbSchemaVersion), storedVersion(t, r))
+		})
+	}
+}
+
+// TestNewFailedMigrateLeavesNewDBEmpty: migrate is one transaction, so
+// a new file db it fails on keeps no table, and opens afterwards at
+// dbSchemaVersion instead of being refused for a missing version row.
+func TestNewFailedMigrateLeavesNewDBEmpty(t *testing.T) {
+	saved := registeredMigrations
+	t.Cleanup(func() { registeredMigrations = saved })
+	registeredMigrations = append(append([]string(nil), saved...), `CREATE TABLE broken (`)
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	_, err := New(dbPath)
+	require.ErrorContains(t, err, "migrate: CREATE TABLE broken (")
+	registeredMigrations = saved
+
+	r, err := New(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	assert.Equal(t, fmt.Sprint(dbSchemaVersion), storedVersion(t, r))
 }
 
 // TestNewFileDBAtSchemaVersion: a new file db is at dbSchemaVersion,
@@ -248,13 +322,15 @@ func TestPatchMergeNestedRecursive(t *testing.T) {
 
 // ----- test helpers -----
 
-// execOnFile runs stmt on the db file at path and closes it.
-func execOnFile(t *testing.T, path, stmt string) {
+// execOnFile runs stmts on the db file at path and closes it.
+func execOnFile(t *testing.T, path string, stmts ...string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", dsn(path, ""))
 	require.NoError(t, err)
-	_, err = db.Exec(stmt)
-	require.NoError(t, err)
+	for _, stmt := range stmts {
+		_, err = db.Exec(stmt)
+		require.NoError(t, err)
+	}
 	require.NoError(t, db.Close())
 }
 
