@@ -21,12 +21,11 @@ import (
 // models what aws_ssm_parameter (resource and data source) calls at
 // hashicorp/aws 5.100.0; every other operation answers 501.
 
-// al2023ParameterName is the read-only AWS public parameter naming the
-// latest Amazon Linux 2023 AMI. Unless the database is loaded it
-// resolves to AL2023AMIID in every region, with no row. On a loaded
-// database GetParameter reads the loader's row (ParameterNotFound when
-// there is none), still under the public, account-less ARN. Either way
-// it is not listed (DescribeParameters, /mock/state) or deletable.
+// al2023ParameterName is the AWS public parameter naming the latest
+// Amazon Linux 2023 AMI. Unless the database is loaded it resolves to
+// AL2023AMIID in every region, with no row. On a loaded database
+// GetParameter reads the loader's row (ParameterNotFound when there is
+// none), as it reads any public parameter (repository.IsPublicSSMParameter).
 const al2023ParameterName = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 
 var ssmParameterTypes = []string{"String", "StringList", "SecureString"}
@@ -46,21 +45,30 @@ func (app *Application) handleSSM(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	switch req.Operation {
-	case "PutParameter":
-		app.ssmPutParameter(w, account, region, req.Body)
-	case "GetParameter":
-		app.ssmGetParameter(w, account, region, req.Body)
-	case "DescribeParameters":
-		app.ssmDescribeParameters(w, account, region, req.Body)
-	case "DeleteParameter":
-		app.ssmDeleteParameter(w, account, region, req.Body)
-	case "ListTagsForResource":
-		app.ssmListTagsForResource(w, account, region, req.Body)
-	case "AddTagsToResource", "RemoveTagsFromResource":
-		app.ssmChangeTags(w, account, region, req.Operation, req.Body)
-	default:
+	op, ok := ssmOperations[req.Operation]
+	if !ok {
 		writeUnimplemented(w, "POST /ssm X-Amz-Target="+req.Target)
+		return
+	}
+	op(app, w, account, region, req.Body)
+}
+
+type ssmOperation func(app *Application, w http.ResponseWriter, account, region string, body []byte)
+
+// ssmOperations is every SSM operation handleSSM answers.
+var ssmOperations = map[string]ssmOperation{
+	"PutParameter":           (*Application).ssmPutParameter,
+	"GetParameter":           (*Application).ssmGetParameter,
+	"DescribeParameters":     (*Application).ssmDescribeParameters,
+	"DeleteParameter":        (*Application).ssmDeleteParameter,
+	"ListTagsForResource":    (*Application).ssmListTagsForResource,
+	"AddTagsToResource":      ssmChangeTagsOp("AddTagsToResource"),
+	"RemoveTagsFromResource": ssmChangeTagsOp("RemoveTagsFromResource"),
+}
+
+func ssmChangeTagsOp(op string) ssmOperation {
+	return func(app *Application, w http.ResponseWriter, account, region string, body []byte) {
+		app.ssmChangeTags(w, account, region, op, body)
 	}
 }
 
@@ -97,6 +105,7 @@ func ssmPutValidation(name, typ string, overwriteWithTags bool) string {
 	case name == "":
 		return "Parameter name must not be empty."
 	case strings.HasPrefix(lower, "aws") || strings.HasPrefix(lower, "ssm"):
+		// This also refuses every public parameter name.
 		return `Parameter name: can't be prefixed with "aws" or "ssm" (case-insensitive).`
 	case !slices.Contains(ssmParameterTypes, typ):
 		return fmt.Sprintf("Parameter type %q must be one of %s.", typ, strings.Join(ssmParameterTypes, ", "))
@@ -157,7 +166,7 @@ func (app *Application) ssmGetParameter(w http.ResponseWriter, account, region s
 	if !ssmDecode(w, body, &in) {
 		return
 	}
-	if in.Name == al2023ParameterName {
+	if in.Name == al2023ParameterName || in.Name == awsproto.BuildSSMParameterARN(region, "", al2023ParameterName) {
 		loaded, err := app.repo.Loaded()
 		if err != nil {
 			awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
@@ -165,8 +174,8 @@ func (app *Application) ssmGetParameter(w http.ResponseWriter, account, region s
 		}
 		if !loaded {
 			awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameter": map[string]any{
-				"ARN":  awsproto.BuildSSMParameterARN(region, "", in.Name),
-				"Name": in.Name, "Type": "String", "DataType": "text",
+				"ARN":  awsproto.BuildSSMParameterARN(region, "", al2023ParameterName),
+				"Name": al2023ParameterName, "Type": "String", "DataType": "text",
 				"Value": AL2023AMIID, "Version": 1,
 			}})
 			return
@@ -177,13 +186,9 @@ func (app *Application) ssmGetParameter(w http.ResponseWriter, account, region s
 		ssmNotFound(w, in.Name, err)
 		return
 	}
-	arnAccount := account
-	if p.Name == al2023ParameterName {
-		arnAccount = "" // public: no account in the ARN, as when unloaded
-	}
 	// SecureString values come back as stored, WithDecryption or not.
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameter": map[string]any{
-		"ARN":  awsproto.BuildSSMParameterARN(region, arnAccount, p.Name),
+		"ARN":  awsproto.BuildSSMParameterARN(region, repository.SSMParameterARNAccount(account, p.Name), p.Name),
 		"Name": p.Name, "Type": p.Type, "DataType": p.DataType,
 		"Value": p.Value, "Version": p.Version,
 		"LastModifiedDate": secretEpoch(p.LastModified),
@@ -224,7 +229,7 @@ func (app *Application) ssmDescribeParameters(w http.ResponseWriter, account, re
 	}
 	out := []map[string]any{}
 	for _, p := range params {
-		if p.Name == al2023ParameterName {
+		if repository.IsPublicSSMParameter(p.Name) {
 			continue // a loaded public parameter is not the account's
 		}
 		if slices.ContainsFunc(in.ParameterFilters, func(f filter) bool { return !slices.Contains(f.Values, p.Name) }) {
@@ -257,8 +262,9 @@ func (app *Application) ssmDeleteParameter(w http.ResponseWriter, account, regio
 	if !ssmDecode(w, body, &in) {
 		return
 	}
-	if in.Name == al2023ParameterName {
+	if repository.IsPublicSSMParameter(in.Name) {
 		// Never deletable: a loaded row stays, answered as when unloaded.
+		// UNVERIFIED(aws-code): ParameterNotFound from https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_DeleteParameter.html; no recording
 		ssmNotFound(w, in.Name, models.ErrNotFound)
 		return
 	}
@@ -301,6 +307,22 @@ func ssmTagError(w http.ResponseWriter, err error) {
 	awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
 }
 
+// ssmTagTarget reads the parameter a tagging request names, by name or
+// ARN, answering InvalidResourceId when there is none or it is public:
+// a public parameter is AWS's, so the account cannot tag it.
+// UNVERIFIED(aws-code): InvalidResourceId from https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_AddTagsToResource.html (and API_RemoveTagsFromResource, API_ListTagsForResource); no recording
+func (app *Application) ssmTagTarget(w http.ResponseWriter, account, region, ref string) (*repository.SSMParameter, bool) {
+	p, err := app.repo.GetSSMParameter(account, region, ref)
+	if err == nil && repository.IsPublicSSMParameter(p.Name) {
+		err = models.ErrNotFound
+	}
+	if err != nil {
+		ssmTagError(w, err)
+		return nil, false
+	}
+	return p, true
+}
+
 // ssmListTagsForResource backs the provider's tag read on every
 // aws_ssm_parameter refresh.
 func (app *Application) ssmListTagsForResource(w http.ResponseWriter, account, region string, body []byte) {
@@ -308,9 +330,8 @@ func (app *Application) ssmListTagsForResource(w http.ResponseWriter, account, r
 	if !ok {
 		return
 	}
-	p, err := app.repo.GetSSMParameter(account, region, in.ResourceId)
-	if err != nil {
-		ssmTagError(w, err)
+	p, ok := app.ssmTagTarget(w, account, region, in.ResourceId)
+	if !ok {
 		return
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"TagList": tagsAsJSONSlice(p.Tags)})
@@ -323,6 +344,10 @@ func (app *Application) ssmChangeTags(w http.ResponseWriter, account, region, op
 	if !ok {
 		return
 	}
+	p, ok := app.ssmTagTarget(w, account, region, in.ResourceId)
+	if !ok {
+		return
+	}
 	patch := map[string]any{}
 	for _, t := range in.Tags {
 		patch[t.Key] = t.Value
@@ -330,7 +355,7 @@ func (app *Application) ssmChangeTags(w http.ResponseWriter, account, region, op
 	for _, k := range in.TagKeys {
 		patch[k] = nil
 	}
-	if err := app.repo.PatchSSMParameterTags(account, region, in.ResourceId, patch); err != nil {
+	if err := app.repo.PatchSSMParameterTags(account, region, p.Name, patch); err != nil {
 		ssmTagError(w, err)
 		return
 	}
@@ -338,9 +363,9 @@ func (app *Application) ssmChangeTags(w http.ResponseWriter, account, region, op
 }
 
 // gatherSSMStateReal emits the ssm block of /mock/state: every user
-// parameter by name, type, version and region, never its value. The
-// public al2023 parameter is not the account's, so a loaded row of it
-// is skipped as DescribeParameters skips it.
+// parameter by name, type, version and region, never its value. A
+// public parameter is not the account's, so a loaded row of one is
+// skipped as DescribeParameters skips it.
 func (app *Application) gatherSSMStateReal(account string) (map[string]any, error) {
 	params, err := app.repo.ListSSMParameters(account, "")
 	if err != nil {
@@ -348,7 +373,7 @@ func (app *Application) gatherSSMStateReal(account string) (map[string]any, erro
 	}
 	out := []map[string]any{}
 	for _, p := range params {
-		if p.Name == al2023ParameterName {
+		if repository.IsPublicSSMParameter(p.Name) {
 			continue
 		}
 		out = append(out, map[string]any{

@@ -57,7 +57,7 @@ fakeaws/
   x-amz-target (DynamoDB, SecretsManager, KMS, SSM), JSON-REST (EKS). STS models
   GetCallerIdentity only (the stored account, `000000000000` when none); other STS actions 501. SSM models
   what `aws_ssm_parameter` calls (Put/Get/Describe/DeleteParameter and the three tag ops)
-  plus the read-only AL2023 public AMI parameter (on a loaded database, the loader's row under the same account-less ARN, never listed or deleted); SSM errors are all 400. The `awsproto/`
+  plus AWS public parameters (`/aws/service/…`, `repository.IsPublicSSMParameter`): a stored one answers GetParameter by name or account-less ARN and is never listed, put, deleted or tagged; the AL2023 AMI one answers with no row unless the database is loaded; SSM errors are all 400. The `awsproto/`
   helper (S43-T2) handles the marshalling — handler files focus on resource
   semantics + FK validation.
 - **Per-service ARN builders**: real AWS ARN formats vary per service.

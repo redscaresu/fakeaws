@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +18,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/redscaresu/fakeaws/handlers"
+	"github.com/redscaresu/fakeaws/handlers/awsproto"
+	"github.com/redscaresu/fakeaws/repository"
 )
 
 const al2023Parameter = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
@@ -242,6 +246,10 @@ func TestSSM_AL2023PublicParameterIsAKnownImage(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, "body=%s", body)
 	assert.Equal(t, handlers.AL2023AMIID, ami)
 	assert.Contains(t, string(body), `"ARN":"arn:aws:ssm:us-east-1::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"`)
+	status, byARN, body := ssmGetValue(t, srv, "arn:aws:ssm:us-east-1::parameter"+al2023Parameter)
+	require.Equal(t, http.StatusOK, status, "GetParameter by the account-less ARN: %s", body)
+	assert.Equal(t, ami, byARN)
+	assert.Contains(t, string(body), `"Name":"`+al2023Parameter+`"`)
 
 	resp, body := ec2PostRegression(t, srv, "us-east-1", "DescribeImages", url.Values{"ImageId.1": {ami}})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "body=%s", body)
@@ -290,4 +298,132 @@ func TestSSM_ResetAndSnapshotRestore(t *testing.T) {
 	status, _, body = ssmGetValue(t, srv, "kept")
 	assert.Equal(t, http.StatusBadRequest, status)
 	assert.Contains(t, string(body), "ParameterNotFound")
+}
+
+// A public parameter the fixture does not answer, and a private twin
+// whose name differs only in its prefix.
+const (
+	publicParameter = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+	privateTwin     = "/twin/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+)
+
+// newSSMPublicApp stores publicParameter and privateTwin as the loader
+// would, through the repository (PutParameter refuses aws-prefixed names).
+func newSSMPublicApp(t *testing.T) *httptest.Server {
+	t.Helper()
+	app, srv := newTestApp(t, ":memory:")
+	for _, name := range []string{publicParameter, privateTwin} {
+		_, err := app.Repository().PutSSMParameter(awsproto.FakeAccountID, &repository.SSMParameterPut{
+			Name: name, Type: "String", Value: "ami-0123456789abcdef0", Region: "us-east-1",
+			Tags: map[string]string{"k": "v"}, Now: "2026-10-12T00:00:00Z",
+		}, false)
+		require.NoError(t, err)
+	}
+	return srv
+}
+
+func TestSSM_PublicParameterRow(t *testing.T) {
+	srv := newSSMPublicApp(t)
+	publicARN := "arn:aws:ssm:us-east-1::parameter" + publicParameter
+	accountARN := "arn:aws:ssm:us-east-1:" + awsproto.FakeAccountID + ":parameter" + publicParameter
+
+	for _, ref := range []string{publicParameter, publicARN} {
+		resp, body := ssmCall(t, srv, "GetParameter", fmt.Sprintf(`{"Name":%q}`, ref))
+		require.Equal(t, http.StatusOK, resp.StatusCode, "GetParameter %s: %s", ref, body)
+		var got struct {
+			Parameter struct{ ARN, Name, Value string }
+		}
+		require.NoError(t, json.Unmarshal(body, &got))
+		assert.Equal(t, publicARN, got.Parameter.ARN, ref)
+		assert.Equal(t, publicParameter, got.Parameter.Name, ref)
+		assert.Equal(t, "ami-0123456789abcdef0", got.Parameter.Value, ref)
+	}
+	status, _, body := ssmGetValue(t, srv, accountARN)
+	assert.Equal(t, http.StatusBadRequest, status, "GetParameter by the account-scoped ARN: %s", body)
+	assert.Contains(t, string(body), "ParameterNotFound")
+
+	resp, body := ssmCall(t, srv, "DescribeParameters", `{}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeParameters: %s", body)
+	assert.Contains(t, string(body), privateTwin)
+	assert.NotContains(t, string(body), publicParameter, "DescribeParameters lists the public parameter")
+	resp, body = doGet(t, srv, "/mock/state/ssm")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GET /mock/state/ssm: %s", body)
+	assert.Contains(t, string(body), privateTwin)
+	assert.NotContains(t, string(body), publicParameter, "/mock/state lists the public parameter")
+
+	refused := map[string]string{
+		"DeleteParameter": fmt.Sprintf(`{"Name":%q}`, publicParameter),
+		"PutParameter":    fmt.Sprintf(`{"Name":%q,"Type":"String","Value":"x","Overwrite":true}`, publicParameter),
+	}
+	for _, ref := range []string{publicParameter, publicARN, accountARN} {
+		refused["ListTagsForResource "+ref] = fmt.Sprintf(`{"ResourceType":"Parameter","ResourceId":%q}`, ref)
+		refused["AddTagsToResource "+ref] = fmt.Sprintf(`{"ResourceType":"Parameter","ResourceId":%q,"Tags":[{"Key":"a","Value":"b"}]}`, ref)
+		refused["RemoveTagsFromResource "+ref] = fmt.Sprintf(`{"ResourceType":"Parameter","ResourceId":%q,"TagKeys":["k"]}`, ref)
+	}
+	codes := map[string]string{
+		"DeleteParameter": "ParameterNotFound", "PutParameter": "ValidationException",
+		"ListTagsForResource": "InvalidResourceId", "AddTagsToResource": "InvalidResourceId", "RemoveTagsFromResource": "InvalidResourceId",
+	}
+	for call, reqBody := range refused {
+		op, _, _ := strings.Cut(call, " ")
+		resp, body := ssmCall(t, srv, op, reqBody)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s: %s", call, body)
+		assert.Contains(t, string(body), codes[op], call)
+	}
+	status, value, body := ssmGetValue(t, srv, publicParameter)
+	require.Equal(t, http.StatusOK, status, "GetParameter after the refusals: %s", body)
+	assert.Equal(t, "ami-0123456789abcdef0", value, "a refused call changed the public parameter")
+}
+
+func TestSSM_PrivateParameterTagOpsByARN(t *testing.T) {
+	srv := newSSMPublicApp(t)
+	arn := "arn:aws:ssm:us-east-1:" + awsproto.FakeAccountID + ":parameter" + privateTwin
+	tagged := func(ref string) []byte {
+		t.Helper()
+		resp, body := ssmCall(t, srv, "ListTagsForResource", fmt.Sprintf(`{"ResourceType":"Parameter","ResourceId":%q}`, ref))
+		require.Equal(t, http.StatusOK, resp.StatusCode, "ListTagsForResource %s: %s", ref, body)
+		return body
+	}
+
+	resp, body := ssmCall(t, srv, "AddTagsToResource", fmt.Sprintf(`{"ResourceType":"Parameter","ResourceId":%q,"Tags":[{"Key":"a","Value":"b"}]}`, arn))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "AddTagsToResource: %s", body)
+	resp, body = ssmCall(t, srv, "RemoveTagsFromResource", fmt.Sprintf(`{"ResourceType":"Parameter","ResourceId":%q,"TagKeys":["k"]}`, arn))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "RemoveTagsFromResource: %s", body)
+	assert.JSONEq(t, `{"TagList":[{"Key":"a","Value":"b"}]}`, string(tagged(arn)))
+	assert.JSONEq(t, `{"TagList":[{"Key":"a","Value":"b"}]}`, string(tagged(privateTwin)))
+
+	accountless := "arn:aws:ssm:us-east-1::parameter" + privateTwin
+	resp, body = ssmCall(t, srv, "ListTagsForResource", fmt.Sprintf(`{"ResourceType":"Parameter","ResourceId":%q}`, accountless))
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "a private parameter's account-less ARN: %s", body)
+	assert.Contains(t, string(body), "InvalidResourceId")
+}
+
+// Every operation handleSSM dispatches, sent to a public parameter, must
+// answer otherwise than to its private twin: rename the public answer to
+// the twin's and it must not equal the twin's answer.
+func TestSSM_EveryOperationTreatsPublicParameterAsPublic(t *testing.T) {
+	bodies := map[string]string{
+		"PutParameter":           `{"Name":%q,"Type":"String","Value":"x","Overwrite":true}`,
+		"GetParameter":           `{"Name":%q}`,
+		"DescribeParameters":     `{"ParameterFilters":[{"Key":"Name","Option":"Equals","Values":[%q]}]}`,
+		"DeleteParameter":        `{"Name":%q}`,
+		"ListTagsForResource":    `{"ResourceType":"Parameter","ResourceId":%q}`,
+		"AddTagsToResource":      `{"ResourceType":"Parameter","ResourceId":%q,"Tags":[{"Key":"a","Value":"b"}]}`,
+		"RemoveTagsFromResource": `{"ResourceType":"Parameter","ResourceId":%q,"TagKeys":["k"]}`,
+	}
+	require.ElementsMatch(t, slices.Collect(maps.Keys(handlers.SSMOperations)), slices.Collect(maps.Keys(bodies)),
+		"every dispatched SSM operation has a body here")
+
+	for op, body := range bodies {
+		t.Run(op, func(t *testing.T) {
+			srv := newSSMPublicApp(t)
+			answer := func(name string) string {
+				resp, out := ssmCall(t, srv, op, fmt.Sprintf(body, name))
+				return fmt.Sprintf("%d %s", resp.StatusCode, out)
+			}
+			private := answer(privateTwin)
+			public := strings.ReplaceAll(answer(publicParameter), "aws/service/", "twin/")
+			assert.NotEqual(t, private, public, "%s answers the public parameter as a private one", op)
+		})
+	}
 }
