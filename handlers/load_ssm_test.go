@@ -75,15 +75,15 @@ func mustParseJSON(t *testing.T, body string) *handlers.Tree {
 	return tree
 }
 
-// ssmNotFoundAnswer is op's answer to body as its status and error code.
-func ssmNotFoundAnswer(t *testing.T, srv *httptest.Server, op, body string) string {
+// ssmErrorAnswer is op's answer to body as its status and error code.
+func ssmErrorAnswer(t *testing.T, srv *httptest.Server, op, body string) (int, string) {
 	t.Helper()
 	resp, out := ssmCall(t, srv, op, body)
 	var got struct {
 		Type string `json:"__type"`
 	}
 	require.NoError(t, json.Unmarshal(out, &got), "%s: %s", op, out)
-	return fmt.Sprintf("%d %s", resp.StatusCode, got.Type)
+	return resp.StatusCode, got.Type
 }
 
 func TestLoadSSM_PublicParameterLoadsByteExact(t *testing.T) {
@@ -120,20 +120,25 @@ func TestLoadSSM_ARNIsStoredNotDerived(t *testing.T) {
 
 	ssmGetEqual(t, srv, al2023Parameter, fixture)
 	ssmGetEqual(t, srv, recordedARN, fixture)
-	assert.Equal(t, "400 ParameterNotFound", ssmNotFoundAnswer(t, srv, "GetParameter", fmt.Sprintf(`{"Name":%q}`, ssmFixtureARN)),
-		"the derived ARN finds a row whose recorded ARN differs")
+	status, code := ssmErrorAnswer(t, srv, "GetParameter", fmt.Sprintf(`{"Name":%q}`, ssmFixtureARN))
+	assert.Equal(t, http.StatusBadRequest, status, "the derived ARN finds a row whose recorded ARN differs")
+	assert.Equal(t, "ParameterNotFound", code, "the derived ARN finds a row whose recorded ARN differs")
 }
 
 func TestLoadSSM_AccountScopedARNMatchesNothing(t *testing.T) {
 	_, srv, _ := loadSSMBody(t, ssmFixture(t))
 	accountARN := "arn:aws:ssm:us-east-1:" + loadAccount + ":parameter" + al2023Parameter
-	assert.Equal(t, "400 ParameterNotFound", ssmNotFoundAnswer(t, srv, "GetParameter", fmt.Sprintf(`{"Name":%q}`, accountARN)))
+	status, code := ssmErrorAnswer(t, srv, "GetParameter", fmt.Sprintf(`{"Name":%q}`, accountARN))
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "ParameterNotFound", code)
 
 	tags := `{"ResourceType":"Parameter","ResourceId":%q}`
-	absent := ssmNotFoundAnswer(t, srv, "ListTagsForResource", fmt.Sprintf(tags, "/aws/service/no-such-parameter"))
-	assert.Equal(t, "400 InvalidResourceId", absent)
-	assert.Equal(t, absent, ssmNotFoundAnswer(t, srv, "ListTagsForResource", fmt.Sprintf(tags, accountARN)),
-		"ListTagsForResource on the account-scoped ARN answers as for an absent parameter")
+	absentStatus, absentCode := ssmErrorAnswer(t, srv, "ListTagsForResource", fmt.Sprintf(tags, "/aws/service/no-such-parameter"))
+	assert.Equal(t, http.StatusBadRequest, absentStatus)
+	assert.Equal(t, "InvalidResourceId", absentCode)
+	status, code = ssmErrorAnswer(t, srv, "ListTagsForResource", fmt.Sprintf(tags, accountARN))
+	assert.Equal(t, absentStatus, status, "ListTagsForResource on the account-scoped ARN answers as for an absent parameter")
+	assert.Equal(t, absentCode, code, "ListTagsForResource on the account-scoped ARN answers as for an absent parameter")
 }
 
 func TestLoadSSM_ValueReadsBackByteExact(t *testing.T) {
@@ -194,5 +199,25 @@ func TestLoadSSM_NonPublicParameterIsRefused(t *testing.T) {
 	assert.Contains(t, refusals[0], "exchange 0: ssm GetParameter: parameter /myapp/db-host is not public")
 	for _, field := range []string{"description", "tier", "allowed_pattern", "key_id", "tags"} {
 		assert.Contains(t, refusals[0], field)
+	}
+}
+
+// A recorded ARN loads only as the parameter's own account-less ARN:
+// one carrying an account, or naming another parameter, is refused, so
+// neither finds the row.
+func TestLoadSSM_ARNNotTheParametersOwnIsRefused(t *testing.T) {
+	for name, arn := range map[string]string{
+		"an account":        "arn:aws:ssm:us-east-1:" + loadAccount + ":parameter" + al2023Parameter,
+		"another parameter": "arn:aws:ssm:us-east-1::parameter/aws/service/other",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+			fixture := strings.Replace(ssmFixture(t), ssmFixtureARN, arn, 1)
+			require.Contains(t, fixture, arn)
+			status, body := loadSSM(t, srv, ssmGetParameterExchange(http.StatusOK, fixture))
+			require.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, []string{"exchange 0: ssm GetParameter: parameter " + al2023Parameter + ": ARN " + arn +
+				" is not its account-less parameter ARN"}, loadRefusals(t, body))
+		})
 	}
 }
