@@ -30,8 +30,8 @@ const (
 	// CRITICAL[request-log-not-modelled-404]: the default arm of EC2,
 	// IAM, RDS, DynamoDB, SQS, Secrets Manager and KMS marks an
 	// unknown action not-modelled-404. Its 404 ResourceNotFoundException
-	// is wire-identical to a missing row's, so only the mark tells them
-	// apart. A modelled action that stores nothing is not marked.
+	// is wire-identical to a missing row's (except IAM's, NoSuchEntity),
+	// so only the mark tells them apart. A modelled action that stores nothing is not marked.
 	classNotModelled404 requestClass = "not-modelled-404"
 
 	// CRITICAL[request-log-filter-refused]: a site that refuses what real

@@ -36,13 +36,13 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Malformed request — treat as a bad-request error in the
 		// Query-RPC shape so the SDK surfaces a useful message.
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		iamWriteError(w, fmt.Errorf("%w: %v", errIAMValidation, err), "")
 		return
 	}
 
 	account, err := app.AccountID()
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, fmt.Errorf("read account id: %w", err))
+		iamWriteError(w, fmt.Errorf("read account id: %w", err), "")
 		return
 	}
 
@@ -208,8 +208,7 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		markClass(w, classNotModelled404)
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
-			fmt.Errorf("unsupported IAM action %q: %w", req.Action, models.ErrNotFound))
+		iamWriteError(w, fmt.Errorf("unsupported IAM action %q: %w", req.Action, errIAMNotModelled), "")
 	}
 }
 
@@ -358,8 +357,7 @@ func roleToXML(r *repository.IAMRole) iamRoleXML {
 func (app *Application) iamCreateRole(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("RoleName")
 	if name == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
-			fmt.Errorf("RoleName is required: %w", models.ErrConflict))
+		iamWriteError(w, fmt.Errorf("RoleName is required: %w", errIAMValidation), "")
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -375,14 +373,14 @@ func (app *Application) iamCreateRole(w http.ResponseWriter, account string, req
 		fmt.Sscanf(mds, "%d", &role.MaxSessionDuration)
 	}
 	if err := app.repo.CreateRole(account, role); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	tags := queryTags(req.Params, "Tags.member.")
 	if err := app.tagCreated(account, repository.TagsIAMRole, role.ARN, tags, func() error {
 		return app.repo.DeleteRole(account, name)
 	}); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	r := roleToXML(role)
@@ -394,12 +392,12 @@ func (app *Application) iamGetRole(w http.ResponseWriter, account string, req aw
 	name := req.Params.Get("RoleName")
 	role, err := app.repo.GetRole(account, name)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	tags, err := app.repo.ResourceTags(account, repository.TagsIAMRole, role.ARN)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	r := roleToXML(role)
@@ -410,7 +408,7 @@ func (app *Application) iamGetRole(w http.ResponseWriter, account string, req aw
 func (app *Application) iamListRoles(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	roles, err := app.repo.ListRoles(account)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	out := iamListRolesResult{Roles: make([]iamRoleXML, 0, len(roles))}
@@ -424,7 +422,7 @@ func (app *Application) iamUpdateRole(w http.ResponseWriter, account string, req
 	name := req.Params.Get("RoleName")
 	role, err := app.repo.GetRole(account, name)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	if v := req.Params.Get("Description"); v != "" {
@@ -434,26 +432,25 @@ func (app *Application) iamUpdateRole(w http.ResponseWriter, account string, req
 		fmt.Sscanf(v, "%d", &role.MaxSessionDuration)
 	}
 	if err := app.repo.UpdateRole(account, role); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "UpdateRole", nil)
 }
 
-// iamDeleteRole answers DeleteConflict while an inline policy or an
-// instance profile still holds the role, as IAM does; the provider
-// retries DeleteRole on that code.
+// iamDeleteRole answers DeleteConflict while a managed policy, an
+// inline policy or an instance profile still holds the role, as IAM
+// does; the provider retries DeleteRole on that code.
 // UNVERIFIED(aws-code): DeleteConflict is from the IAM API reference's
 // DeleteRole errors, not a recording.
 func (app *Application) iamDeleteRole(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("RoleName")
 	if err := app.repo.DeleteRole(account, name); err != nil {
+		msg := ""
 		if errors.Is(err, models.ErrInUse) {
-			awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusConflict,
-				"DeleteConflict", "Cannot delete entity, must remove inline policies and instance profiles first: role "+name)
-			return
+			msg = "Cannot delete entity, must detach all policies and remove the role from its instance profiles first: role " + name
 		}
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, msg)
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteRole", nil)
@@ -486,8 +483,7 @@ func policyToXML(p *repository.IAMPolicy) iamPolicyXML {
 func (app *Application) iamCreatePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("PolicyName")
 	if name == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
-			fmt.Errorf("PolicyName is required: %w", models.ErrConflict))
+		iamWriteError(w, fmt.Errorf("PolicyName is required: %w", errIAMValidation), "")
 		return
 	}
 	policy := &repository.IAMPolicy{
@@ -499,14 +495,14 @@ func (app *Application) iamCreatePolicy(w http.ResponseWriter, account string, r
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreatePolicy(account, policy); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	tags := queryTags(req.Params, "Tags.member.")
 	if err := app.tagCreated(account, repository.TagsIAMPolicy, policy.ARN, tags, func() error {
 		return app.repo.DeletePolicy(account, name)
 	}); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	p := policyToXML(policy)
@@ -524,12 +520,12 @@ func (app *Application) iamGetPolicy(w http.ResponseWriter, account string, req 
 	}
 	policy, err := app.repo.GetPolicy(account, name)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	tags, err := app.repo.ResourceTags(account, repository.TagsIAMPolicy, policy.ARN)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	p := policyToXML(policy)
@@ -553,16 +549,14 @@ func (app *Application) iamGetPolicyVersion(w http.ResponseWriter, account strin
 	}
 	policy, err := app.repo.GetPolicy(account, name)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
-	// PolicyDocument must be URL-encoded per the IAM wire contract —
-	// SDK calls url.QueryUnescape on the response. CreatePolicy
-	// receives an already-encoded document (the provider sends it
-	// that way), so we round-trip the persisted value verbatim.
+	// The document is stored decoded; IAM sends it URL-encoded and the
+	// provider URL-decodes it (urlEscapeIfNotEmpty).
 	awsproto.WriteQueryRPCResponse(w, "GetPolicyVersion", &iamPolicyVersionResult{
 		PolicyVersion: iamPolicyVersionXML{
-			Document:         policy.PolicyDocument,
+			Document:         urlEscapeIfNotEmpty(policy.PolicyDocument),
 			VersionID:        "v1",
 			IsDefaultVersion: true,
 			CreateDate:       policy.CreatedAt,
@@ -583,7 +577,7 @@ func (app *Application) iamListPolicyVersions(w http.ResponseWriter, account str
 	}
 	policy, err := app.repo.GetPolicy(account, name)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "ListPolicyVersions", &iamListPolicyVersionsResult{
@@ -614,7 +608,7 @@ type iamListPolicyVersionsResult struct {
 func (app *Application) iamListPolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	policies, err := app.repo.ListPolicies(account)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	out := iamListPoliciesResult{Policies: make([]iamPolicyXML, 0, len(policies))}
@@ -632,7 +626,7 @@ func (app *Application) iamDeletePolicy(w http.ResponseWriter, account string, r
 		}
 	}
 	if err := app.repo.DeletePolicy(account, name); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeletePolicy", nil)
@@ -673,8 +667,7 @@ func instanceProfileToXML(p *repository.IAMInstanceProfile, attached *repository
 func (app *Application) iamCreateInstanceProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("InstanceProfileName")
 	if name == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
-			fmt.Errorf("InstanceProfileName is required: %w", models.ErrConflict))
+		iamWriteError(w, fmt.Errorf("InstanceProfileName is required: %w", errIAMValidation), "")
 		return
 	}
 	p := &repository.IAMInstanceProfile{
@@ -684,14 +677,14 @@ func (app *Application) iamCreateInstanceProfile(w http.ResponseWriter, account 
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateInstanceProfile(account, p); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	tags := queryTags(req.Params, "Tags.member.")
 	if err := app.tagCreated(account, repository.TagsIAMProfile, p.ARN, tags, func() error {
 		return app.repo.DeleteInstanceProfile(account, name)
 	}); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	out := instanceProfileToXML(p, nil)
@@ -702,7 +695,7 @@ func (app *Application) iamCreateInstanceProfile(w http.ResponseWriter, account 
 func (app *Application) iamGetInstanceProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	p, err := app.repo.GetInstanceProfile(account, req.Params.Get("InstanceProfileName"))
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	var attached *repository.IAMRole
@@ -712,7 +705,7 @@ func (app *Application) iamGetInstanceProfile(w http.ResponseWriter, account str
 	// aws_iam_instance_profile reads its tags from here.
 	tags, err := app.repo.ResourceTags(account, repository.TagsIAMProfile, p.ARN)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	out := instanceProfileToXML(p, attached)
@@ -723,7 +716,7 @@ func (app *Application) iamGetInstanceProfile(w http.ResponseWriter, account str
 func (app *Application) iamListInstanceProfiles(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	profs, err := app.repo.ListInstanceProfiles(account)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	out := iamListInstanceProfilesResult{InstanceProfiles: make([]iamInstanceProfileXML, 0, len(profs))}
@@ -739,7 +732,7 @@ func (app *Application) iamListInstanceProfiles(w http.ResponseWriter, account s
 
 func (app *Application) iamDeleteInstanceProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DeleteInstanceProfile(account, req.Params.Get("InstanceProfileName")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteInstanceProfile", nil)
@@ -749,7 +742,7 @@ func (app *Application) iamAddRoleToInstanceProfile(w http.ResponseWriter, accou
 	if err := app.repo.AddRoleToInstanceProfile(account,
 		req.Params.Get("InstanceProfileName"),
 		req.Params.Get("RoleName")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "AddRoleToInstanceProfile", nil)
@@ -759,7 +752,7 @@ func (app *Application) iamRemoveRoleFromInstanceProfile(w http.ResponseWriter, 
 	if err := app.repo.RemoveRoleFromInstanceProfile(account,
 		req.Params.Get("InstanceProfileName"),
 		req.Params.Get("RoleName")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "RemoveRoleFromInstanceProfile", nil)
@@ -790,8 +783,7 @@ func userToXML(u *repository.IAMUser) iamUserXML {
 func (app *Application) iamCreateUser(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("UserName")
 	if name == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC,
-			fmt.Errorf("UserName is required: %w", models.ErrConflict))
+		iamWriteError(w, fmt.Errorf("UserName is required: %w", errIAMValidation), "")
 		return
 	}
 	u := &repository.IAMUser{
@@ -801,14 +793,14 @@ func (app *Application) iamCreateUser(w http.ResponseWriter, account string, req
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateUser(account, u); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	tags := queryTags(req.Params, "Tags.member.")
 	if err := app.tagCreated(account, repository.TagsIAMUser, u.ARN, tags, func() error {
 		return app.repo.DeleteUser(account, name)
 	}); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	out := userToXML(u)
@@ -819,12 +811,12 @@ func (app *Application) iamCreateUser(w http.ResponseWriter, account string, req
 func (app *Application) iamGetUser(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	u, err := app.repo.GetUser(account, req.Params.Get("UserName"))
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	tags, err := app.repo.ResourceTags(account, repository.TagsIAMUser, u.ARN)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	out := userToXML(u)
@@ -835,7 +827,7 @@ func (app *Application) iamGetUser(w http.ResponseWriter, account string, req aw
 func (app *Application) iamListUsers(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	users, err := app.repo.ListUsers(account)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	out := iamListUsersResult{Users: make([]iamUserXML, 0, len(users))}
@@ -847,7 +839,7 @@ func (app *Application) iamListUsers(w http.ResponseWriter, account string, req 
 
 func (app *Application) iamDeleteUser(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DeleteUser(account, req.Params.Get("UserName")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteUser", nil)
@@ -935,14 +927,10 @@ type iamListVirtualMFADevicesResult struct {
 // Shared between DeleteLoginProfile and GetLoginProfile — both
 // expect the same 404-with-NoSuchEntity contract.
 //
-// IAM's wire-spec "not-found" code is NoSuchEntity, NOT the generic
-// ResourceNotFoundException that WriteAWSError emits for
-// models.ErrNotFound. The provider's destroy idempotency check
-// keys off NoSuchEntity exactly, so we use WriteServiceError to
-// pin the exact code string.
+// The provider's destroy idempotency check keys off NoSuchEntity
+// exactly, which iamWriteError answers for models.ErrNotFound.
 func (app *Application) iamDeleteLoginProfile(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
-		"NoSuchEntity", "The specified login profile does not exist.")
+	iamWriteError(w, models.ErrNotFound, "The specified login profile does not exist.")
 }
 
 // iamListUserPolicies returns the inline-policy names attached to a
@@ -951,7 +939,7 @@ func (app *Application) iamListUserPolicies(w http.ResponseWriter, account strin
 	user := req.Params.Get("UserName")
 	names, err := app.repo.ListUserPolicies(account, user)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "ListUserPolicies", &iamListUserPoliciesResult{PolicyNames: names})
@@ -964,7 +952,7 @@ func (app *Application) iamListAttachedUserPolicies(w http.ResponseWriter, accou
 	user := req.Params.Get("UserName")
 	arns, err := app.repo.ListAttachedUserPolicies(account, user)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	members := make([]iamAttachedPolicy, 0, len(arns))
@@ -1019,7 +1007,7 @@ func (app *Application) iamCreateAccessKey(w http.ResponseWriter, account string
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := app.repo.CreateAccessKey(account, k); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	out := iamAccessKeyXML{
@@ -1033,7 +1021,7 @@ func (app *Application) iamListAccessKeys(w http.ResponseWriter, account string,
 	user := req.Params.Get("UserName")
 	keys, err := app.repo.ListAccessKeys(account, user)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	out := iamListAccessKeysResult{AccessKeyMetadata: make([]iamAccessKeyMetadataXML, 0, len(keys))}
@@ -1048,7 +1036,7 @@ func (app *Application) iamListAccessKeys(w http.ResponseWriter, account string,
 func (app *Application) iamDeleteAccessKey(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DeleteAccessKey(account,
 		req.Params.Get("UserName"), req.Params.Get("AccessKeyId")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteAccessKey", nil)
@@ -1069,7 +1057,7 @@ func (app *Application) iamAttachRolePolicy(w http.ResponseWriter, account strin
 		_ = app.repo.SeedManagedPolicy(account, policyARN)
 	}
 	if err := app.repo.AttachRolePolicy(account, roleName, policyARN); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "AttachRolePolicy", nil)
@@ -1086,7 +1074,7 @@ func (app *Application) iamAttachUserPolicy(w http.ResponseWriter, account strin
 		_ = app.repo.SeedManagedPolicy(account, policyARN)
 	}
 	if err := app.repo.AttachUserPolicy(account, user, policyARN); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "AttachUserPolicy", nil)
@@ -1097,7 +1085,7 @@ func (app *Application) iamDetachUserPolicy(w http.ResponseWriter, account strin
 	user := req.Params.Get("UserName")
 	policyARN := req.Params.Get("PolicyArn")
 	if err := app.repo.DetachUserPolicy(account, user, policyARN); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DetachUserPolicy", nil)
@@ -1111,7 +1099,7 @@ func (app *Application) iamPutUserPolicy(w http.ResponseWriter, account string, 
 	name := req.Params.Get("PolicyName")
 	doc := req.Params.Get("PolicyDocument")
 	if err := app.repo.PutUserPolicy(account, user, name, doc); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "PutUserPolicy", nil)
@@ -1123,14 +1111,15 @@ func (app *Application) iamDeleteUserPolicy(w http.ResponseWriter, account strin
 	user := req.Params.Get("UserName")
 	name := req.Params.Get("PolicyName")
 	if err := app.repo.DeleteUserPolicy(account, user, name); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DeleteUserPolicy", nil)
 }
 
-// iamGetUserPolicy reads back the inline policy. Returns the verbatim
-// document so the provider's hash matches between Create and Read.
+// iamGetUserPolicy reads back the inline policy, its document
+// URL-encoded as IAM sends it (urlEscapeIfNotEmpty); the provider
+// URL-decodes it, so its hash matches between Create and Read.
 // The named iamGetUserPolicyResult wrapper exists because the
 // awsproto encoder rejects anonymous structs (see queryrpc.go
 // marshalInnerXML — element-name detection trips on Go's anonymous-
@@ -1140,13 +1129,13 @@ func (app *Application) iamGetUserPolicy(w http.ResponseWriter, account string, 
 	name := req.Params.Get("PolicyName")
 	doc, err := app.repo.GetUserPolicy(account, user, name)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "GetUserPolicy", &iamGetUserPolicyResult{
 		UserName:       user,
 		PolicyName:     name,
-		PolicyDocument: doc,
+		PolicyDocument: urlEscapeIfNotEmpty(doc),
 	})
 }
 
@@ -1214,7 +1203,7 @@ type iamGetRolePolicyResult struct {
 // else the policy.
 func (app *Application) iamWriteRolePolicyError(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest, err error) {
 	if !errors.Is(err, models.ErrNotFound) {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	role := req.Params.Get("RoleName")
@@ -1222,16 +1211,16 @@ func (app *Application) iamWriteRolePolicyError(w http.ResponseWriter, account s
 	if _, err := app.repo.GetRole(account, role); errors.Is(err, models.ErrNotFound) {
 		msg = "The role with name " + role + " cannot be found."
 	} else if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
-	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound, "NoSuchEntity", msg)
+	iamWriteError(w, err, msg)
 }
 
 func (app *Application) iamDetachRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	if err := app.repo.DetachRolePolicy(account,
 		req.Params.Get("RoleName"), req.Params.Get("PolicyArn")); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "DetachRolePolicy", nil)
@@ -1240,7 +1229,7 @@ func (app *Application) iamDetachRolePolicy(w http.ResponseWriter, account strin
 func (app *Application) iamListAttachedRolePolicies(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	arns, err := app.repo.ListAttachedRolePolicies(account, req.Params.Get("RoleName"))
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	members := make([]iamAttachedPolicy, 0, len(arns))
@@ -1309,7 +1298,7 @@ func (app *Application) iamListRolePolicies(w http.ResponseWriter, account strin
 	}
 	names, err := app.repo.ListRolePolicies(account, name)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "ListRolePolicies", &iamListRolePoliciesResult{PolicyNames: names})
@@ -1338,12 +1327,11 @@ func iamTags(tags map[string]string) []iamTagXML {
 // iamWriteTagError writes a tag call's failure, NoSuchEntity for a
 // missing entity as IAM does.
 func iamWriteTagError(w http.ResponseWriter, kind iamTaggedKind, id string, err error) {
+	msg := ""
 	if errors.Is(err, models.ErrNotFound) {
-		awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, http.StatusNotFound,
-			"NoSuchEntity", fmt.Sprintf("The %s %s cannot be found.", kind.entity, id))
-		return
+		msg = fmt.Sprintf("The %s %s cannot be found.", kind.entity, id)
 	}
-	awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+	iamWriteError(w, err, msg)
 }
 
 func (app *Application) iamListTags(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest, kind iamTaggedKind) {
@@ -1383,12 +1371,12 @@ func (app *Application) iamListInstanceProfilesForRole(w http.ResponseWriter, ac
 	name := req.Params.Get("RoleName")
 	role, err := app.repo.GetRole(account, name)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	profs, err := app.repo.ListInstanceProfilesForRole(account, name)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		iamWriteError(w, err, "")
 		return
 	}
 	out := iamListInstanceProfilesForRoleResult{InstanceProfiles: make([]iamInstanceProfileXML, 0, len(profs))}
@@ -1419,6 +1407,45 @@ type iamListInstanceProfilesForRoleResult struct {
 }
 
 // ----- helpers -----
+
+var (
+	// errIAMValidation is a request IAM refuses as malformed or missing
+	// a required parameter.
+	errIAMValidation = errors.New("validation error")
+	// errIAMNotModelled is an IAM action fakeaws does not model.
+	errIAMNotModelled = errors.New("IAM action not modelled")
+)
+
+// iamWriteError is the one place IAM writes an error code: IAM's own
+// code for each domain sentinel, as terraform-provider-aws matches it
+// (NoSuchEntity is "gone" to every destroy and refresh; DeleteRole is
+// retried on DeleteConflict). msg, when set, replaces err's text. An
+// unmodelled action keeps the 404 ResourceNotFoundException every
+// service's default arm answers, so the provider never reads it as an
+// entity being gone; any other failure is the shared 500.
+func iamWriteError(w http.ResponseWriter, err error, msg string) {
+	if msg == "" {
+		msg = err.Error()
+	}
+	var status int
+	var code string
+	switch {
+	case errors.Is(err, errIAMNotModelled):
+		status, code = http.StatusNotFound, "ResourceNotFoundException"
+	case errors.Is(err, errIAMValidation):
+		status, code = http.StatusBadRequest, "ValidationError"
+	case errors.Is(err, models.ErrNotFound):
+		status, code = http.StatusNotFound, "NoSuchEntity"
+	case errors.Is(err, models.ErrInUse):
+		status, code = http.StatusConflict, "DeleteConflict"
+	case errors.Is(err, models.ErrConflict):
+		status, code = http.StatusConflict, "EntityAlreadyExists"
+	default:
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	awsproto.WriteServiceError(w, awsproto.ShapeQueryRPC, status, code, msg)
+}
 
 func pathOrSlash(p string) string {
 	if p == "" {

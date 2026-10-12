@@ -1,9 +1,9 @@
 # Misconfigured: AttachRolePolicy references a role that doesn't exist.
 # fakeaws's repository.AttachRolePolicy validates BOTH the role and the
 # policy via repository.GetRole + a SQL count on iam_policies. A missing
-# role surfaces as ResourceNotFoundException (404), which the AWS
+# role surfaces as IAM's NoSuchEntity (404), which the AWS
 # provider translates into a "tofu apply" failure containing
-# "ResourceNotFoundException".
+# "NoSuchEntity".
 
 terraform {
   required_providers {
@@ -41,7 +41,7 @@ resource "aws_iam_policy" "p" {
 }
 
 # …then attempt to attach it to a role that doesn't exist.
-# Expected error: ResourceNotFoundException (the role lookup fails
+# Expected error: NoSuchEntity (the role lookup fails
 # before fakeaws even checks the policy).
 resource "aws_iam_role_policy_attachment" "broken" {
   role       = "this-role-does-not-exist"

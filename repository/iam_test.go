@@ -140,37 +140,30 @@ func TestAttachRolePolicyValidatesBothEnds(t *testing.T) {
 	}
 }
 
-// ----- Roles cascade through role_policy_attachments -----
+// ----- A managed-policy attachment blocks DeleteRole -----
 
-func TestDeleteRoleCascadesAttachments(t *testing.T) {
+// TestDeleteRoleRefusedWhileManagedPolicyAttached: IAM refuses
+// DeleteRole while a managed policy is attached; the role, the
+// attachment and the policy all stay.
+func TestDeleteRoleRefusedWhileManagedPolicyAttached(t *testing.T) {
 	r := setupRepo(t)
-	role := &IAMRole{Name: "r", Path: "/", ARN: "arn:aws:iam::000000000000:role/r", CreatedAt: "t"}
 	policy := &IAMPolicy{Name: "p", Path: "/", ARN: "arn:aws:iam::000000000000:policy/p", CreatedAt: "t"}
-	if err := r.CreateRole(testAccount, role); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.CreatePolicy(testAccount, policy); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.AttachRolePolicy(testAccount, "r", policy.ARN); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, r.CreateRole(testAccount, &IAMRole{Name: "r", Path: "/", ARN: "arn:aws:iam::000000000000:role/r", CreatedAt: "t"}))
+	require.NoError(t, r.CreatePolicy(testAccount, policy))
+	require.NoError(t, r.AttachRolePolicy(testAccount, "r", policy.ARN))
 
-	if err := r.DeleteRole(testAccount, "r"); err != nil {
-		t.Fatalf("DeleteRole: %v", err)
-	}
-	// Attachment should be gone (CASCADE on role).
+	assert.ErrorIs(t, r.DeleteRole(testAccount, "r"), models.ErrInUse)
+	_, err := r.GetRole(testAccount, "r")
+	assert.NoError(t, err, "role kept")
 	attached, err := r.ListAttachedRolePolicies(testAccount, "r")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(attached) != 0 {
-		t.Errorf("after DeleteRole, attachments should cascade: got %v", attached)
-	}
-	// Policy still exists (its FK is the policy, not the role).
-	if _, err := r.GetPolicy(testAccount, "p"); err != nil {
-		t.Errorf("policy should survive role delete: %v", err)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, []string{policy.ARN}, attached, "attachment kept")
+
+	require.NoError(t, r.DetachRolePolicy(testAccount, "r", policy.ARN))
+	require.NoError(t, r.DeleteRole(testAccount, "r"))
+	_, err = r.GetPolicy(testAccount, "p")
+	assert.NoError(t, err, "policy survives the role's delete")
+	assert.ErrorIs(t, r.DeleteRole(testAccount, "r"), models.ErrNotFound, "a second delete")
 }
 
 // ----- Instance Profiles -----
