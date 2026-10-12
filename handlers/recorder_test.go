@@ -442,6 +442,9 @@ func TestContract_request_log_filter_refused(t *testing.T) {
 		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s: %s", c.name, body)
 		assert.Equal(t, "filter-refused", lastClass(t, srv), c.name)
 	}
+	resp, body = kmsCall(t, srv, region, "DescribeKey", `{"KeyId":"alias/app"}`)
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "KMS DescribeKey by alias: %s", body)
+	assert.Equal(t, "filter-refused", lastClass(t, srv), "KMS DescribeKey by alias")
 
 	_, body = ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.1.0.0/16"}})
 	dup := url.Values{"GroupName": {"dup"}, "GroupDescription": {"dup"}, "VpcId": {extractEC2Tag(body, "vpcId")}}
@@ -502,7 +505,7 @@ func TestContract_request_log_read_set_entry(t *testing.T) {
 		}, readSet{"dynamodb", "json", "DescribeTable", map[string]any{"TableName": "app"}, http.StatusNotFound}},
 		{"KMS DescribeKey", func() (*http.Response, []byte) {
 			return kmsCall(t, srv, region, "DescribeKey", `{"KeyId":"alias/app"}`)
-		}, readSet{"kms", "json", "DescribeKey", map[string]any{"KeyId": "alias/app"}, http.StatusNotFound}},
+		}, readSet{"kms", "json", "DescribeKey", map[string]any{"KeyId": "alias/app"}, http.StatusNotImplemented}},
 		{"Secrets Manager DescribeSecret", func() (*http.Response, []byte) {
 			return smCall(t, srv, "DescribeSecret", `{"SecretId":"app/db"}`)
 		}, readSet{"secretsmanager", "json", "DescribeSecret", map[string]any{"SecretId": "app/db"}, http.StatusNotFound}},

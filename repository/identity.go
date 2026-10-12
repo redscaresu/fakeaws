@@ -28,8 +28,9 @@ func init() {
 
 // emptyExclusions are the reset tables isEmpty skips whole: bookkeeping
 // and the identity itself. It also skips ec2_amis rows whose id is a
-// fixture AMI id. A story that seeds rows at boot adds them here, or no
-// database reads as empty.
+// fixture AMI id, and kms_keys rows in KMSKeyStatePendingDeletion, which
+// is all a destroyed aws_kms_key leaves. A story that seeds rows at boot
+// adds them here, or no database reads as empty.
 var emptyExclusions = map[string]bool{"operations": true, "audit": true, "identity": true}
 
 // GetIdentity returns the stored identity, or sql.ErrNoRows when none
@@ -79,19 +80,22 @@ func (r *Repository) SetIdentity(id Identity, defaultAccount string, fixtureAMII
 }
 
 // isEmpty reports whether no reset table holds a row outside
-// emptyExclusions and the fixture AMIs.
+// emptyExclusions, the fixture AMIs and the PendingDeletion keys.
 func isEmpty(tx *sql.Tx, fixtureAMIIDs []string) (bool, error) {
 	for _, table := range resetTables {
 		if emptyExclusions[table] {
 			continue
 		}
 		q, args := "SELECT EXISTS (SELECT 1 FROM "+table+")", []any(nil)
-		if table == "ec2_amis" {
+		switch table {
+		case "ec2_amis":
 			q = "SELECT EXISTS (SELECT 1 FROM ec2_amis WHERE id NOT IN (" +
 				strings.TrimSuffix(strings.Repeat("?,", len(fixtureAMIIDs)), ",") + "))"
 			for _, ami := range fixtureAMIIDs {
 				args = append(args, ami)
 			}
+		case "kms_keys":
+			q, args = "SELECT EXISTS (SELECT 1 FROM kms_keys WHERE state IS NOT ?)", []any{KMSKeyStatePendingDeletion}
 		}
 		var found bool
 		if err := tx.QueryRow(q, args...).Scan(&found); err != nil {

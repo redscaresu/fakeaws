@@ -212,6 +212,10 @@ var stateBreaks = []stateBreak{
 		}},
 
 	{read: "ListSSMParameters", service: "ssm", breakSQL: `DROP TABLE ssm_parameters`},
+
+	{read: "ListKMSKeys", service: "kms", breakSQL: `DROP TABLE kms_keys`},
+	{read: "ListKMSKeys", name: "kms key data JSON", service: "kms", breakSQL: `UPDATE kms_keys SET data = 'not json'`,
+		seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) { kmsCreateKey(t, srv, "fc") }},
 }
 
 // TestAdminMockState_UnreadableTableIs500: every read behind a /mock/state

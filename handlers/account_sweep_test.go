@@ -108,11 +108,11 @@ func TestContract_responses_carry_the_stored_account(t *testing.T) {
 	swept("STS GetCallerIdentity")(stsCall(t, srv, "GetCallerIdentity"))
 
 	// Each gathered block whose rows hold an account must name the stored
-	// one. S3's and Route53's ARNs are account-less, SSM's block holds no
-	// ARN, and KMS keys are not gathered.
+	// one. S3's and Route53's ARNs are account-less and SSM's block holds
+	// no ARN.
 	var state map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(swept("GET /mock/state")(doGet(t, srv, "/mock/state")), &state))
-	for _, service := range []string{"iam", "ec2", "rds", "dynamodb", "eks", "sqs", "secretsmanager"} {
+	for _, service := range []string{"iam", "ec2", "rds", "dynamodb", "eks", "sqs", "secretsmanager", "kms"} {
 		assert.Contains(t, string(state[service]), otherAccount, "/mock/state %s: %s", service, state[service])
 	}
 }

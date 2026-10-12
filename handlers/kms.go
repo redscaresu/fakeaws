@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,7 +23,8 @@ import (
 // round-trip through plan/apply/destroy. Keys are kms_keys rows
 // (repository/kms.go), under the stored account and the request's
 // region, so /mock/reset, snapshot, restore and the identity guard's
-// empty check cover them like every other service's rows.
+// empty check cover them like every other service's rows. A KeyId is a
+// key id or a key ARN (kmsKeyRef); aliases are not stored.
 
 func (app *Application) registerKMSRoutes(r chi.Router) {
 	r.Post("/kms/region/{region}", app.handleKMS)
@@ -47,7 +50,7 @@ func (app *Application) handleKMS(w http.ResponseWriter, r *http.Request) {
 	case "ListKeys":
 		app.kmsListKeys(w, account, region)
 	case "GetKeyPolicy":
-		kmsGetKeyPolicy(w, account)
+		app.kmsGetKeyPolicy(w, account, region, req)
 	case "PutKeyPolicy":
 		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
 	case "GetKeyRotationStatus":
@@ -81,16 +84,42 @@ func (app *Application) handleKMS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// kmsKeyError answers err for keyID: NotFoundException when no key
-// matches, matching AWS KMS.
-func kmsKeyError(w http.ResponseWriter, keyID string, err error) {
-	awsproto.WriteAWSError(w, awsproto.ShapeJSON11, fmt.Errorf("key %q: %w", keyID, err))
+// kmsKeyRef resolves ref, a key id or the key's ARN in this region and
+// account, to a key id. Any other ARN, an alias included, stays as given
+// and matches no key.
+func kmsKeyRef(account, region, ref string) string {
+	return strings.TrimPrefix(ref, awsproto.BuildKMSKeyARN(region, account, ""))
 }
 
-// kmsUpdate applies mutate to the key and answers {}.
-func (app *Application) kmsUpdate(w http.ResponseWriter, account, region, keyID string, mutate func(*repository.KMSKey)) {
-	if err := app.repo.UpdateKMSKey(account, region, keyID, mutate); err != nil {
-		kmsKeyError(w, keyID, err)
+// isKMSAlias reports whether ref names an alias, by name or by ARN.
+func isKMSAlias(ref string) bool {
+	return strings.HasPrefix(ref, "alias/") || strings.HasPrefix(ref, "arn:") && strings.Contains(ref, ":alias/")
+}
+
+// kmsKeyError answers err for ref: 404 NotFoundException, the code the
+// provider reads as gone, when no key matches.
+func kmsKeyError(w http.ResponseWriter, ref string, err error) {
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeJSON11, http.StatusNotFound, "NotFoundException", "Key '"+ref+"' does not exist")
+		return
+	}
+	awsproto.WriteAWSError(w, awsproto.ShapeJSON11, fmt.Errorf("key %q: %w", ref, err))
+}
+
+// kmsKey reads the key ref names, answering the error when it cannot.
+func (app *Application) kmsKey(w http.ResponseWriter, account, region, ref string) (*repository.KMSKey, bool) {
+	k, err := app.repo.GetKMSKey(account, region, kmsKeyRef(account, region, ref))
+	if err != nil {
+		kmsKeyError(w, ref, err)
+		return nil, false
+	}
+	return k, true
+}
+
+// kmsUpdate applies mutate to the key ref names and answers {}.
+func (app *Application) kmsUpdate(w http.ResponseWriter, account, region, ref string, mutate func(*repository.KMSKey)) {
+	if err := app.repo.UpdateKMSKey(account, region, kmsKeyRef(account, region, ref), mutate); err != nil {
+		kmsKeyError(w, ref, err)
 		return
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{})
@@ -112,7 +141,7 @@ func (app *Application) kmsCreateKey(w http.ResponseWriter, account, region stri
 	k := &repository.KMSKey{
 		KeyID:       keyID,
 		Region:      region,
-		State:       "Enabled",
+		State:       repository.KMSKeyStateEnabled,
 		Created:     time.Now().UTC(),
 		Tags:        map[string]string{},
 		Description: in.Description,
@@ -129,14 +158,21 @@ func (app *Application) kmsCreateKey(w http.ResponseWriter, account, region stri
 	})
 }
 
+// kmsDescribeKey refuses an alias, which AWS accepts here, as not
+// modelled: fakeaws stores no aliases, so a 404 would read as a key
+// that does not exist.
 func (app *Application) kmsDescribeKey(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
 	var in struct {
 		KeyId string `json:"KeyId"`
 	}
 	_ = json.Unmarshal(req.Body, &in)
-	k, err := app.repo.GetKMSKey(account, region, in.KeyId)
-	if err != nil {
-		kmsKeyError(w, in.KeyId, err)
+	if isKMSAlias(in.KeyId) {
+		writeUnimplemented(w, "POST /kms DescribeKey by alias")
+		markClass(w, classFilterRefused)
+		return
+	}
+	k, ok := app.kmsKey(w, account, region, in.KeyId)
+	if !ok {
 		return
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
@@ -159,13 +195,18 @@ func (app *Application) kmsListKeys(w http.ResponseWriter, account, region strin
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Keys": out, "Truncated": false})
 }
 
-// kmsGetKeyPolicy answers the default key policy — terraform-provider-aws
-// decodes this on every Read and just stores it. Real AWS returns the
-// resource policy JSON; we hand back the canonical default-allow shape.
-// The root principal is the stored account, for any KeyId: every key is
-// a row under it, as the identity guard refuses an account change while
-// one exists.
-func kmsGetKeyPolicy(w http.ResponseWriter, account string) {
+// kmsGetKeyPolicy answers the default key policy of a stored key —
+// terraform-provider-aws decodes this on every Read and just stores it.
+// Real AWS returns the resource policy JSON; we hand back the canonical
+// default-allow shape, whose root principal is the key's account.
+func (app *Application) kmsGetKeyPolicy(w http.ResponseWriter, account, region string, req awsproto.XAmzTargetRequest) {
+	var in struct {
+		KeyId string `json:"KeyId"`
+	}
+	_ = json.Unmarshal(req.Body, &in)
+	if _, ok := app.kmsKey(w, account, region, in.KeyId); !ok {
+		return
+	}
 	policy := `{"Version":"2012-10-17","Statement":[{"Sid":"Enable IAM User Permissions","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::` + account + `:root"},"Action":"kms:*","Resource":"*"}]}`
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
 		"Policy":     policy,
@@ -196,9 +237,10 @@ func (app *Application) kmsScheduleKeyDeletion(w http.ResponseWriter, account, r
 	// polls DescribeKey expecting KeyState="PendingDeletion" — if
 	// we hard-delete and return 404, the wait-loop errors with
 	// ResourceNotFoundException. Persist the state transition so
-	// DescribeKey can report it; /mock/reset deletes the row.
-	err := app.repo.UpdateKMSKey(account, region, in.KeyId, func(k *repository.KMSKey) {
-		k.State = "PendingDeletion"
+	// DescribeKey can report it; /mock/reset deletes the row, and the
+	// identity guard does not count it.
+	err := app.repo.UpdateKMSKey(account, region, kmsKeyRef(account, region, in.KeyId), func(k *repository.KMSKey) {
+		k.State = repository.KMSKeyStatePendingDeletion
 		k.DeletionDate = &deletionDate
 	})
 	if err != nil {
@@ -223,9 +265,8 @@ func (app *Application) kmsGetKeyRotationStatus(w http.ResponseWriter, account, 
 		KeyId string `json:"KeyId"`
 	}
 	_ = json.Unmarshal(req.Body, &in)
-	k, err := app.repo.GetKMSKey(account, region, in.KeyId)
-	if err != nil {
-		kmsKeyError(w, in.KeyId, err)
+	k, ok := app.kmsKey(w, account, region, in.KeyId)
+	if !ok {
 		return
 	}
 	awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{
@@ -268,9 +309,8 @@ func (app *Application) kmsListResourceTags(w http.ResponseWriter, account, regi
 		KeyId string `json:"KeyId"`
 	}
 	_ = json.Unmarshal(req.Body, &in)
-	k, err := app.repo.GetKMSKey(account, region, in.KeyId)
-	if err != nil {
-		kmsKeyError(w, in.KeyId, err)
+	k, ok := app.kmsKey(w, account, region, in.KeyId)
+	if !ok {
 		return
 	}
 	tags := []map[string]string{}
@@ -331,7 +371,7 @@ func kmsKeyMetadata(account string, k *repository.KMSKey) map[string]any {
 		"KeyId":                 k.KeyID,
 		"Arn":                   awsproto.BuildKMSKeyARN(k.Region, account, k.KeyID),
 		"CreationDate":          float64(k.Created.Unix()),
-		"Enabled":               k.State == "Enabled",
+		"Enabled":               k.State == repository.KMSKeyStateEnabled,
 		"Description":           k.Description,
 		"KeyUsage":              "ENCRYPT_DECRYPT",
 		"KeyState":              k.State,
@@ -346,4 +386,21 @@ func kmsKeyMetadata(account string, k *repository.KMSKey) map[string]any {
 		md["DeletionDate"] = float64(k.DeletionDate.Unix())
 	}
 	return md
+}
+
+// gatherKMSStateReal lists every key under account, in every region,
+// PendingDeletion included, so an operator sees each key's state.
+func (app *Application) gatherKMSStateReal(account string) (map[string]any, error) {
+	keys, err := app.repo.ListKMSKeys(account, "")
+	if err != nil {
+		return nil, err
+	}
+	out := []map[string]any{}
+	for _, k := range keys {
+		out = append(out, map[string]any{
+			"key_id": k.KeyID, "arn": awsproto.BuildKMSKeyARN(k.Region, account, k.KeyID),
+			"state": k.State, "region": k.Region, "account": account,
+		})
+	}
+	return map[string]any{"keys": out}, nil
 }
