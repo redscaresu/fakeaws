@@ -2824,10 +2824,12 @@ func ec2AMIToXML(a *repository.EC2AMI) ec2ImageXML {
 }
 
 // AL2023AMIID is the Amazon Linux 2023 fixture, the image SSM's public
-// al2023-ami-kernel-default-x86_64 parameter resolves to.
+// al2023-ami-kernel-default-x86_64 parameter resolves to on a database
+// that is not loaded.
 const AL2023AMIID = "ami-0al2023x8664"
 
-// ec2AMIFixtures is the canonical fixture list seeded at startup. The
+// ec2AMIFixtures is the canonical fixture list seeded at startup and
+// lazily per region, unless the database is loaded. The
 // AWS provider's documentation examples reference Amazon Linux and
 // Ubuntu LTS images by canonical name; we cover both so scenarios can
 // pass in either. Per concepts.md "Standing patterns" item 8 — fixture
@@ -3448,7 +3450,17 @@ func (app *Application) gatherEC2StateReal(account string) map[string]any {
 // other region got bogus 404s on the canonical AMIs. Now any region
 // the user touches becomes consistent on first contact. SeedAMI is
 // idempotent so re-entry is harmless.
+//
+// MUST[ami-fixtures-not-seeded-when-loaded]: a loaded database's AMIs
+// are the loader's rows only. Neither boot nor this lazy seed writes a
+// fixture, nor does an unreadable loaded flag; /mock/images matches
+// no fixture, so a non-hex fixture id is 400 like any other; SSM's
+// public al2023 parameter is read from rows, ParameterNotFound until
+// one is loaded.
 func (app *Application) ensureAMIFixturesForRegion(account, region string) {
+	if loaded, err := app.repo.Loaded(); err != nil || loaded {
+		return
+	}
 	for _, a := range ec2AMIFixtures {
 		cp := a
 		cp.Region = region

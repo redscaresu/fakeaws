@@ -23,7 +23,8 @@ import (
 
 // al2023ParameterName is the read-only AWS public parameter naming the
 // latest Amazon Linux 2023 AMI. It resolves to AL2023AMIID in every
-// region and is never stored, so it is not listed or deletable.
+// region and is never stored, so it is not listed or deletable. On a
+// loaded database it is the loader's row, if any, like any other.
 const al2023ParameterName = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 
 var ssmParameterTypes = []string{"String", "StringList", "SecureString"}
@@ -155,12 +156,19 @@ func (app *Application) ssmGetParameter(w http.ResponseWriter, account, region s
 		return
 	}
 	if in.Name == al2023ParameterName {
-		awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameter": map[string]any{
-			"ARN":  awsproto.BuildSSMParameterARN(region, "", in.Name),
-			"Name": in.Name, "Type": "String", "DataType": "text",
-			"Value": AL2023AMIID, "Version": 1,
-		}})
-		return
+		loaded, err := app.repo.Loaded()
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeJSON11, err)
+			return
+		}
+		if !loaded {
+			awsproto.WriteJSON11Response(w, http.StatusOK, map[string]any{"Parameter": map[string]any{
+				"ARN":  awsproto.BuildSSMParameterARN(region, "", in.Name),
+				"Name": in.Name, "Type": "String", "DataType": "text",
+				"Value": AL2023AMIID, "Version": 1,
+			}})
+			return
+		}
 	}
 	p, err := app.repo.GetSSMParameter(account, region, in.Name)
 	if err != nil {

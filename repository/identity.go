@@ -104,3 +104,24 @@ func isEmpty(tx *sql.Tx, fixtureAMIIDs []string) (bool, error) {
 	}
 	return true, nil
 }
+
+// Loaded reports whether the database is marked loaded: its rows came
+// from fakeaws-loader, which owns its AMIs, so fakeaws seeds no fixture
+// AMIs into it. No stored identity is not loaded.
+func (r *Repository) Loaded() (bool, error) {
+	var loaded bool
+	err := r.db.QueryRow(`SELECT loaded FROM identity WHERE id = 1`).Scan(&loaded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return loaded, err
+}
+
+// SetLoaded marks the database loaded or not, storing defaultAccount
+// as the identity when none is stored. It deletes no rows: fakeaws-
+// loader's replace transaction removes the fixtures already seeded.
+func (r *Repository) SetLoaded(loaded bool, defaultAccount string) error {
+	_, err := r.db.Exec(`INSERT INTO identity (id, account_id, loaded) VALUES (1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET loaded = excluded.loaded`, defaultAccount, loaded)
+	return err
+}

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/redscaresu/fakeaws/handlers"
 	"github.com/redscaresu/fakeaws/handlers/awsproto"
+	"github.com/redscaresu/fakeaws/repository"
 )
 
 // EC2 handler tests — networking surface that landed in S44-T4.
@@ -1936,4 +1938,142 @@ func TestEC2_UnreadableIdentityIs500(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "body=%s", body)
 	assert.Contains(t, string(body), "<Code>InternalFailure</Code>")
 	assert.NotContains(t, string(body), awsproto.FakeAccountID)
+}
+
+// markLoaded marks the file database at dbPath loaded through
+// repository.New, as fakeaws-loader does, with no Application open.
+func markLoaded(t *testing.T, dbPath string, loaded bool) {
+	t.Helper()
+	repo, err := repository.New(dbPath)
+	require.NoError(t, err)
+	require.NoError(t, repo.SetLoaded(loaded, awsproto.FakeAccountID))
+	require.NoError(t, repo.Close())
+}
+
+func amiRows(t *testing.T, app *handlers.Application, region string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM ec2_amis WHERE region = ?`, region).Scan(&n))
+	return n
+}
+
+func appLoaded(t *testing.T, app *handlers.Application) bool {
+	t.Helper()
+	loaded, err := app.Repository().Loaded()
+	require.NoError(t, err)
+	return loaded
+}
+
+// runInstanceWith runs one instance of ami in a fresh subnet.
+func runInstanceWith(t *testing.T, srv *httptest.Server, region, ami string) (*http.Response, []byte) {
+	t.Helper()
+	_, body := ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})
+	_, body = ec2Call(t, srv, region, "CreateSubnet", url.Values{
+		"VpcId": {extractEC2Tag(body, "vpcId")}, "CidrBlock": {"10.0.1.0/24"},
+	})
+	return ec2Call(t, srv, region, "RunInstances", url.Values{
+		"SubnetId": {extractEC2Tag(body, "subnetId")}, "ImageId": {ami}, "InstanceType": {"t3.micro"},
+	})
+}
+
+func seedImageBody(ami string) string {
+	return `{"ami_id":"` + ami + `","name":"loaded","region":"us-east-1","root_device_name":"/dev/xvda"}`
+}
+
+func TestContract_ami_fixtures_not_seeded_when_loaded(t *testing.T) {
+	const region = "us-east-1"
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	markLoaded(t, dbPath, true)
+	app, srv := newTestApp(t, dbPath)
+	assert.Zero(t, amiRows(t, app, region), "boot seeds no fixture")
+
+	resp, body := ec2Call(t, srv, region, "DescribeImages", url.Values{"ImageId.1": {handlers.AL2023AMIID}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeImages: %s", body)
+	assert.Contains(t, string(body), "ResourceNotFoundException")
+	assert.Zero(t, amiRows(t, app, region), "DescribeImages seeds no fixture")
+
+	resp, body = runInstanceWith(t, srv, region, handlers.AL2023AMIID)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "RunInstances: %s", body)
+	assert.Contains(t, string(body), "InvalidAMIID.NotFound")
+
+	status, _, body := ssmGetValue(t, srv, al2023Parameter)
+	assert.Equal(t, http.StatusBadRequest, status, "GetParameter: %s", body)
+	assert.Contains(t, string(body), "ParameterNotFound")
+
+	resp, body = doPostJSON(t, srv, "/mock/images", seedImageBody(handlers.AL2023AMIID))
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "POST /mock/images fixture id: %s", body)
+
+	const loadedAMI = "ami-0123456789abcdef0"
+	resp, body = doPostJSON(t, srv, "/mock/images", seedImageBody(loadedAMI))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "POST /mock/images: %s", body)
+	assert.Equal(t, 1, amiRows(t, app, region))
+	resp, body = runInstanceWith(t, srv, region, loadedAMI)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "RunInstances %s: %s", loadedAMI, body)
+}
+
+// Marking a database loaded deletes nothing: removing the fixtures
+// seeded before is fakeaws-loader's job, in its replace transaction.
+func TestAMIFixtures_MarkedLoadedLaterKeepsSeededFixtures(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	app, _ := newTestApp(t, dbPath)
+	seeded := amiRows(t, app, "us-east-1")
+	require.Positive(t, seeded, "unloaded boot seeds the fixtures")
+	require.NoError(t, app.Close())
+
+	markLoaded(t, dbPath, true)
+	app, srv := newTestApp(t, dbPath)
+	assert.Equal(t, seeded, amiRows(t, app, "us-east-1"))
+	resp, body := ec2Call(t, srv, "us-east-1", "DescribeImages", url.Values{"ImageId.1": {handlers.AL2023AMIID}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeImages: %s", body)
+}
+
+func TestAMIFixtures_LoadedFlagLifecycle(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	markLoaded(t, dbPath, true)
+	app, srv := newTestApp(t, dbPath)
+
+	resp, body := doPost(t, srv, "/mock/snapshot")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "snapshot: %s", body)
+	resp, body = doPost(t, srv, "/mock/restore")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "restore: %s", body)
+	assert.True(t, appLoaded(t, app), "restore keeps the flag")
+
+	require.NoError(t, app.Close())
+	app, srv = newTestApp(t, dbPath)
+	assert.True(t, appLoaded(t, app), "reopen keeps the flag")
+	assert.Zero(t, amiRows(t, app, "us-east-1"), "reopen seeds no fixture")
+
+	resp, body = doPost(t, srv, "/mock/reset")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "reset: %s", body)
+	assert.False(t, appLoaded(t, app), "reset clears the flag")
+	resp, body = ec2Call(t, srv, "us-east-1", "DescribeImages", url.Values{"ImageId.1": {handlers.AL2023AMIID}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DescribeImages after reset seeds the fixtures: %s", body)
+}
+
+// The loaded column is dropped rather than the identity table: without
+// the table the account read fails before any fixture site is reached,
+// and repository.New would recreate it on reopen.
+func TestAMIFixtures_UnreadableLoadedFlagSeedsNothing(t *testing.T) {
+	const dropLoaded = `ALTER TABLE identity DROP COLUMN loaded`
+	app, srv := newTestApp(t, ":memory:")
+	_, err := app.Repository().DB().Exec(dropLoaded)
+	require.NoError(t, err)
+
+	ec2Call(t, srv, "sa-east-1", "DescribeImages", nil)
+	assert.Zero(t, amiRows(t, app, "sa-east-1"), "lazy seed with an unreadable flag")
+	status, _, body := ssmGetValue(t, srv, al2023Parameter)
+	assert.Equal(t, http.StatusInternalServerError, status, "GetParameter: %s", body)
+	status, _, body = ssmGetValue(t, srv, "/app/missing")
+	assert.Equal(t, http.StatusBadRequest, status, "GetParameter of a stored name does not read the flag: %s", body)
+	resp, body := doPostJSON(t, srv, "/mock/images", seedImageBody("ami-0123456789abcdef0"))
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "POST /mock/images: %s", body)
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	repo, err := repository.New(dbPath)
+	require.NoError(t, err)
+	_, err = repo.DB().Exec(dropLoaded)
+	require.NoError(t, err)
+	require.NoError(t, repo.Close())
+	_, err = handlers.NewApplication(handlers.Options{DBPath: dbPath})
+	assert.ErrorContains(t, err, "read loaded flag")
 }
