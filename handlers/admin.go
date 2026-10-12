@@ -417,7 +417,9 @@ func (app *Application) handleMockSnapshot(w http.ResponseWriter, _ *http.Reques
 }
 
 // handleMockRestore swaps in the snapshot's identity and db handle, so
-// it holds identityMu exclusively, as setIdentity does.
+// it holds identityMu exclusively, as setIdentity does. A snapshot taken
+// before CreateVpc made a VPC's default security group gets it back
+// (backfillDefaultGroups).
 func (app *Application) handleMockRestore(w http.ResponseWriter, _ *http.Request) {
 	app.identityMu.Lock()
 	defer app.identityMu.Unlock()
@@ -432,6 +434,13 @@ func (app *Application) handleMockRestore(w http.ResponseWriter, _ *http.Request
 			status = http.StatusConflict
 		}
 		writeJSONStatus(w, status, map[string]any{
+			"status":  "error",
+			"message": err.Error(),
+		})
+		return
+	}
+	if err := app.backfillDefaultGroups(); err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
 			"status":  "error",
 			"message": err.Error(),
 		})

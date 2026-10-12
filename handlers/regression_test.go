@@ -23,6 +23,7 @@ package handlers_test
 import (
 	"encoding/xml"
 	"fmt"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1384,7 +1385,7 @@ func TestRegressionAllocateAddressNeverSharesAPublicIP(t *testing.T) {
 		resp, body := ec2Call(t, srv, tagRegion, "AllocateAddress", url.Values{"Domain": {"vpc"}})
 		require.Equal(t, http.StatusOK, resp.StatusCode, "AllocateAddress: %s", body)
 		alloc, ip := extractEC2Tag(body, "allocationId"), extractEC2Tag(body, "publicIp")
-		if derived := handlers.EC2DerivePublicIP(alloc); held[derived] != "" {
+		if derived := handlers.EC2DeriveEIP(alloc); held[derived] != "" {
 			clashed = derived
 			assert.NotEqual(t, derived, ip, "%s derives %s, which %s holds", alloc, derived, held[derived])
 		}
@@ -1657,4 +1658,178 @@ func TestRegressionDescribeAvailabilityZonesAnswered(t *testing.T) {
 	srv := newTestServerForRegression(t)
 	assert.Equal(t, []string{"eu-west-2a", "eu-west-2b", "eu-west-2c"},
 		zoneNames(describeZones(t, srv, "eu-west-2", zoneFilter("state", "available"))))
+}
+
+// TestRegressionDescribeRouteTablesUnreadableRowsIs500: DescribeRouteTables
+// dropped the errors of its route and association reads, so a storage
+// failure answered 200 with route tables that had no routes or
+// associations. Each answers EC2's 500 now, never a routeTableSet.
+func TestRegressionDescribeRouteTablesUnreadableRowsIs500(t *testing.T) {
+	for _, table := range []string{"ec2_routes", "ec2_route_table_associations"} {
+		t.Run(table, func(t *testing.T) {
+			app, srv := newTestApp(t, ":memory:")
+			createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {tagVPC(t, srv)}})
+			_, err := app.Repository().DB().Exec(`DROP TABLE ` + table)
+			require.NoError(t, err)
+
+			resp, body := ec2Call(t, srv, tagRegion, "DescribeRouteTables", nil)
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "%s", body)
+			assert.Equal(t, "InternalFailure", extractEC2Tag(body, "Code"), "%s", body)
+			assert.NotContains(t, string(body), "routeTableSet")
+		})
+	}
+}
+
+// TestRegressionDescribeSubnetsUnknownIDNotFound: an unknown SubnetId.N
+// answered 200 with an empty subnetSet. It is 400
+// InvalidSubnetID.NotFound naming the id, as for VpcId.N.
+func TestRegressionDescribeSubnetsUnknownIDNotFound(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	subnet := createOK(t, srv, "CreateSubnet", "subnetId", url.Values{"VpcId": {tagVPC(t, srv)}, "CidrBlock": {"10.0.1.0/24"}})
+	for _, params := range []url.Values{
+		{"SubnetId.1": {"subnet-absent"}},
+		{"SubnetId.1": {subnet}, "SubnetId.2": {"subnet-absent"}},
+	} {
+		resp, body := ec2Call(t, srv, tagRegion, "DescribeSubnets", params)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%v: %s", params, body)
+		assert.Equal(t, "InvalidSubnetID.NotFound", extractEC2Tag(body, "Code"), "%v", params)
+		assert.Equal(t, "The subnet ID 'subnet-absent' does not exist", html.UnescapeString(extractEC2Tag(body, "Message")), "%v", params)
+	}
+	resp, body := ec2Call(t, srv, "eu-west-2", "DescribeSubnets", url.Values{"SubnetId.1": {subnet}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "another region's subnet: %s", body)
+}
+
+// TestRegressionDescribeRepeatedIDAnswersOnce: a Describe that looks
+// each id up answered it once per time the request named it, so
+// VpcId.1=VpcId.2=<id> returned that VPC twice. AWS answers it once.
+func TestRegressionDescribeRepeatedIDAnswersOnce(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	n, vpc := filteredNet(t, srv, tagRegion, "1")
+	inst := runInstance(t, srv, tagRegion, topLevelParams(n.subnet, n.sgs))
+	x, _ := describeInstance(t, srv, tagRegion, inst)
+	key := createOK(t, srv, "ImportKeyPair", "keyPairId", url.Values{"KeyName": {"twice"}, "PublicKeyMaterial": {"ssh-ed25519 AAAAtwice"}})
+
+	for _, c := range []struct {
+		action, param, id string
+		got               func(describedIDs) []string
+	}{
+		{"DescribeVpcs", "VpcId", vpc, func(d describedIDs) []string { return d.Vpcs }},
+		{"DescribeSubnets", "SubnetId", n.subnet, func(d describedIDs) []string { return d.Subnets }},
+		{"DescribeInternetGateways", "InternetGatewayId", createOK(t, srv, "CreateInternetGateway", "internetGatewayId", nil),
+			func(d describedIDs) []string { return d.Gateways }},
+		{"DescribeRouteTables", "RouteTableId", createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {vpc}}),
+			func(d describedIDs) []string { return d.RouteTables }},
+		{"DescribeSecurityGroups", "GroupId", n.sgs[0], func(d describedIDs) []string { return d.SecurityGroups }},
+		{"DescribeAddresses", "AllocationId", createOK(t, srv, "AllocateAddress", "allocationId", url.Values{"Domain": {"vpc"}}),
+			func(d describedIDs) []string { return d.Addresses }},
+		{"DescribeInstances", "InstanceId", inst, func(d describedIDs) []string { return d.Instances }},
+		{"DescribeNetworkInterfaces", "NetworkInterfaceId", x.ENIs[0].ID, func(d describedIDs) []string { return d.NetworkInterfaces }},
+		{"DescribeKeyPairs", "KeyPairId", key, func(d describedIDs) []string { return d.KeyPairs }},
+		{"DescribeImages", "ImageId", "ami-0abcd1234", func(d describedIDs) []string { return d.Images }},
+		{"DescribeInstanceTypes", "InstanceType", "t3.micro", func(d describedIDs) []string { return d.InstanceTypes }},
+	} {
+		params := url.Values{c.param + ".1": {c.id}, c.param + ".2": {c.id}}
+		assert.Equal(t, []string{c.id}, c.got(describeIDs(t, srv, c.action, params)), c.action)
+	}
+}
+
+// TestRegressionRunInstancesKeyNameRoundTrips: RunInstances dropped
+// KeyName, so DescribeInstances answered no keyName and key_name
+// planned a change on every refresh. It is stored and answered, and a
+// key pair the region does not have is 400 InvalidKeyPair.NotFound.
+//
+// UNVERIFIED(aws-code): InvalidKeyPair.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func TestRegressionRunInstancesKeyNameRoundTrips(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	n := newInstanceNet(t, srv, tagRegion, "10.0.0.0/16", "10.0.1.0/24")
+	createOK(t, srv, "ImportKeyPair", "keyPairId", url.Values{"KeyName": {"deploy"}, "PublicKeyMaterial": {"ssh-ed25519 AAAAdeploy"}})
+	launch := topLevelParams(n.subnet, n.sgs)
+	launch.Set("KeyName", "deploy")
+	_, body := describeInstance(t, srv, tagRegion, runInstance(t, srv, tagRegion, launch))
+	assert.Equal(t, "deploy", extractEC2Tag([]byte(body), "keyName"), "%s", body)
+	_, body = describeInstance(t, srv, tagRegion, runInstance(t, srv, tagRegion, topLevelParams(n.subnet, n.sgs)))
+	assert.NotContains(t, body, "<keyName>", "launched without a key")
+
+	launch.Set("KeyName", "absent")
+	resp, raw := ec2Call(t, srv, tagRegion, "RunInstances", launch)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", raw)
+	assert.Equal(t, "InvalidKeyPair.NotFound", extractEC2Tag(raw, "Code"))
+	assert.Equal(t, "The key pair 'absent' does not exist", html.UnescapeString(extractEC2Tag(raw, "Message")))
+	assert.Len(t, describeIDs(t, srv, "DescribeInstances", nil).Instances, 2, "nothing launched")
+}
+
+// TestRegressionDescribeKeyPairsIncludePublicKey: DescribeKeyPairs
+// refused IncludePublicKey (data.aws_key_pair's include_public_key)
+// with 501 though every row has the key. true answers it; false or
+// none leaves it out; any other value is 400 InvalidParameterValue.
+//
+// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func TestRegressionDescribeKeyPairsIncludePublicKey(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	const material = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIinclude"
+	createOK(t, srv, "ImportKeyPair", "keyPairId", url.Values{"KeyName": {"include"}, "PublicKeyMaterial": {material}})
+	for include, want := range map[string]string{"true": material, "false": "", "": ""} {
+		params := url.Values{"KeyName.1": {"include"}}
+		if include != "" {
+			params.Set("IncludePublicKey", include)
+		}
+		body := mustOK(t)(ec2Call(t, srv, tagRegion, "DescribeKeyPairs", params))
+		assert.Equal(t, want, extractEC2Tag(body, "publicKey"), "IncludePublicKey=%q: %s", include, body)
+	}
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeKeyPairs", url.Values{"IncludePublicKey": {"True"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"))
+}
+
+// TestRegressionTerminatedInstanceMatchesNoNetworkFilter: a terminated
+// instance still answered its subnetId, and vpc-id was read off that
+// subnet, so it matched vpc-id and subnet-id filters as a running one.
+// AWS answers neither once the instance's network interface is gone.
+func TestRegressionTerminatedInstanceMatchesNoNetworkFilter(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	n, vpc := filteredNet(t, srv, tagRegion, "1")
+	id := runInstance(t, srv, tagRegion, topLevelParams(n.subnet, n.sgs))
+	for _, kv := range [][]string{{"vpc-id", vpc}, {"subnet-id", n.subnet}} {
+		require.Equal(t, []string{id}, describeIDs(t, srv, "DescribeInstances", ec2FilterParams(kv...)).Instances, "running: %v", kv)
+	}
+	mustOK(t)(ec2Call(t, srv, tagRegion, "TerminateInstances", url.Values{"InstanceId.1": {id}}))
+	for _, kv := range [][]string{{"vpc-id", vpc}, {"subnet-id", n.subnet}} {
+		assert.Empty(t, describeIDs(t, srv, "DescribeInstances", ec2FilterParams(kv...)).Instances, "terminated: %v", kv)
+	}
+	body := mustOK(t)(ec2Call(t, srv, tagRegion, "DescribeInstances", url.Values{"InstanceId.1": {id}}))
+	assert.NotContains(t, string(body), "<subnetId>", "%s", body)
+}
+
+// TestRegressionInstancePublicIPNeverAnEIP: a launch's public IP was
+// derived into 203.0.113.0/24, the Elastic IPs' /24, by a one-byte
+// hash, and never checked, so it could equal an address's IP or
+// another instance's, and ip-address selected two instances. It comes
+// from 192.0.2.0/24 now, stepping past one another ENI holds. The test
+// holds all 256 address IPs and launches until an instance derives an
+// IP another holds (all but certain within 200; about 20 on average).
+func TestRegressionInstancePublicIPNeverAnEIP(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	eips := map[string]bool{}
+	for range 256 {
+		body := mustOK(t)(ec2Call(t, srv, tagRegion, "AllocateAddress", url.Values{"Domain": {"vpc"}}))
+		eips[extractEC2Tag(body, "publicIp")] = true
+	}
+	require.Len(t, eips, 256)
+
+	n := newInstanceNet(t, srv, tagRegion, "10.0.0.0/16", "10.0.1.0/24")
+	held := map[string]string{} // public IP → instance id
+	clashed := ""
+	for len(held) < 200 && clashed == "" {
+		id := runInstance(t, srv, tagRegion, nicParams(n.subnet, n.sgs[:1], true))
+		x, _ := describeInstance(t, srv, tagRegion, id)
+		require.NotEmpty(t, x.IpAddress, "%s has no public IP", id)
+		require.False(t, eips[x.IpAddress], "%s holds an address's IP %s", id, x.IpAddress)
+		if derived := handlers.EC2DeriveAutoIP(x.ENIs[0].ID); held[derived] != "" {
+			clashed = derived
+		}
+		require.Empty(t, held[x.IpAddress], "%s and %s hold %s", id, held[x.IpAddress], x.IpAddress)
+		held[x.IpAddress] = id
+	}
+	require.NotEmpty(t, clashed, "no launch derived a held IP")
+	assert.Equal(t, []string{held[clashed]}, describeIDs(t, srv, "DescribeInstances", ec2FilterParams("ip-address", clashed)).Instances)
 }

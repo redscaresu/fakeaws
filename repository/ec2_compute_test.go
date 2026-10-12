@@ -412,3 +412,41 @@ func TestAssociateEIPGuardIsInTheWrite(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got.AssociationID, "second address left unassociated")
 }
+
+// TestClaimPublicIPStepsPastAHeldIP: two launches can derive one
+// auto-assigned public IP, so CreateInstance takes the next one no other
+// ENI in the region holds, and DisassociateEIP does the same when it
+// gives an ENI an auto-assigned IP back.
+func TestClaimPublicIPStepsPastAHeldIP(t *testing.T) {
+	r := setupRepo(t)
+	_, subnetID := setupVPCSubnet(t, r)
+	launch := func(id string) *EC2NetworkInterface {
+		t.Helper()
+		eni := &EC2NetworkInterface{ID: "eni-" + id, PublicIP: "192.0.2.7", AutoPublicIP: true}
+		require.NoError(t, r.CreateInstance(testAccount, &EC2Instance{
+			ID: "i-" + id, SubnetID: subnetID, AMIID: "ami-1", InstanceType: "t3.micro",
+			Region: testRegion, ARN: "arn", State: "running", CreatedAt: "t",
+		}, eni))
+		got, err := r.GetNetworkInterface(testAccount, testRegion, eni.ID)
+		require.NoError(t, err)
+		assert.Equal(t, eni.PublicIP, got.PublicIP, "%s: stored IP is the one set on eni", id)
+		return got
+	}
+	a := launch("a")
+	assert.Equal(t, "192.0.2.7", a.PublicIP)
+	assert.Equal(t, "192.0.2.8", launch("b").PublicIP, "held: next one")
+
+	eip := &EC2EIP{AllocationID: "eipalloc-1", Domain: "vpc", PublicIP: "203.0.113.7", Region: testRegion, CreatedAt: "t"}
+	require.NoError(t, r.CreateEIP(testAccount, eip))
+	eip.AssociationID, eip.InstanceID, eip.NetworkInterfaceID = "eipassoc-1", a.InstanceID, a.ID
+	a.PublicIP = eip.PublicIP
+	require.NoError(t, r.AssociateEIP(testAccount, eip, a))
+	assert.Equal(t, "192.0.2.7", launch("c").PublicIP, "freed when a took the address")
+
+	eip.AssociationID, eip.InstanceID, eip.NetworkInterfaceID = "", "", ""
+	a.PublicIP = "192.0.2.7"
+	require.NoError(t, r.DisassociateEIP(testAccount, eip, a))
+	got, err := r.GetNetworkInterface(testAccount, testRegion, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "192.0.2.9", got.PublicIP, ".7 and .8 are held")
+}

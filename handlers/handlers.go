@@ -126,9 +126,10 @@ func NewApplication(opts Options) (*Application, error) {
 }
 
 // boot stores opts' identity when one is set, then, unless the
-// database is loaded, seeds the AMI fixture set under the stored
+// database is loaded, gives each VPC stored without one its default
+// security group and seeds the AMI fixture set under the stored
 // account in every "common" region. This is safe to run on every boot
-// — repository.SeedAMI is idempotent.
+// — both are idempotent.
 func (app *Application) boot(opts Options) error {
 	if opts.AccountID != "" {
 		if err := app.setIdentity(repository.Identity{AccountID: opts.AccountID, Region: opts.Region}); err != nil {
@@ -138,6 +139,9 @@ func (app *Application) boot(opts Options) error {
 	account, err := app.AccountID()
 	if err != nil {
 		return err
+	}
+	if err := app.backfillDefaultGroups(); err != nil {
+		return fmt.Errorf("backfill default security groups: %w", err)
 	}
 	loaded, err := app.repo.Loaded()
 	if err != nil {
