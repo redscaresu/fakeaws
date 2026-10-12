@@ -35,8 +35,8 @@ var SSMOperations = ssmOperations
 // For ssm_test.go's check of the DescribeParameters ARN.
 var SSMParameterMetadata = ssmParameterMetadata
 
-// The test-only loaders, the only ones registered until the per-type
-// loader files land. Each writes under the envelope's account and region.
+// The test-only loaders, registered beside the per-type loader files'
+// (handlers/load_<service>.go) under the service fakeaws-test. Each writes under the envelope's account and region.
 // A body is XML: one holding items has the root <Action>Response, as its
 // render answers (GetVpcs's is JSON), and one holding none is a root
 // element whose text the loader reads (bodyText). PutSubnet is

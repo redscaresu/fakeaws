@@ -254,7 +254,7 @@ func (app *Application) gatherIAMStateReal(account string) (map[string]any, erro
 		// per-account view and shouldn't count toward the
 		// infrafactory countOrphans gate that fires on non-empty
 		// collections after destroy. (Ticket B closeout.)
-		if strings.HasPrefix(p.ARN, "arn:aws:iam::aws:policy/") {
+		if strings.HasPrefix(p.ARN, iamAWSManagedPolicyPrefix) {
 			continue
 		}
 		pOut = append(pOut, map[string]any{
@@ -328,14 +328,21 @@ func (app *Application) gatherIAMStateReal(account string) (map[string]any, erro
 // terraform-provider-aws's parser doesn't complain. It has no XMLName:
 // one would override the list's <member> element name.
 type iamRoleXML struct {
-	RoleName                 string      `xml:"RoleName"`
-	Path                     string      `xml:"Path"`
-	Arn                      string      `xml:"Arn"`
-	AssumeRolePolicyDocument string      `xml:"AssumeRolePolicyDocument,omitempty"`
-	Description              string      `xml:"Description,omitempty"`
-	MaxSessionDuration       int         `xml:"MaxSessionDuration,omitempty"`
-	CreateDate               string      `xml:"CreateDate"`
-	Tags                     []iamTagXML `xml:"Tags>member,omitempty"`
+	RoleName                 string                     `xml:"RoleName"`
+	Path                     string                     `xml:"Path"`
+	Arn                      string                     `xml:"Arn"`
+	RoleId                   string                     `xml:"RoleId,omitempty"`
+	AssumeRolePolicyDocument string                     `xml:"AssumeRolePolicyDocument,omitempty"`
+	Description              string                     `xml:"Description,omitempty"`
+	MaxSessionDuration       int                        `xml:"MaxSessionDuration,omitempty"`
+	PermissionsBoundary      *iamPermissionsBoundaryXML `xml:"PermissionsBoundary"`
+	CreateDate               string                     `xml:"CreateDate"`
+	Tags                     []iamTagXML                `xml:"Tags>member,omitempty"`
+}
+
+type iamPermissionsBoundaryXML struct {
+	PermissionsBoundaryType string `xml:"PermissionsBoundaryType"`
+	PermissionsBoundaryArn  string `xml:"PermissionsBoundaryArn"`
 }
 
 // iamRoleResult is the CreateRole and GetRole payload.
@@ -344,15 +351,32 @@ type iamRoleResult struct {
 }
 
 func roleToXML(r *repository.IAMRole) iamRoleXML {
-	return iamRoleXML{
+	out := iamRoleXML{
 		RoleName:                 r.Name,
 		Path:                     pathOrSlash(r.Path),
 		Arn:                      r.ARN,
+		RoleId:                   r.RoleID,
 		AssumeRolePolicyDocument: urlEscapeIfNotEmpty(r.AssumeRolePolicyDocument),
 		Description:              r.Description,
 		MaxSessionDuration:       r.MaxSessionDuration,
 		CreateDate:               r.CreatedAt,
 	}
+	if b := r.PermissionsBoundary; b != nil {
+		out.PermissionsBoundary = &iamPermissionsBoundaryXML{PermissionsBoundaryType: b.Type, PermissionsBoundaryArn: b.ARN}
+	}
+	return out
+}
+
+// iamProfileRoleXML is a role as an instance profile's Roles answers
+// it: the IAM API reference's ListInstanceProfilesForRole example holds
+// no Description, MaxSessionDuration, PermissionsBoundary or Tags.
+type iamProfileRoleXML struct {
+	RoleName                 string `xml:"RoleName"`
+	Path                     string `xml:"Path"`
+	Arn                      string `xml:"Arn"`
+	RoleId                   string `xml:"RoleId,omitempty"`
+	AssumeRolePolicyDocument string `xml:"AssumeRolePolicyDocument,omitempty"`
+	CreateDate               string `xml:"CreateDate"`
 }
 
 func (app *Application) iamCreateRole(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
@@ -414,7 +438,11 @@ func (app *Application) iamListRoles(w http.ResponseWriter, account string, req 
 	}
 	out := iamListRolesResult{Roles: make([]iamRoleXML, 0, len(roles))}
 	for _, r := range roles {
-		out.Roles = append(out.Roles, roleToXML(r))
+		// ListRoles never answers a role's permissions boundary (IAM API
+		// reference, ListRoles).
+		x := roleToXML(r)
+		x.PermissionsBoundary = nil
+		out.Roles = append(out.Roles, x)
 	}
 	awsproto.WriteQueryRPCResponse(w, "ListRoles", &out)
 }
@@ -634,12 +662,13 @@ func (app *Application) iamDeletePolicy(w http.ResponseWriter, account string, r
 // iamInstanceProfileXML has no XMLName, like iamRoleXML: it is also a
 // list <member>.
 type iamInstanceProfileXML struct {
-	InstanceProfileName string       `xml:"InstanceProfileName"`
-	Path                string       `xml:"Path"`
-	Arn                 string       `xml:"Arn"`
-	CreateDate          string       `xml:"CreateDate"`
-	Roles               []iamRoleXML `xml:"Roles>member,omitempty"`
-	Tags                []iamTagXML  `xml:"Tags>member,omitempty"`
+	InstanceProfileName string              `xml:"InstanceProfileName"`
+	InstanceProfileId   string              `xml:"InstanceProfileId,omitempty"`
+	Path                string              `xml:"Path"`
+	Arn                 string              `xml:"Arn"`
+	CreateDate          string              `xml:"CreateDate"`
+	Roles               []iamProfileRoleXML `xml:"Roles>member,omitempty"`
+	Tags                []iamTagXML         `xml:"Tags>member,omitempty"`
 }
 
 // iamInstanceProfileResult is the CreateInstanceProfile and
@@ -651,12 +680,17 @@ type iamInstanceProfileResult struct {
 func instanceProfileToXML(p *repository.IAMInstanceProfile, attached *repository.IAMRole) iamInstanceProfileXML {
 	out := iamInstanceProfileXML{
 		InstanceProfileName: p.Name,
+		InstanceProfileId:   p.ID,
 		Path:                pathOrSlash(p.Path),
 		Arn:                 p.ARN,
 		CreateDate:          p.CreatedAt,
 	}
 	if attached != nil {
-		out.Roles = []iamRoleXML{roleToXML(attached)}
+		r := roleToXML(attached)
+		out.Roles = []iamProfileRoleXML{{
+			RoleName: r.RoleName, Path: r.Path, Arn: r.Arn, RoleId: r.RoleId,
+			AssumeRolePolicyDocument: r.AssumeRolePolicyDocument, CreateDate: r.CreateDate,
+		}}
 	}
 	return out
 }
@@ -1056,7 +1090,7 @@ func (app *Application) iamAttachRolePolicy(w http.ResponseWriter, account strin
 	// customer-created policies, so a managed-ARN attach fails 404
 	// even though it's legal usage. Lazy-seed the managed policy
 	// here on first reference.
-	if strings.HasPrefix(policyARN, "arn:aws:iam::aws:policy/") {
+	if strings.HasPrefix(policyARN, iamAWSManagedPolicyPrefix) {
 		_ = app.repo.SeedManagedPolicy(account, policyARN)
 	}
 	if err := app.repo.AttachRolePolicy(account, roleName, policyARN); err != nil {
@@ -1074,7 +1108,7 @@ func (app *Application) iamAttachRolePolicy(w http.ResponseWriter, account strin
 func (app *Application) iamAttachUserPolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	user := req.Params.Get("UserName")
 	policyARN := req.Params.Get("PolicyArn")
-	if strings.HasPrefix(policyARN, "arn:aws:iam::aws:policy/") {
+	if strings.HasPrefix(policyARN, iamAWSManagedPolicyPrefix) {
 		_ = app.repo.SeedManagedPolicy(account, policyARN)
 	}
 	if err := app.repo.AttachUserPolicy(account, user, policyARN); err != nil {
@@ -1233,12 +1267,7 @@ func (app *Application) iamListAttachedRolePolicies(w http.ResponseWriter, accou
 	}
 	members := make([]iamAttachedPolicy, 0, len(arns))
 	for _, arn := range arns {
-		// Pull the policy name out of the ARN (last segment after '/').
-		name := arn
-		if i := strings.LastIndex(arn, "/"); i >= 0 {
-			name = arn[i+1:]
-		}
-		members = append(members, iamAttachedPolicy{PolicyName: name, PolicyArn: arn})
+		members = append(members, iamAttachedPolicyOf(arn))
 	}
 	out := iamListAttachedRolePoliciesResult{AttachedPolicies: members}
 	awsproto.WriteQueryRPCResponse(w, "ListAttachedRolePolicies", &out)
@@ -1276,6 +1305,12 @@ type iamListAccessKeysResult struct {
 type iamAttachedPolicy struct {
 	PolicyName string `xml:"PolicyName"`
 	PolicyArn  string `xml:"PolicyArn"`
+}
+
+// iamAttachedPolicyOf is arn as an attached-policy list answers it, its
+// name the ARN's last segment.
+func iamAttachedPolicyOf(arn string) iamAttachedPolicy {
+	return iamAttachedPolicy{PolicyName: arn[strings.LastIndex(arn, "/")+1:], PolicyArn: arn}
 }
 
 type iamListAttachedRolePoliciesResult struct {
@@ -1402,6 +1437,9 @@ type iamListInstanceProfilesForRoleResult struct {
 }
 
 // ----- helpers -----
+
+// iamAWSManagedPolicyPrefix begins every AWS-managed policy's ARN.
+const iamAWSManagedPolicyPrefix = "arn:aws:iam::aws:policy/"
 
 var (
 	// errIAMNotModelled is an IAM action fakeaws does not model.

@@ -170,6 +170,16 @@ type IAMRole struct {
 	Tags                     map[string]string `json:"tags,omitempty"`
 	CreatedAt                string            `json:"created_at"`
 	Extra                    map[string]any    `json:"extra,omitempty"` // for forward-compat
+	// RoleID and PermissionsBoundary are what a load recorded; a
+	// created role has neither.
+	RoleID              string                  `json:"role_id,omitempty"`
+	PermissionsBoundary *IAMPermissionsBoundary `json:"permissions_boundary,omitempty"`
+}
+
+// IAMPermissionsBoundary is a role's permissions boundary.
+type IAMPermissionsBoundary struct {
+	Type string `json:"type"`
+	ARN  string `json:"arn"`
 }
 
 // IAMPolicy mirrors iam_policies.data.
@@ -191,6 +201,7 @@ type IAMInstanceProfile struct {
 	ARN          string `json:"arn"`
 	AttachedRole string `json:"attached_role,omitempty"`
 	CreatedAt    string `json:"created_at"`
+	ID           string `json:"instance_profile_id,omitempty"` // a load's recorded id; a created profile has none
 }
 
 // IAMUser mirrors iam_users.data.
@@ -218,18 +229,19 @@ type IAMAccessKey struct {
 // duplicate with EntityAlreadyExists; we collapse to ErrConflict and
 // let the handler emit the AWS-spec code).
 func (r *Repository) CreateRole(account string, role *IAMRole) error {
+	return mapInsertError(insertRole(r.db, account, role))
+}
+
+func insertRole(ex execer, account string, role *IAMRole) error {
 	body, err := json.Marshal(role)
 	if err != nil {
 		return fmt.Errorf("marshal role: %w", err)
 	}
-	_, err = r.db.Exec(
+	_, err = ex.Exec(
 		`INSERT INTO iam_roles (account_id, name, path, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		account, role.Name, role.Path, role.ARN, string(body), role.CreatedAt,
 	)
-	if err != nil {
-		return mapInsertError(err)
-	}
-	return nil
+	return err
 }
 
 // GetRole returns the typed role or models.ErrNotFound.
@@ -421,15 +433,16 @@ func (r *Repository) DeletePolicy(account, name string) error {
 // ----- Instance Profiles -----
 
 func (r *Repository) CreateInstanceProfile(account string, p *IAMInstanceProfile) error {
+	return mapInsertError(insertInstanceProfile(r.db, account, p))
+}
+
+func insertInstanceProfile(ex execer, account string, p *IAMInstanceProfile) error {
 	body, _ := json.Marshal(p)
-	_, err := r.db.Exec(
+	_, err := ex.Exec(
 		`INSERT INTO iam_instance_profiles (account_id, name, path, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		account, p.Name, p.Path, p.ARN, string(body), p.CreatedAt,
 	)
-	if err != nil {
-		return mapInsertError(err)
-	}
-	return nil
+	return err
 }
 
 // instanceProfileSelect reads a profile with its attached role, if any
