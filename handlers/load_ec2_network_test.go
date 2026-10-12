@@ -340,7 +340,7 @@ func TestLoadEC2Network_CreatedAfterLoadAnswerAsBefore(t *testing.T) {
 
 // TestLoadEC2Network_CurrentShapeLoads plants what a current answer
 // carries beyond the API reference's examples: Block Public Access
-// states, IPv6 blocks with their source and address attribute, CIDR
+// states, a VPC's encryption control, IPv6 blocks with their source and address attribute, CIDR
 // state messages, a subnet's type and every optional subnet field, and
 // a zone's messages. Each loads, modelled or ignored, and answers as
 // recorded.
@@ -351,9 +351,11 @@ func TestLoadEC2Network_CurrentShapeLoads(t *testing.T) {
 		"<cidrBlockAssociationSet><item><cidrBlock>10.0.0.0/16</cidrBlock><associationId>vpc-cidr-assoc-0now</associationId>" +
 		"<cidrBlockState><state>associated</state><statusMessage>ok</statusMessage></cidrBlockState></item></cidrBlockAssociationSet>" +
 		"<ipv6CidrBlockAssociationSet><item><ipv6CidrBlock>2600:1f14:abc:de00::/56</ipv6CidrBlock><associationId>vpc-cidr-assoc-0v6</associationId>" +
-		"<ipv6CidrBlockState><state>associated</state></ipv6CidrBlockState><networkBorderGroup>us-west-2</networkBorderGroup>" +
+		"<ipv6CidrBlockState><state>associated</state><statusMessage>ok</statusMessage></ipv6CidrBlockState><networkBorderGroup>us-west-2</networkBorderGroup>" +
 		"<ipv6Pool>Amazon</ipv6Pool><ipSource>amazon</ipSource><ipv6AddressAttribute>public</ipv6AddressAttribute></item></ipv6CidrBlockAssociationSet>" +
-		"<dhcpOptionsId>dopt-0now</dhcpOptionsId><instanceTenancy>default</instanceTenancy><isDefault>false</isDefault>" + bpa + "</item>"
+		"<dhcpOptionsId>dopt-0now</dhcpOptionsId><instanceTenancy>default</instanceTenancy><isDefault>false</isDefault>" + bpa +
+		"<encryptionControl><vpcId>vpc-0now</vpcId><vpcEncryptionControlId>vpcec-0now</vpcEncryptionControlId><mode>monitor</mode>" +
+		"<state>available</state></encryptionControl></item>"
 	subnet := netSubnet("subnet-0now", "vpc-0now", "<availabilityZoneId>usw2-az1</availabilityZoneId>"+
 		"<mapCustomerOwnedIpOnLaunch>false</mapCustomerOwnedIpOnLaunch><enableDns64>false</enableDns64><ipv6Native>false</ipv6Native>"+
 		"<enableLniAtDeviceIndex>1</enableLniAtDeviceIndex><customerOwnedIpv4Pool>ipv4pool-coip-0now</customerOwnedIpv4Pool>"+

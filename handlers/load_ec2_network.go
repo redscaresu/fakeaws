@@ -43,13 +43,15 @@ func init() {
 	registerLoader(ec2Paged(loader{key: LoadKey{"ec2", "DescribeInternetGateways"}, table: "ec2_internet_gateways",
 		decode: decodeIgws, render: renderIgws}))
 	// Elements a current answer carries that the provider never reads:
-	// VPC Block Public Access states (2024), a subnet's type (EVS), a
+	// VPC Block Public Access states (2024), VPC encryption controls, a
+	// subnet's type (EVS), a
 	// subnet IPv6 block's source and address attribute (only
 	// aws_vpc_ipv6_cidr_block_association reads them, from the VPC's
 	// block), and a zone's long name, geography and messages.
 	vpcs, subnets, zones := LoadKey{"ec2", "DescribeVpcs"}, LoadKey{"ec2", "DescribeSubnets"}, LoadKey{"ec2", "DescribeAvailabilityZones"}
 	registerIgnores(
 		IgnoreEntry{Key: vpcs, Path: "vpcSet/item/blockPublicAccessStates", Cite: vpcCite},
+		IgnoreEntry{Key: vpcs, Path: "vpcSet/item/encryptionControl", Cite: vpcCite},
 		IgnoreEntry{Key: subnets, Path: "subnetSet/item/blockPublicAccessStates", Cite: subnetCite},
 		IgnoreEntry{Key: subnets, Path: "subnetSet/item/type", Cite: subnetCite},
 		IgnoreEntry{Key: subnets, Path: "subnetSet/item/ipv6CidrBlockAssociationSet/item/ipSource", Cite: subnetCite},
