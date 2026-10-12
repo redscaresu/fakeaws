@@ -674,14 +674,17 @@ func (app *Application) gatherRoute53StateReal(account string) (map[string]any, 
 	zOut := make([]map[string]any, 0, len(zones))
 	rsOut := []map[string]any{}
 	for _, z := range zones {
+		rsets, err := app.repo.ListRecordSets(account, z.ID)
+		if errors.Is(err, models.ErrNotFound) {
+			continue // deleted since the list
+		}
+		if err != nil {
+			return nil, err
+		}
 		zOut = append(zOut, map[string]any{
 			"id": z.ID, "name": z.Name, "comment": z.Comment, "private": z.Private,
 			"arn": z.ARN,
 		})
-		rsets, err := app.repo.ListRecordSets(account, z.ID)
-		if err != nil {
-			return nil, err
-		}
 		for _, rs := range rsets {
 			// Skip the auto-seeded NS + SOA at the apex — they
 			// inflate user-record counts that scenarios assert against.
@@ -700,11 +703,10 @@ func (app *Application) gatherRoute53StateReal(account string) (map[string]any, 
 			// identity checks can see the alias contract.
 			if rs.AliasTarget != "" {
 				var alias any
-				if err := json.Unmarshal([]byte(rs.AliasTarget), &alias); err == nil {
-					entry["alias_target"] = alias
-				} else {
-					entry["alias_target"] = rs.AliasTarget
+				if err := json.Unmarshal([]byte(rs.AliasTarget), &alias); err != nil {
+					return nil, fmt.Errorf("record set %s %s alias_target: %w", rs.Name, rs.Type, err)
 				}
+				entry["alias_target"] = alias
 			}
 			rsOut = append(rsOut, entry)
 		}

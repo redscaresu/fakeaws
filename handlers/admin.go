@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -468,9 +469,12 @@ func (app *Application) writeState(w http.ResponseWriter, service string) {
 // its block, or its first failed read, never a partial block: a table
 // that fails to read must not look empty to an orphan check. A child
 // table is read per parent row, so with no parent rows it is not read
-// and adds nothing to the block.
-// collectState stops at the first error, naming the service, so
-// /mock/state answers 500 and no state at all.
+// and adds nothing to the block. A parent a follow-up read no longer
+// finds (models.ErrNotFound) was deleted since the list and is left
+// out; any other error fails. collectState stops at the first error
+// and returns only "<service> state could not be read", so /mock/state
+// answers 500 and no state at all; the detail (SQL, table, decoder
+// text) goes to the log, never the response.
 //
 // The account is read once, before any gather, and passed to every
 // gather, so an unreadable identity is an error rather than a state no
@@ -478,7 +482,8 @@ func (app *Application) writeState(w http.ResponseWriter, service string) {
 func (app *Application) collectState(service string) (map[string]any, error) {
 	account, err := app.AccountID()
 	if err != nil {
-		return nil, err
+		log.Printf("GET /mock/state: read account: %v", err)
+		return nil, errors.New("account identity could not be read")
 	}
 	state := map[string]any{
 		"schema_version": stateSchemaVersion,
@@ -510,7 +515,8 @@ func (app *Application) collectState(service string) (map[string]any, error) {
 		}
 		block, err := g.gather(account)
 		if err != nil {
-			return nil, fmt.Errorf("read %s state: %w", g.service, err)
+			log.Printf("GET /mock/state: read %s state: %v", g.service, err)
+			return nil, fmt.Errorf("%s state could not be read", g.service)
 		}
 		state[g.service] = block
 	}

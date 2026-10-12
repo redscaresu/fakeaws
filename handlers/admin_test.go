@@ -1,22 +1,19 @@
 package handlers_test
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
-	"maps"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -67,38 +64,119 @@ func TestAdminMockState_UnknownServiceReturnsEmptyBlock(t *testing.T) {
 	assert.Contains(t, string(body), `"notreal":{}`, "expected empty block for unknown service: %s", body)
 }
 
+// stateBreak is one way to make a service's /mock/state unreadable:
+// seed rows (nil seeds nothing), then breakSQL drops a table or
+// corrupts a JSON column.
+type stateBreak struct {
+	name, service, breakSQL string
+	seed                    func(t *testing.T, app *handlers.Application, srv *httptest.Server)
+}
+
+const stateRegion = "us-east-1"
+
+// seedEKS writes an EKS cluster with one node group and one addon
+// straight to the tables, skipping the role and subnet checks.
+func seedEKS(t *testing.T, app *handlers.Application, _ *httptest.Server) {
+	for _, q := range []string{
+		`INSERT INTO eks_clusters (account_id, region, name, role_arn, arn, data, created_at)
+		 VALUES (?, 'us-east-1', 'fc', 'r', 'a', '{"name":"fc","region":"us-east-1"}', 't')`,
+		`INSERT INTO eks_node_groups (account_id, region, cluster_name, name, node_role_arn, arn, data, created_at)
+		 VALUES (?, 'us-east-1', 'fc', 'ng', 'r', 'a', '{"cluster_name":"fc","name":"ng","scaling_config":"{}"}', 't')`,
+		`INSERT INTO eks_addons (account_id, region, cluster_name, name, arn, data, created_at)
+		 VALUES (?, 'us-east-1', 'fc', 'vpc-cni', 'a', '{"cluster_name":"fc","name":"vpc-cni"}', 't')`,
+	} {
+		_, err := app.Repository().DB().Exec(q, awsproto.FakeAccountID)
+		require.NoError(t, err)
+	}
+}
+
+func seedZone(t *testing.T, srv *httptest.Server) string {
+	zone := mustOK(t)(r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest><Name>fc.example.</Name><CallerReference>fc</CallerReference></CreateHostedZoneRequest>`))
+	return strings.TrimPrefix(xmlExtract(zone, "Id"), "/hostedzone/")
+}
+
+func seedVPC(t *testing.T, srv *httptest.Server) string {
+	return extractEC2Tag(mustOK(t)(ec2Call(t, srv, stateRegion, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})), "vpcId")
+}
+
+func seedSG(t *testing.T, srv *httptest.Server) string {
+	return extractEC2Tag(mustOK(t)(ec2Call(t, srv, stateRegion, "CreateSecurityGroup", url.Values{
+		"GroupName": {"fail-closed"}, "GroupDescription": {"d"}, "VpcId": {seedVPC(t, srv)},
+	})), "groupId")
+}
+
+func seedTable(t *testing.T, srv *httptest.Server) {
+	mustOK(t)(ddbCall(t, srv, stateRegion, "CreateTable", `{"TableName":"fail-closed",
+		"AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],
+		"KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],"BillingMode":"PAY_PER_REQUEST"}`))
+}
+
 // TestAdminMockState_UnreadableTableIs500: a table that cannot be read,
-// or a stored rule or config that cannot be decoded, answers 500 naming
-// its service and carries no state, never an empty block an orphan
-// check would pass.
+// or a stored row that cannot be decoded, a child's as much as a
+// parent's, answers 500 with only "<service> state could not be read":
+// no state, and no SQL, table or decoder text, which goes to the log.
+// Never an empty block an orphan check would pass.
 func TestAdminMockState_UnreadableTableIs500(t *testing.T) {
-	const region = "us-east-1"
-	cases := []struct {
-		name, service, breakSQL string
-		setup                   func(t *testing.T, srv *httptest.Server)
-	}{
+	cases := []stateBreak{
 		{name: "iam", service: "iam", breakSQL: `DROP TABLE iam_roles`},
 		{name: "s3", service: "s3", breakSQL: `DROP TABLE s3_buckets`},
 		{name: "s3 config", service: "s3", breakSQL: `UPDATE s3_bucket_configs SET data = 'not json'`,
-			setup: func(t *testing.T, srv *httptest.Server) {
+			seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) {
 				mustOK(t)(s3Do(t, srv, http.MethodPut, "/s3/fail-closed/", "", ""))
 				mustOK(t)(s3Do(t, srv, http.MethodPut, "/s3/fail-closed/?versioning",
 					`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`, "application/xml"))
 			}},
 		{name: "ec2", service: "ec2", breakSQL: `DROP TABLE ec2_vpcs`},
 		{name: "ec2 security group rules", service: "ec2", breakSQL: `UPDATE ec2_security_groups SET ingress = 'not json'`,
-			setup: func(t *testing.T, srv *httptest.Server) {
-				vpcID := extractEC2Tag(mustOK(t)(ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})), "vpcId")
-				mustOK(t)(ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
-					"GroupName": {"fail-closed"}, "GroupDescription": {"d"}, "VpcId": {vpcID},
+			seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) { seedSG(t, srv) }},
+		{name: "ec2 routes", service: "ec2", breakSQL: `DROP TABLE ec2_routes`,
+			seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) {
+				rtbID := extractEC2Tag(mustOK(t)(ec2Call(t, srv, stateRegion, "CreateRouteTable", url.Values{"VpcId": {seedVPC(t, srv)}})), "routeTableId")
+				mustOK(t)(ec2Call(t, srv, stateRegion, "CreateRoute", url.Values{
+					"RouteTableId": {rtbID}, "DestinationCidrBlock": {"0.0.0.0/0"}, "GatewayId": {"igw-stub"},
 				}))
+			}},
+		{name: "ec2 eips", service: "ec2", breakSQL: `UPDATE ec2_eips SET data = 'not json'`,
+			seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) {
+				mustOK(t)(ec2Call(t, srv, stateRegion, "AllocateAddress", url.Values{"Domain": {"vpc"}}))
 			}},
 		{name: "rds", service: "rds", breakSQL: `DROP TABLE rds_db_instances`},
 		{name: "dynamodb", service: "dynamodb", breakSQL: `DROP TABLE dynamodb_tables`},
+		{name: "dynamodb items", service: "dynamodb", breakSQL: `UPDATE dynamodb_items SET item = 'not json'`,
+			seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) {
+				seedTable(t, srv)
+				mustOK(t)(ddbCall(t, srv, stateRegion, "PutItem", `{"TableName":"fail-closed","Item":{"id":{"S":"a"}}}`))
+			}},
 		{name: "eks", service: "eks", breakSQL: `DROP TABLE eks_clusters`},
+		{name: "eks node groups", service: "eks", breakSQL: `UPDATE eks_node_groups SET data = 'not json'`, seed: seedEKS},
+		{name: "eks scaling config", service: "eks", breakSQL: `UPDATE eks_node_groups SET data = json_set(data, '$.scaling_config', 'not json')`, seed: seedEKS},
+		{name: "eks addons", service: "eks", breakSQL: `UPDATE eks_addons SET data = 'not json'`, seed: seedEKS},
 		{name: "sqs", service: "sqs", breakSQL: `DROP TABLE sqs_queues`},
+		{name: "sqs messages", service: "sqs", breakSQL: `DROP TABLE sqs_messages`,
+			seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) {
+				var queue struct{ QueueUrl string }
+				require.NoError(t, json.Unmarshal(mustOK(t)(sqsCall(t, srv, "CreateQueue", `{"QueueName":"fail-closed"}`)), &queue))
+				mustOK(t)(sqsCall(t, srv, "SendMessage", `{"QueueUrl":"`+queue.QueueUrl+`","MessageBody":"x"}`))
+			}},
 		{name: "route53", service: "route53", breakSQL: `DROP TABLE route53_hosted_zones`},
+		{name: "route53 record sets", service: "route53", breakSQL: `UPDATE route53_record_sets SET records = 'not json'`,
+			seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) { seedZone(t, srv) }},
+		{name: "route53 alias target", service: "route53", breakSQL: `UPDATE route53_record_sets SET alias_target = 'not json' WHERE type = 'A'`,
+			seed: func(t *testing.T, app *handlers.Application, srv *httptest.Server) {
+				require.NoError(t, app.Repository().PutRecordSet(awsproto.FakeAccountID, &repository.Route53RecordSet{
+					ZoneID: seedZone(t, srv), Name: "www.fc.example.", Type: "A", AliasTarget: `{"DNSName":"d"}`,
+				}))
+			}},
 		{name: "secretsmanager", service: "secretsmanager", breakSQL: `DROP TABLE secretsmanager_secrets`},
+		{name: "secretsmanager tags", service: "secretsmanager", breakSQL: `UPDATE secretsmanager_secrets SET tags = 'not json'`,
+			seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) {
+				mustOK(t)(smCall(t, srv, "CreateSecret", `{"Name":"fail-closed","SecretString":"s"}`))
+			}},
+		{name: "secretsmanager versions", service: "secretsmanager", breakSQL: `UPDATE secretsmanager_versions SET stages = 'not json'`,
+			seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) {
+				mustOK(t)(smCall(t, srv, "CreateSecret", `{"Name":"fail-closed","SecretString":"s"}`))
+			}},
 		{name: "ssm", service: "ssm", breakSQL: `DROP TABLE ssm_parameters`},
 	}
 	covered := map[string]bool{}
@@ -106,20 +184,28 @@ func TestAdminMockState_UnreadableTableIs500(t *testing.T) {
 		covered[c.service] = true
 		t.Run(c.name, func(t *testing.T) {
 			app, srv := newTestApp(t, ":memory:")
-			if c.setup != nil {
-				c.setup(t, srv)
+			if c.seed != nil {
+				c.seed(t, app, srv)
 			}
-			_, err := app.Repository().DB().Exec(c.breakSQL)
+			res, err := app.Repository().DB().Exec(c.breakSQL)
 			require.NoError(t, err)
+			if strings.HasPrefix(c.breakSQL, "UPDATE") {
+				n, err := res.RowsAffected()
+				require.NoError(t, err)
+				require.Positive(t, n, "the seed left no row to corrupt")
+			}
+			var logs bytes.Buffer
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 			for _, path := range []string{"/mock/state", "/mock/state/" + c.service} {
 				resp, body := doGet(t, srv, path)
 				assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "GET %s: %s", path, body)
 				var got map[string]any
 				require.NoError(t, json.Unmarshal(body, &got), "GET %s: %s", path, body)
-				assert.Equal(t, []string{"message", "status"}, slices.Sorted(maps.Keys(got)), "GET %s: %s", path, body)
-				assert.Contains(t, got["message"], "read "+c.service+" state", "GET %s", path)
+				assert.Equal(t, map[string]any{"status": "error", "message": c.service + " state could not be read"}, got, "GET %s", path)
 			}
+			assert.Contains(t, logs.String(), "read "+c.service+" state: ", "the detail is logged")
 		})
 	}
 
@@ -133,6 +219,59 @@ func TestAdminMockState_UnreadableTableIs500(t *testing.T) {
 	}
 }
 
+// TestAdminMockState_SkipsWhatAFollowUpReadNoLongerFinds: a parent a
+// list returns but a follow-up read no longer finds (models.ErrNotFound)
+// was deleted between the two; /mock/state leaves it out and answers
+// 200. Casting the parent's key column to a BLOB stands in for that
+// delete: the list still returns the row, and no lookup by its text
+// key matches it.
+func TestAdminMockState_SkipsWhatAFollowUpReadNoLongerFinds(t *testing.T) {
+	for _, c := range []struct {
+		name, service, table, key string
+		seed                      func(t *testing.T, srv *httptest.Server) string
+	}{
+		{name: "security group rules", service: "ec2", table: "ec2_security_groups", key: "id", seed: seedSG},
+		{name: "internet gateway", service: "ec2", table: "ec2_internet_gateways", key: "id",
+			seed: func(t *testing.T, srv *httptest.Server) string {
+				return extractEC2Tag(mustOK(t)(ec2Call(t, srv, stateRegion, "CreateInternetGateway", nil)), "internetGatewayId")
+			}},
+		{name: "hosted zone", service: "route53", table: "route53_hosted_zones", key: "id", seed: seedZone},
+		{name: "dynamodb table", service: "dynamodb", table: "dynamodb_tables", key: "name",
+			seed: func(t *testing.T, srv *httptest.Server) string { seedTable(t, srv); return "fail-closed" }},
+		{name: "secret", service: "secretsmanager", table: "secretsmanager_secrets", key: "name",
+			seed: func(t *testing.T, srv *httptest.Server) string {
+				mustOK(t)(smCall(t, srv, "CreateSecret", `{"Name":"fail-closed"}`))
+				return "fail-closed"
+			}},
+		{name: "instance profile", service: "iam", table: "iam_instance_profiles", key: "name",
+			seed: func(t *testing.T, srv *httptest.Server) string {
+				mustOK(t)(iamCall(t, srv, "CreateInstanceProfile", url.Values{"InstanceProfileName": {"fail-closed"}}))
+				return "fail-closed"
+			}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			app, srv := newTestApp(t, ":memory:")
+			gone := c.seed(t, srv)
+			db := app.Repository().DB()
+			_, err := db.Exec(`PRAGMA foreign_keys = OFF`)
+			require.NoError(t, err)
+			res, err := db.Exec(`UPDATE ` + c.table + ` SET ` + c.key + ` = CAST(` + c.key + ` AS BLOB)`)
+			require.NoError(t, err)
+			n, err := res.RowsAffected()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, n)
+			_, err = db.Exec(`PRAGMA foreign_keys = ON`)
+			require.NoError(t, err)
+
+			resp, body := doGet(t, srv, "/mock/state")
+			require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+			var state map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(body, &state))
+			assert.NotContains(t, string(state[c.service]), gone)
+		})
+	}
+}
+
 // TestAdminMockState_PerServiceReadsOnlyItsTables: /mock/state/<service>
 // reads only that service's tables, so another service's unreadable
 // table leaves it 200.
@@ -143,61 +282,6 @@ func TestAdminMockState_PerServiceReadsOnlyItsTables(t *testing.T) {
 
 	resp, body := doGet(t, srv, "/mock/state/iam")
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
-}
-
-// TestStateGathersKeepReadErrors: no gather collectState calls assigns
-// anything to `_`, so none can drop a repository read error and show an
-// unreadable table as an empty block.
-func TestStateGathersKeepReadErrors(t *testing.T) {
-	fset := token.NewFileSet()
-	admin, err := parser.ParseFile(fset, "admin.go", nil, 0)
-	require.NoError(t, err)
-	declared := map[string]bool{}
-	for _, decl := range admin.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "collectState" {
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				sel, ok := n.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "app" && strings.HasPrefix(sel.Sel.Name, "gather") {
-					declared[sel.Sel.Name] = false
-				}
-				return true
-			})
-		}
-	}
-	require.NotEmpty(t, declared, "collectState calls no app.gather*")
-
-	for _, path := range globGo(t, ".", "*.go", true) {
-		f, err := parser.ParseFile(fset, path, nil, 0)
-		require.NoError(t, err)
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok {
-				continue
-			}
-			if _, ok := declared[fn.Name.Name]; !ok {
-				continue
-			}
-			declared[fn.Name.Name] = true
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				as, ok := n.(*ast.AssignStmt)
-				if !ok {
-					return true
-				}
-				for _, lhs := range as.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok && id.Name == "_" {
-						assert.Fail(t, "gather discards a value with _", "%s at %s", fn.Name.Name, fset.Position(as.Pos()))
-					}
-				}
-				return true
-			})
-		}
-	}
-	for name, found := range declared {
-		assert.True(t, found, "collectState calls %s, which no handlers file declares", name)
-	}
 }
 
 func TestAdminMockReset_OK(t *testing.T) {

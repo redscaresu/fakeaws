@@ -2360,11 +2360,16 @@ func (app *Application) instanceENIs(account string) (map[string]*repository.EC2
 	if err != nil {
 		return nil, err
 	}
+	return enisByInstance(enis), nil
+}
+
+// enisByInstance maps instance id → ENI.
+func enisByInstance(enis []*repository.EC2NetworkInterface) map[string]*repository.EC2NetworkInterface {
 	out := make(map[string]*repository.EC2NetworkInterface, len(enis))
 	for _, eni := range enis {
 		out[eni.InstanceID] = eni
 	}
-	return out, nil
+	return out
 }
 
 // ----- NetworkInterface handlers -----
@@ -3308,12 +3313,14 @@ func (app *Application) gatherEC2StateReal(account string) (map[string]any, erro
 	out["subnets"] = sOut
 
 	// Instance network fields come from the primary ENI; a terminated
-	// instance has none, so its IPs are "" and its groups [].
-	instances, err := app.repo.ListInstances(account, "")
+	// instance has none, so its IPs are "" and its groups []. ENIs are
+	// read once, so the instances and network_interfaces blocks agree.
+	allENIs, err := app.repo.ListNetworkInterfaces(account, "")
 	if err != nil {
 		return nil, err
 	}
-	enis, err := app.instanceENIs(account)
+	enis := enisByInstance(allENIs)
+	instances, err := app.repo.ListInstances(account, "")
 	if err != nil {
 		return nil, err
 	}
@@ -3340,10 +3347,6 @@ func (app *Application) gatherEC2StateReal(account string) (map[string]any, erro
 	}
 	out["instances"] = iOut
 
-	allENIs, err := app.repo.ListNetworkInterfaces(account, "")
-	if err != nil {
-		return nil, err
-	}
 	eniOut := make([]map[string]any, 0, len(allENIs))
 	for _, eni := range allENIs {
 		eniOut = append(eniOut, map[string]any{
@@ -3368,6 +3371,9 @@ func (app *Application) gatherEC2StateReal(account string) (map[string]any, erro
 	sgOut := make([]map[string]any, 0, len(sgs))
 	for _, sg := range sgs {
 		ing, eg, err := app.repo.GetSecurityGroupRules(account, sg.Region, sg.ID)
+		if errors.Is(err, models.ErrNotFound) {
+			continue // deleted since the list
+		}
 		if err != nil {
 			return nil, err
 		}

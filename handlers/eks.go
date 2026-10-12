@@ -610,11 +610,10 @@ func (app *Application) gatherEKSStateReal(account string) (map[string]any, erro
 		}
 		if ng.ScalingConfig != "" {
 			var sc any
-			if err := json.Unmarshal([]byte(ng.ScalingConfig), &sc); err == nil {
-				entry["scaling_config"] = sc
-			} else {
-				entry["scaling_config"] = ng.ScalingConfig
+			if err := json.Unmarshal([]byte(ng.ScalingConfig), &sc); err != nil {
+				return nil, fmt.Errorf("node group %s/%s scaling_config: %w", ng.ClusterName, ng.Name, err)
 			}
+			entry["scaling_config"] = sc
 		}
 		ngOut = append(ngOut, entry)
 	}

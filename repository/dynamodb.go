@@ -10,7 +10,7 @@
 // Item PK shape: tables have a hash_key (PK) and optional range_key
 // (SK). Items are stored with the canonical shape:
 //
-//   PRIMARY KEY (account_id, table_name, hash_value, range_value)
+//	PRIMARY KEY (account_id, table_name, hash_value, range_value)
 //
 // where range_value is "" (empty string) for tables with no SK —
 // keeps the primary-key tuple uniform.
@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/redscaresu/fakeaws/models"
 )
@@ -240,6 +241,9 @@ func (r *Repository) ScanDynamoDBTable(account, region, tableName string) ([]*Dy
 		var hv, rv, raw string
 		if err := rows.Scan(&hv, &rv, &raw); err != nil {
 			return nil, err
+		}
+		if !json.Valid([]byte(raw)) {
+			return nil, fmt.Errorf("table %s item %q/%q is not JSON", tableName, hv, rv)
 		}
 		out = append(out, &DynamoDBItem{
 			TableName: tableName, HashValue: hv, RangeValue: rv,

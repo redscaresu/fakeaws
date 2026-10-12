@@ -145,7 +145,9 @@ func (r *Repository) GetSecret(account, region, secretId string) (*SecretsManage
 	if err != nil {
 		return nil, err
 	}
-	_ = json.Unmarshal([]byte(tagsJSON), &s.Tags)
+	if err := json.Unmarshal([]byte(tagsJSON), &s.Tags); err != nil {
+		return nil, fmt.Errorf("secret %s tags: %w", s.Name, err)
+	}
 	return &s, nil
 }
 
@@ -196,10 +198,16 @@ func (r *Repository) ListSecrets(account, region string) ([]*SecretsManagerSecre
 		}
 		pairs = append(pairs, p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	rows.Close()
 	out := make([]*SecretsManagerSecret, 0, len(pairs))
 	for _, p := range pairs {
 		s, err := r.GetSecret(account, p.region, p.name)
+		if errors.Is(err, models.ErrNotFound) {
+			continue // deleted since the list
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -400,7 +408,9 @@ func (r *Repository) ListSecretVersions(account, region, name string) ([]*Secret
 		if err := rows.Scan(&v.VersionID, &v.SecretString, &stagesJSON, &v.CreatedAt); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(stagesJSON), &v.Stages)
+		if err := json.Unmarshal([]byte(stagesJSON), &v.Stages); err != nil {
+			return nil, fmt.Errorf("secret %s version %s stages: %w", name, v.VersionID, err)
+		}
 		out = append(out, &v)
 	}
 	return out, rows.Err()

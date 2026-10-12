@@ -563,15 +563,18 @@ func (app *Application) gatherDynamoDBStateReal(account string) (map[string]any,
 	tOut := make([]map[string]any, 0, len(tabs))
 	iOut := make([]map[string]any, 0)
 	for _, t := range tabs {
+		items, err := app.repo.ScanDynamoDBTable(account, t.Region, t.Name)
+		if errors.Is(err, models.ErrNotFound) {
+			continue // deleted since the list
+		}
+		if err != nil {
+			return nil, err
+		}
 		tOut = append(tOut, map[string]any{
 			"name": t.Name, "hash_key": t.HashKey, "range_key": t.RangeKey,
 			"billing_mode": t.BillingMode, "status": t.Status,
 			"region": t.Region, "arn": t.ARN,
 		})
-		items, err := app.repo.ScanDynamoDBTable(account, t.Region, t.Name)
-		if err != nil {
-			return nil, err
-		}
 		for _, it := range items {
 			iOut = append(iOut, map[string]any{
 				"table_name":  t.Name,

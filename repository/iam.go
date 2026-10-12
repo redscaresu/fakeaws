@@ -461,10 +461,16 @@ func (r *Repository) ListInstanceProfiles(account string) ([]*IAMInstanceProfile
 		}
 		names = append(names, n)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	rows.Close()
 	out := make([]*IAMInstanceProfile, 0, len(names))
 	for _, n := range names {
 		p, err := r.GetInstanceProfile(account, n)
+		if errors.Is(err, models.ErrNotFound) {
+			continue // deleted since the list
+		}
 		if err != nil {
 			return nil, err
 		}
