@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1318,5 +1319,25 @@ func TestRegressionDescribeLiteralNIndexRefused(t *testing.T) {
 		resp, body := ec2Call(t, srv, tagRegion, action, url.Values{key: {"x"}})
 		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s %s: %s", action, key, body)
 		assert.Equal(t, action+": not modelled by fakeaws: "+key, extractEC2Tag(body, "Message"), action)
+	}
+}
+
+// TestRegressionNetworkDescribesHonourTagFilters: DescribeVpcs and
+// DescribeInternetGateways refused every Filter.N, and DescribeSubnets
+// and DescribeRouteTables refused tag:<Key>, so infrafactory's filtered
+// read of its own run's network got 501. Each now selects by tag.
+func TestRegressionNetworkDescribesHonourTagFilters(t *testing.T) {
+	srv := newTestServerForRegression(t)
+	for _, kind := range taggedKinds {
+		if !slices.Contains([]string{"vpc", "subnet", "internet-gateway", "route-table"}, kind.resourceType) {
+			continue
+		}
+		picked := kind.create(t, srv, "Name", "picked")
+		other := kind.create(t, srv, "Name", "other")
+		action, _ := kind.describe(picked)
+		resp, body := ec2Call(t, srv, tagRegion, action, ec2FilterParams("tag:Name", "picked"))
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", action, body)
+		assert.Contains(t, string(body), picked, action)
+		assert.NotContains(t, string(body), other, action)
 	}
 }
