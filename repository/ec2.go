@@ -189,14 +189,17 @@ type EC2VPC struct {
 }
 
 // EC2CidrBlockAssociation is one CIDR block a VPC or subnet holds: an
-// IPv4 block, or an IPv6 one with, on a VPC, its pool and network
-// border group.
+// IPv4 block, or an IPv6 one with, on a VPC, its pool, network border
+// group, source and address attribute.
 type EC2CidrBlockAssociation struct {
-	AssociationID      string `json:"association_id"`
-	CidrBlock          string `json:"cidr_block"`
-	State              string `json:"state"`
-	Ipv6Pool           string `json:"ipv6_pool,omitempty"`
-	NetworkBorderGroup string `json:"network_border_group,omitempty"`
+	AssociationID        string `json:"association_id"`
+	CidrBlock            string `json:"cidr_block"`
+	State                string `json:"state"`
+	StatusMessage        string `json:"status_message,omitempty"`
+	Ipv6Pool             string `json:"ipv6_pool,omitempty"`
+	NetworkBorderGroup   string `json:"network_border_group,omitempty"`
+	IPSource             string `json:"ip_source,omitempty"`
+	Ipv6AddressAttribute string `json:"ipv6_address_attribute,omitempty"`
 }
 
 type EC2Subnet struct {

@@ -337,3 +337,42 @@ func TestLoadEC2Network_CreatedAfterLoadAnswerAsBefore(t *testing.T) {
 	assert.Equal(t, "true", vpcAttribute(t, srv, vpc, "enableDnsSupport"))
 	assert.Equal(t, "true", vpcAttribute(t, srv, vpc, "enableDnsHostnames"))
 }
+
+// TestLoadEC2Network_CurrentShapeLoads plants what a current answer
+// carries beyond the API reference's examples: Block Public Access
+// states, IPv6 blocks with their source and address attribute, CIDR
+// state messages, a subnet's type and every optional subnet field, and
+// a zone's messages. Each loads, modelled or ignored, and answers as
+// recorded.
+func TestLoadEC2Network_CurrentShapeLoads(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	const bpa = "<blockPublicAccessStates><internetGatewayBlockMode>off</internetGatewayBlockMode></blockPublicAccessStates>"
+	vpc := "<item><vpcId>vpc-0now</vpcId><ownerId>" + loadAccount + "</ownerId><state>available</state><cidrBlock>10.0.0.0/16</cidrBlock>" +
+		"<cidrBlockAssociationSet><item><cidrBlock>10.0.0.0/16</cidrBlock><associationId>vpc-cidr-assoc-0now</associationId>" +
+		"<cidrBlockState><state>associated</state><statusMessage>ok</statusMessage></cidrBlockState></item></cidrBlockAssociationSet>" +
+		"<ipv6CidrBlockAssociationSet><item><ipv6CidrBlock>2600:1f14:abc:de00::/56</ipv6CidrBlock><associationId>vpc-cidr-assoc-0v6</associationId>" +
+		"<ipv6CidrBlockState><state>associated</state></ipv6CidrBlockState><networkBorderGroup>us-west-2</networkBorderGroup>" +
+		"<ipv6Pool>Amazon</ipv6Pool><ipSource>amazon</ipSource><ipv6AddressAttribute>public</ipv6AddressAttribute></item></ipv6CidrBlockAssociationSet>" +
+		"<dhcpOptionsId>dopt-0now</dhcpOptionsId><instanceTenancy>default</instanceTenancy><isDefault>false</isDefault>" + bpa + "</item>"
+	subnet := netSubnet("subnet-0now", "vpc-0now", "<availabilityZoneId>usw2-az1</availabilityZoneId>"+
+		"<mapCustomerOwnedIpOnLaunch>false</mapCustomerOwnedIpOnLaunch><enableDns64>false</enableDns64><ipv6Native>false</ipv6Native>"+
+		"<enableLniAtDeviceIndex>1</enableLniAtDeviceIndex><customerOwnedIpv4Pool>ipv4pool-coip-0now</customerOwnedIpv4Pool>"+
+		"<outpostArn>arn:aws:outposts:us-west-2:"+loadAccount+":outpost/op-0now</outpostArn><type>Elastic VMware Service</type>"+
+		"<ipv6CidrBlockAssociationSet><item><ipv6CidrBlock>2600:1f14:abc:de00::/64</ipv6CidrBlock><associationId>subnet-cidr-assoc-0now</associationId>"+
+		"<ipv6CidrBlockState><state>associated</state><statusMessage>ok</statusMessage></ipv6CidrBlockState>"+
+		"<ipSource>amazon</ipSource><ipv6AddressAttribute>public</ipv6AddressAttribute></item></ipv6CidrBlockAssociationSet>"+
+		"<privateDnsNameOptionsOnLaunch><hostnameType>resource-name</hostnameType><enableResourceNameDnsARecord>true</enableResourceNameDnsARecord>"+
+		"<enableResourceNameDnsAAAARecord>false</enableResourceNameDnsAAAARecord></privateDnsNameOptionsOnLaunch>"+bpa)
+	zone := netRecorded{"DescribeAvailabilityZones", map[string]string{}, "<DescribeAvailabilityZonesResponse><availabilityZoneInfo><item>" +
+		"<groupName>us-west-2-zg-1</groupName><optInStatus>opt-in-not-required</optInStatus><zoneName>us-west-2a</zoneName><zoneId>usw2-az1</zoneId>" +
+		"<zoneState>available</zoneState><zoneType>availability-zone</zoneType><regionName>us-west-2</regionName>" +
+		"<messageSet><item><message>scheduled maintenance</message></item></messageSet><networkBorderGroup>us-west-2</networkBorderGroup>" +
+		"</item></availabilityZoneInfo></DescribeAvailabilityZonesResponse>"}
+	recording := append([]netRecorded{zone, netVpcs(vpc), netSubnets(subnet)}, netDNS("vpc-0now", true)...)
+	loadNet(t, srv, recording...)
+	for _, r := range recording[:3] {
+		rec, ren := diffAnswer(t, srv, r)
+		assert.Empty(t, rec, "%s: recorded only", r.action)
+		assert.Empty(t, ren, "%s: answered only", r.action)
+	}
+}

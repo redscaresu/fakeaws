@@ -245,15 +245,18 @@ type ec2VpcCidrBlockAssociationXML struct {
 }
 
 type ec2VpcCidrBlockAssociationState struct {
-	State string `xml:"state"`
+	State         string `xml:"state"`
+	StatusMessage string `xml:"statusMessage,omitempty"`
 }
 
 type ec2VpcIpv6BlockAssociationXML struct {
-	AssociationId      string                          `xml:"associationId"`
-	Ipv6CidrBlock      string                          `xml:"ipv6CidrBlock"`
-	CidrBlockState     ec2VpcCidrBlockAssociationState `xml:"ipv6CidrBlockState"`
-	Ipv6Pool           string                          `xml:"ipv6Pool,omitempty"`
-	NetworkBorderGroup string                          `xml:"networkBorderGroup,omitempty"`
+	AssociationId        string                          `xml:"associationId"`
+	Ipv6CidrBlock        string                          `xml:"ipv6CidrBlock"`
+	CidrBlockState       ec2VpcCidrBlockAssociationState `xml:"ipv6CidrBlockState"`
+	Ipv6Pool             string                          `xml:"ipv6Pool,omitempty"`
+	NetworkBorderGroup   string                          `xml:"networkBorderGroup,omitempty"`
+	IpSource             string                          `xml:"ipSource,omitempty"`
+	Ipv6AddressAttribute string                          `xml:"ipv6AddressAttribute,omitempty"`
 }
 
 type ec2DescribeVpcsResult struct {
@@ -817,16 +820,21 @@ func ec2VpcToXML(v *repository.EC2VPC) ec2VpcXML {
 	}
 	for _, a := range v.CidrBlockAssociations {
 		x.CidrBlockAssociationSet = append(x.CidrBlockAssociationSet, ec2VpcCidrBlockAssociationXML{
-			AssociationId: a.AssociationID, CidrBlock: a.CidrBlock, CidrBlockState: ec2VpcCidrBlockAssociationState{State: a.State},
+			AssociationId: a.AssociationID, CidrBlock: a.CidrBlock, CidrBlockState: ec2CidrBlockState(a),
 		})
 	}
 	for _, a := range v.Ipv6CidrBlockAssociations {
 		x.Ipv6CidrBlockAssociationSet = append(x.Ipv6CidrBlockAssociationSet, ec2VpcIpv6BlockAssociationXML{
-			AssociationId: a.AssociationID, Ipv6CidrBlock: a.CidrBlock, CidrBlockState: ec2VpcCidrBlockAssociationState{State: a.State},
-			Ipv6Pool: a.Ipv6Pool, NetworkBorderGroup: a.NetworkBorderGroup,
+			AssociationId: a.AssociationID, Ipv6CidrBlock: a.CidrBlock, CidrBlockState: ec2CidrBlockState(a),
+			Ipv6Pool: a.Ipv6Pool, NetworkBorderGroup: a.NetworkBorderGroup, IpSource: a.IPSource, Ipv6AddressAttribute: a.Ipv6AddressAttribute,
 		})
 	}
 	return x
+}
+
+// ec2CidrBlockState is a's cidrBlockState or ipv6CidrBlockState.
+func ec2CidrBlockState(a repository.EC2CidrBlockAssociation) ec2VpcCidrBlockAssociationState {
+	return ec2VpcCidrBlockAssociationState{State: a.State, StatusMessage: a.StatusMessage}
 }
 
 // ec2SubnetToXML answers s, its availabilityZoneId from zoneID (ec2Zones).
@@ -853,7 +861,7 @@ func ec2SubnetToXML(s *repository.EC2Subnet, zoneID func(zone string) string) ec
 	}
 	for _, a := range s.Ipv6CidrBlockAssociations {
 		x.Ipv6CidrBlockAssociationSet = append(x.Ipv6CidrBlockAssociationSet, ec2SubnetIpv6BlockAssociation{
-			AssociationId: a.AssociationID, Ipv6CidrBlock: a.CidrBlock, CidrBlockState: ec2VpcCidrBlockAssociationState{State: a.State},
+			AssociationId: a.AssociationID, Ipv6CidrBlock: a.CidrBlock, CidrBlockState: ec2CidrBlockState(a),
 		})
 	}
 	if o := s.PrivateDNSNameOptionsOnLaunch; o != nil {

@@ -19,9 +19,13 @@ import (
 	"github.com/redscaresu/fakeaws/repository"
 )
 
-// azCite is the provider file that reads the most of a zone, and never
-// its long name or geography.
-const azCite = "terraform-provider-aws@v5.100.0/internal/service/ec2/ec2_availability_zone_data_source.go"
+// The provider files whose reads the ignore entries cite: aws_vpc's,
+// aws_subnet's, and the AZ data source that reads the most of a zone.
+const (
+	vpcCite    = "terraform-provider-aws@v5.100.0/internal/service/ec2/vpc_.go"
+	subnetCite = "terraform-provider-aws@v5.100.0/internal/service/ec2/vpc_subnet.go"
+	azCite     = "terraform-provider-aws@v5.100.0/internal/service/ec2/ec2_availability_zone_data_source.go"
+)
 
 func init() {
 	ec2Paged := func(l loader) loader {
@@ -38,11 +42,22 @@ func init() {
 		decode: decodeSubnets, render: renderSubnets}))
 	registerLoader(ec2Paged(loader{key: LoadKey{"ec2", "DescribeInternetGateways"}, table: "ec2_internet_gateways",
 		decode: decodeIgws, render: renderIgws}))
-	zones := LoadKey{"ec2", "DescribeAvailabilityZones"}
+	// Elements a current answer carries that the provider never reads:
+	// VPC Block Public Access states (2024), a subnet's type (EVS), a
+	// subnet IPv6 block's source and address attribute (only
+	// aws_vpc_ipv6_cidr_block_association reads them, from the VPC's
+	// block), and a zone's long name, geography and messages.
+	vpcs, subnets, zones := LoadKey{"ec2", "DescribeVpcs"}, LoadKey{"ec2", "DescribeSubnets"}, LoadKey{"ec2", "DescribeAvailabilityZones"}
 	registerIgnores(
+		IgnoreEntry{Key: vpcs, Path: "vpcSet/item/blockPublicAccessStates", Cite: vpcCite},
+		IgnoreEntry{Key: subnets, Path: "subnetSet/item/blockPublicAccessStates", Cite: subnetCite},
+		IgnoreEntry{Key: subnets, Path: "subnetSet/item/type", Cite: subnetCite},
+		IgnoreEntry{Key: subnets, Path: "subnetSet/item/ipv6CidrBlockAssociationSet/item/ipSource", Cite: subnetCite},
+		IgnoreEntry{Key: subnets, Path: "subnetSet/item/ipv6CidrBlockAssociationSet/item/ipv6AddressAttribute", Cite: subnetCite},
 		IgnoreEntry{Key: zones, Path: "availabilityZoneInfo/item/groupLongName", Cite: azCite},
 		IgnoreEntry{Key: zones, Path: "availabilityZoneInfo/item/geographySet", Cite: azCite},
 		IgnoreEntry{Key: zones, Path: "availabilityZoneInfo/item/subGeographySet", Cite: azCite},
+		IgnoreEntry{Key: zones, Path: "availabilityZoneInfo/item/messageSet", Cite: azCite},
 	)
 }
 
@@ -180,13 +195,13 @@ func ec2VpcFromXML(x ec2VpcXML, region string) *repository.EC2VPC {
 	}
 	for _, a := range x.CidrBlockAssociationSet {
 		v.CidrBlockAssociations = append(v.CidrBlockAssociations, repository.EC2CidrBlockAssociation{
-			AssociationID: a.AssociationId, CidrBlock: a.CidrBlock, State: a.CidrBlockState.State,
+			AssociationID: a.AssociationId, CidrBlock: a.CidrBlock, State: a.CidrBlockState.State, StatusMessage: a.CidrBlockState.StatusMessage,
 		})
 	}
 	for _, a := range x.Ipv6CidrBlockAssociationSet {
 		v.Ipv6CidrBlockAssociations = append(v.Ipv6CidrBlockAssociations, repository.EC2CidrBlockAssociation{
-			AssociationID: a.AssociationId, CidrBlock: a.Ipv6CidrBlock, State: a.CidrBlockState.State,
-			Ipv6Pool: a.Ipv6Pool, NetworkBorderGroup: a.NetworkBorderGroup,
+			AssociationID: a.AssociationId, CidrBlock: a.Ipv6CidrBlock, State: a.CidrBlockState.State, StatusMessage: a.CidrBlockState.StatusMessage,
+			Ipv6Pool: a.Ipv6Pool, NetworkBorderGroup: a.NetworkBorderGroup, IPSource: a.IpSource, Ipv6AddressAttribute: a.Ipv6AddressAttribute,
 		})
 	}
 	return v
@@ -298,7 +313,7 @@ func ec2SubnetFromXML(x ec2SubnetXML, region string) *repository.EC2Subnet {
 	}
 	for _, a := range x.Ipv6CidrBlockAssociationSet {
 		s.Ipv6CidrBlockAssociations = append(s.Ipv6CidrBlockAssociations, repository.EC2CidrBlockAssociation{
-			AssociationID: a.AssociationId, CidrBlock: a.Ipv6CidrBlock, State: a.CidrBlockState.State,
+			AssociationID: a.AssociationId, CidrBlock: a.Ipv6CidrBlock, State: a.CidrBlockState.State, StatusMessage: a.CidrBlockState.StatusMessage,
 		})
 	}
 	if o := x.PrivateDnsNameOptionsOnLaunch; o != nil {
