@@ -171,6 +171,74 @@ func TestIAM_InstanceProfileAddRemoveRole(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "RemoveRoleFromInstanceProfile")
 }
 
+// listInstanceProfilesForRole returns the profile names
+// ListInstanceProfilesForRole answers for a role.
+func listInstanceProfilesForRole(t *testing.T, srv *httptest.Server, role string) []string {
+	t.Helper()
+	resp, body := iamCall(t, srv, "ListInstanceProfilesForRole", url.Values{"RoleName": {role}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ListInstanceProfilesForRole: %s", body)
+	var out struct {
+		Names []string `xml:"ListInstanceProfilesForRoleResult>InstanceProfiles>member>InstanceProfileName"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "ListInstanceProfilesForRole body: %s", body)
+	return out.Names
+}
+
+// TestIAM_DeleteRoleHeldByInstanceProfile pins the aws_iam_role delete
+// flow: ListInstanceProfilesForRole names the profiles holding the
+// role, so the provider can remove it from each; while one still holds
+// it DeleteRole is DeleteConflict.
+func TestIAM_DeleteRoleHeldByInstanceProfile(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	for _, c := range []struct{ action, param, name string }{
+		{"CreateRole", "RoleName", "r"},
+		{"CreateRole", "RoleName", "other"},
+		{"CreateInstanceProfile", "InstanceProfileName", "p1"},
+		{"CreateInstanceProfile", "InstanceProfileName", "p2"},
+		{"CreateInstanceProfile", "InstanceProfileName", "p3"},
+	} {
+		resp, body := iamCall(t, srv, c.action, url.Values{c.param: {c.name}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s %s: %s", c.action, c.name, body)
+	}
+	for profile, role := range map[string]string{"p1": "r", "p2": "r", "p3": "other"} {
+		resp, body := iamCall(t, srv, "AddRoleToInstanceProfile", url.Values{"InstanceProfileName": {profile}, "RoleName": {role}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "AddRoleToInstanceProfile %s: %s", profile, body)
+	}
+	assert.Equal(t, []string{"p1", "p2"}, listInstanceProfilesForRole(t, srv, "r"))
+
+	resp, body := iamCall(t, srv, "DeleteRole", url.Values{"RoleName": {"r"}})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DeleteRole held by a profile: %s", body)
+	assert.Contains(t, string(body), "<Code>DeleteConflict</Code>")
+
+	for _, profile := range []string{"p1", "p2"} {
+		resp, body = iamCall(t, srv, "RemoveRoleFromInstanceProfile", url.Values{"InstanceProfileName": {profile}, "RoleName": {"r"}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "RemoveRoleFromInstanceProfile %s: %s", profile, body)
+	}
+	assert.Empty(t, listInstanceProfilesForRole(t, srv, "r"))
+	resp, body = iamCall(t, srv, "DeleteRole", url.Values{"RoleName": {"r"}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteRole after the profiles let go: %s", body)
+}
+
+// TestIAM_GetRoleAssumeRolePolicyWireEncoding: GetRole sends
+// AssumeRolePolicyDocument RFC 3986 encoded, as IAM does: a space is
+// %20 and a '+' is %2B.
+func TestIAM_GetRoleAssumeRolePolicyWireEncoding(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	doc := `{"Version":"2012-10-17","Statement":[{"Sid":"a+b c"}]}`
+	resp, body := iamCall(t, srv, "CreateRole", url.Values{"RoleName": {"r"}, "AssumeRolePolicyDocument": {doc}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateRole: %s", body)
+	resp, body = iamCall(t, srv, "GetRole", url.Values{"RoleName": {"r"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GetRole: %s", body)
+	var out struct {
+		Doc string `xml:"GetRoleResult>Role>AssumeRolePolicyDocument"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "GetRole body: %s", body)
+	assert.Contains(t, out.Doc, "a%2Bb%20c", "AssumeRolePolicyDocument on the wire")
+	decoded, err := url.QueryUnescape(out.Doc)
+	require.NoError(t, err)
+	assert.Equal(t, doc, decoded)
+}
+
 // FK contract: AddRoleToInstanceProfile with missing parent → 404.
 func TestIAM_AddRoleToInstanceProfileMissingProfile(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
@@ -303,6 +371,105 @@ func TestIAM_PutGetDeleteUserPolicy(t *testing.T) {
 		"PolicyName": {"all-s3"},
 	})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "GetUserPolicy post-delete")
+}
+
+// getRolePolicyDocument GetRolePolicy's a role's inline policy and
+// returns its document URL-decoded, as the provider reads it.
+func getRolePolicyDocument(t *testing.T, srv *httptest.Server, role, name string) string {
+	t.Helper()
+	doc, err := url.QueryUnescape(getRolePolicyWire(t, srv, role, name))
+	require.NoError(t, err, "PolicyDocument is not URL-encoded")
+	return doc
+}
+
+// getRolePolicyWire returns GetRolePolicy's PolicyDocument as sent,
+// still URL-encoded.
+func getRolePolicyWire(t *testing.T, srv *httptest.Server, role, name string) string {
+	t.Helper()
+	resp, body := iamCall(t, srv, "GetRolePolicy", url.Values{"RoleName": {role}, "PolicyName": {name}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GetRolePolicy: %s", body)
+	var out struct {
+		PolicyDocument string `xml:"GetRolePolicyResult>PolicyDocument"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "GetRolePolicy body: %s", body)
+	return out.PolicyDocument
+}
+
+// listRolePolicies returns the inline-policy names ListRolePolicies
+// answers for a role.
+func listRolePolicies(t *testing.T, srv *httptest.Server, role string) []string {
+	t.Helper()
+	resp, body := iamCall(t, srv, "ListRolePolicies", url.Values{"RoleName": {role}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ListRolePolicies: %s", body)
+	var out struct {
+		Names []string `xml:"ListRolePoliciesResult>PolicyNames>member"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "ListRolePolicies body: %s", body)
+	return out.Names
+}
+
+// TestIAM_RoleInlinePolicyLifecycle pins aws_iam_role_policy's calls:
+// Put then Get answers the document byte-exact once URL-decoded and
+// RFC 3986 encoded on the wire, List names it, a second Put replaces
+// it, Delete removes it, and Put or List on a missing role or Get or
+// Delete of an absent name is NoSuchEntity, naming the missing one. A role holding an inline
+// policy refuses DeleteRole with DeleteConflict and keeps both.
+func TestIAM_RoleInlinePolicyLifecycle(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, body := iamCall(t, srv, "PutRolePolicy", url.Values{
+		"RoleName": {"app"}, "PolicyName": {"s3"}, "PolicyDocument": {"{}"},
+	})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "PutRolePolicy on a missing role: %s", body)
+	assert.Contains(t, string(body), "<Code>NoSuchEntity</Code>", "PutRolePolicy on a missing role")
+	assert.Contains(t, string(body), "<Message>The role with name app cannot be found.</Message>", "PutRolePolicy on a missing role")
+	resp, body = iamCall(t, srv, "ListRolePolicies", url.Values{"RoleName": {"app"}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "ListRolePolicies on a missing role: %s", body)
+	assert.Contains(t, string(body), "<Code>NoSuchEntity</Code>", "ListRolePolicies on a missing role")
+	assert.Contains(t, string(body), "<Message>The role with name app cannot be found.</Message>", "ListRolePolicies on a missing role")
+	resp, body = iamCall(t, srv, "CreateRole", url.Values{"RoleName": {"app"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateRole: %s", body)
+	put := func(doc string) {
+		t.Helper()
+		resp, body := iamCall(t, srv, "PutRolePolicy", url.Values{
+			"RoleName": {"app"}, "PolicyName": {"s3"}, "PolicyDocument": {doc},
+		})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "PutRolePolicy: %s", body)
+	}
+	// '+', '%', '&' and spaces would not survive a decode of a
+	// document sent unencoded.
+	v1 := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:Get*","Resource":"arn:aws:s3:::a+b%20c&d e"}]}`
+	v2 := `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"s3:*","Resource":"*"}]}`
+
+	put(v1)
+	assert.Equal(t, v1, getRolePolicyDocument(t, srv, "app", "s3"))
+	// IAM's RFC 3986 encoding: a space is %20, a '+' is %2B.
+	assert.Contains(t, getRolePolicyWire(t, srv, "app", "s3"), "a%2Bb%2520c%26d%20e", "PolicyDocument on the wire")
+	resp, body = iamCall(t, srv, "GetRolePolicy", url.Values{"RoleName": {"app"}, "PolicyName": {"absent"}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "GetRolePolicy of an absent name: %s", body)
+	assert.Contains(t, string(body), "<Message>The role policy with name absent cannot be found.</Message>")
+	assert.Equal(t, []string{"s3"}, listRolePolicies(t, srv, "app"))
+
+	put(v2)
+	assert.Equal(t, v2, getRolePolicyDocument(t, srv, "app", "s3"), "a second Put replaces the document")
+
+	resp, body = iamCall(t, srv, "DeleteRole", url.Values{"RoleName": {"app"}})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DeleteRole holding an inline policy: %s", body)
+	assert.Contains(t, string(body), "<Code>DeleteConflict</Code>")
+	assert.Equal(t, v2, getRolePolicyDocument(t, srv, "app", "s3"), "the refused DeleteRole keeps the policy")
+	resp, _ = iamCall(t, srv, "GetRole", url.Values{"RoleName": {"app"}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "the refused DeleteRole keeps the role")
+
+	resp, body = iamCall(t, srv, "DeleteRolePolicy", url.Values{"RoleName": {"app"}, "PolicyName": {"s3"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DeleteRolePolicy: %s", body)
+	for _, action := range []string{"GetRolePolicy", "DeleteRolePolicy"} {
+		resp, body = iamCall(t, srv, action, url.Values{"RoleName": {"app"}, "PolicyName": {"s3"}})
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, "%s of an absent name: %s", action, body)
+		assert.Contains(t, string(body), "<Code>NoSuchEntity</Code>", action)
+	}
+	assert.Empty(t, listRolePolicies(t, srv, "app"), "ListRolePolicies after delete")
+
+	resp, body = iamCall(t, srv, "DeleteRole", url.Values{"RoleName": {"app"}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteRole after DeleteRolePolicy: %s", body)
 }
 
 func TestIAM_AttachRolePolicyMissingPolicyIs404(t *testing.T) {
