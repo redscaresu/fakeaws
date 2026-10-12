@@ -2,7 +2,11 @@ package repository
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/redscaresu/fakeaws/models"
 )
@@ -262,4 +266,46 @@ func TestCreateAccessKeyForMissingUserIsNotFound(t *testing.T) {
 	if !errors.Is(err, models.ErrNotFound) {
 		t.Errorf("CreateAccessKey for missing user: want ErrNotFound got %v", err)
 	}
+}
+
+// ----- Role inline policies -----
+
+// TestRoleInlinePoliciesResetAndRestore: Reset empties
+// role_inline_policies, and a restore holds exactly the policies the
+// snapshot did.
+func TestRoleInlinePoliciesResetAndRestore(t *testing.T) {
+	r, err := New(filepath.Join(t.TempDir(), "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	require.NoError(t, r.CreateRole(testAccount, &IAMRole{Name: "r", Path: "/", ARN: "arn:aws:iam::000000000000:role/r", CreatedAt: "t"}))
+	require.NoError(t, r.PutRolePolicy(testAccount, "r", "first", "{}"))
+
+	require.NoError(t, r.Snapshot())
+	require.NoError(t, r.PutRolePolicy(testAccount, "r", "second", "{}"))
+	require.NoError(t, r.Restore(nil))
+	names, err := r.ListRolePolicies(testAccount, "r")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"first"}, names, "restore holds exactly the snapshot's policies")
+
+	require.NoError(t, r.Reset())
+	var n int
+	require.NoError(t, r.db.QueryRow(`SELECT COUNT(*) FROM role_inline_policies`).Scan(&n))
+	assert.Zero(t, n, "Reset empties role_inline_policies")
+}
+
+// TestDeleteRoleRefusedWhileInlinePolicy: an inline policy blocks
+// DeleteRole with ErrInUse and both stay.
+func TestDeleteRoleRefusedWhileInlinePolicy(t *testing.T) {
+	r := setupRepo(t)
+	require.NoError(t, r.CreateRole(testAccount, &IAMRole{Name: "r", Path: "/", ARN: "arn:aws:iam::000000000000:role/r", CreatedAt: "t"}))
+	require.NoError(t, r.PutRolePolicy(testAccount, "r", "p", "{}"))
+
+	assert.ErrorIs(t, r.DeleteRole(testAccount, "r"), models.ErrInUse)
+	_, err := r.GetRole(testAccount, "r")
+	assert.NoError(t, err, "role kept")
+	_, err = r.GetRolePolicy(testAccount, "r", "p")
+	assert.NoError(t, err, "policy kept")
+
+	require.NoError(t, r.DeleteRolePolicy(testAccount, "r", "p"))
+	assert.NoError(t, r.DeleteRole(testAccount, "r"))
 }

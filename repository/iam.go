@@ -23,6 +23,9 @@
 //	instance_profile_roles (account_id, profile_name, role_name)
 //	                       — single role per profile (real IAM allows 1),
 //	                         ON DELETE CASCADE on profile.
+//	role_inline_policies   (account_id, role_name, name)
+//	                       — ON DELETE RESTRICT on role: real IAM refuses
+//	                         DeleteRole while an inline policy remains.
 package repository
 
 import (
@@ -119,6 +122,14 @@ var iamMigrations = []string{
 		PRIMARY KEY (account_id, user_name, name),
 		FOREIGN KEY (account_id, user_name) REFERENCES iam_users(account_id, name) ON DELETE CASCADE
 	)`,
+	`CREATE TABLE IF NOT EXISTS role_inline_policies (
+		account_id TEXT NOT NULL,
+		role_name  TEXT NOT NULL,
+		name       TEXT NOT NULL,
+		document   TEXT NOT NULL,
+		PRIMARY KEY (account_id, role_name, name),
+		FOREIGN KEY (account_id, role_name) REFERENCES iam_roles(account_id, name) ON DELETE RESTRICT
+	)`,
 }
 
 // init registers IAM tables with the universal migrate() loop and
@@ -130,6 +141,7 @@ func init() {
 	// that runs FK-ON works. Universal bookkeeping (operations, audit)
 	// stays last.
 	prependResetTables([]string{
+		"role_inline_policies",
 		"user_inline_policies",
 		"user_policy_attachments",
 		"role_policy_attachments",
@@ -282,8 +294,9 @@ func (r *Repository) UpdateRole(account string, role *IAMRole) error {
 }
 
 // DeleteRole removes the role. CASCADE on role_policy_attachments
-// drops attachments; instance_profile_roles uses RESTRICT (an instance
-// profile referencing the role blocks delete with ErrInUse).
+// drops attachments; instance_profile_roles and role_inline_policies
+// use RESTRICT (an instance profile referencing the role, or an inline
+// policy on it, blocks delete with ErrInUse).
 func (r *Repository) DeleteRole(account, name string) error {
 	res, err := r.db.Exec(`DELETE FROM iam_roles WHERE account_id = ? AND name = ?`, account, name)
 	if err != nil {
@@ -452,6 +465,24 @@ func (r *Repository) GetInstanceProfile(account, name string) (*IAMInstanceProfi
 // deleted between the list and a read of it.
 func (r *Repository) ListInstanceProfiles(account string) ([]*IAMInstanceProfile, error) {
 	rows, err := r.db.Query(instanceProfileSelect+` WHERE p.account_id = ? ORDER BY p.name`, account)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*IAMInstanceProfile{}
+	for rows.Next() {
+		p, err := scanInstanceProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ListInstanceProfilesForRole reads the profiles holding role.
+func (r *Repository) ListInstanceProfilesForRole(account, role string) ([]*IAMInstanceProfile, error) {
+	rows, err := r.db.Query(instanceProfileSelect+` WHERE p.account_id = ? AND r.role_name = ? ORDER BY p.name`, account, role)
 	if err != nil {
 		return nil, err
 	}
@@ -840,6 +871,70 @@ func (r *Repository) ListUserPolicies(account, user string) ([]string, error) {
 	}
 	defer rows.Close()
 	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// PutRolePolicy inserts-or-replaces a role's inline policy. Same
+// contract as PutUserPolicy: aws_iam_role_policy hashes the document,
+// so it must round-trip verbatim. A missing role fails the FK:
+// ErrNotFound.
+func (r *Repository) PutRolePolicy(account, role, name, document string) error {
+	_, err := r.db.Exec(
+		`INSERT INTO role_inline_policies (account_id, role_name, name, document) VALUES (?, ?, ?, ?)
+		 ON CONFLICT (account_id, role_name, name) DO UPDATE SET document = excluded.document`,
+		account, role, name, document,
+	)
+	return mapInsertError(err)
+}
+
+// GetRolePolicy returns the inline-policy document or ErrNotFound.
+func (r *Repository) GetRolePolicy(account, role, name string) (string, error) {
+	var doc string
+	err := r.db.QueryRow(
+		`SELECT document FROM role_inline_policies WHERE account_id = ? AND role_name = ? AND name = ?`,
+		account, role, name,
+	).Scan(&doc)
+	if err == sql.ErrNoRows {
+		return "", models.ErrNotFound
+	}
+	return doc, err
+}
+
+// DeleteRolePolicy removes an inline policy. Returns ErrNotFound when
+// no row matches.
+func (r *Repository) DeleteRolePolicy(account, role, name string) error {
+	res, err := r.db.Exec(
+		`DELETE FROM role_inline_policies WHERE account_id = ? AND role_name = ? AND name = ?`,
+		account, role, name,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return models.ErrNotFound
+	}
+	return nil
+}
+
+// ListRolePolicies returns the inline-policy names for a role, ordered
+// for deterministic round-trip.
+func (r *Repository) ListRolePolicies(account, role string) ([]string, error) {
+	rows, err := r.db.Query(
+		`SELECT name FROM role_inline_policies WHERE account_id = ? AND role_name = ? ORDER BY name`,
+		account, role,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
 	for rows.Next() {
 		var n string
 		if err := rows.Scan(&n); err != nil {
