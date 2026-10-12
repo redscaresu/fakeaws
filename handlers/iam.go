@@ -1185,9 +1185,8 @@ func (app *Application) iamDeleteRolePolicy(w http.ResponseWriter, account strin
 }
 
 // iamGetRolePolicy reads back a role's inline policy, its document
-// URL-encoded as IAM sends it: RFC 3986, a space as %20 (QueryEscape
-// writes '+', and has already turned a literal '+' into %2B). The
-// provider URL-decodes it.
+// URL-encoded as IAM sends it (urlEscapeIfNotEmpty). The provider
+// URL-decodes it.
 func (app *Application) iamGetRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	role, name := req.Params.Get("RoleName"), req.Params.Get("PolicyName")
 	doc, err := app.repo.GetRolePolicy(account, role, name)
@@ -1198,7 +1197,7 @@ func (app *Application) iamGetRolePolicy(w http.ResponseWriter, account string, 
 	awsproto.WriteQueryRPCResponse(w, "GetRolePolicy", &iamGetRolePolicyResult{
 		RoleName:       role,
 		PolicyName:     name,
-		PolicyDocument: strings.ReplaceAll(url.QueryEscape(doc), "+", "%20"),
+		PolicyDocument: urlEscapeIfNotEmpty(doc),
 	})
 }
 
@@ -1375,20 +1374,28 @@ func (app *Application) iamUntag(w http.ResponseWriter, account string, req awsp
 	awsproto.WriteQueryRPCResponse(w, req.Action, nil)
 }
 
-// iamListInstanceProfilesForRole is called by terraform-provider-aws
-// as part of the aws_iam_role Delete preflight: it checks for
-// dependent instance profiles so the destroy ordering is correct.
-// We model the real behavior — 404 when the role is missing,
-// otherwise an empty InstanceProfiles list (fakeaws's CreateRole
-// doesn't auto-attach an instance profile, and AddRoleToInstanceProfile
-// stores the membership in instance-profile state, not role state).
+// iamListInstanceProfilesForRole answers the profiles holding the role,
+// from instance_profile_roles. terraform-provider-aws's aws_iam_role
+// delete calls it to remove the role from each profile before
+// DeleteRole, which a profile still holding the role refuses with
+// DeleteConflict. A missing role is 404.
 func (app *Application) iamListInstanceProfilesForRole(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("RoleName")
-	if _, err := app.repo.GetRole(account, name); err != nil {
+	role, err := app.repo.GetRole(account, name)
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
 		return
 	}
-	awsproto.WriteQueryRPCResponse(w, "ListInstanceProfilesForRole", &iamListInstanceProfilesForRoleResult{InstanceProfiles: []iamInstanceProfileXML{}})
+	profs, err := app.repo.ListInstanceProfilesForRole(account, name)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeQueryRPC, err)
+		return
+	}
+	out := iamListInstanceProfilesForRoleResult{InstanceProfiles: make([]iamInstanceProfileXML, 0, len(profs))}
+	for _, p := range profs {
+		out.InstanceProfiles = append(out.InstanceProfiles, instanceProfileToXML(p, role))
+	}
+	awsproto.WriteQueryRPCResponse(w, "ListInstanceProfilesForRole", &out)
 }
 
 type iamListRolePoliciesResult struct {
@@ -1424,10 +1431,11 @@ func urlEscapeIfNotEmpty(s string) string {
 	if s == "" {
 		return s
 	}
-	// Real IAM URL-encodes the AssumeRolePolicyDocument in responses.
-	// terraform-provider-aws tolerates either form; we URL-encode to
-	// match the documented wire shape.
-	return url.QueryEscape(s)
+	// Real IAM URL-encodes policy documents in responses, RFC 3986
+	// style: a space is %20. QueryEscape writes a space as '+' and has
+	// already turned a literal '+' into %2B, so swapping '+' is safe.
+	// terraform-provider-aws decodes either form.
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
 }
 
 func randHex(n int) string {

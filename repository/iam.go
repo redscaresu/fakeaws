@@ -480,6 +480,24 @@ func (r *Repository) ListInstanceProfiles(account string) ([]*IAMInstanceProfile
 	return out, rows.Err()
 }
 
+// ListInstanceProfilesForRole reads the profiles holding role.
+func (r *Repository) ListInstanceProfilesForRole(account, role string) ([]*IAMInstanceProfile, error) {
+	rows, err := r.db.Query(instanceProfileSelect+` WHERE p.account_id = ? AND r.role_name = ? ORDER BY p.name`, account, role)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*IAMInstanceProfile{}
+	for rows.Next() {
+		p, err := scanInstanceProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) DeleteInstanceProfile(account, name string) error {
 	res, err := r.db.Exec(`DELETE FROM iam_instance_profiles WHERE account_id = ? AND name = ?`, account, name)
 	if err != nil {
@@ -865,17 +883,15 @@ func (r *Repository) ListUserPolicies(account, user string) ([]string, error) {
 
 // PutRolePolicy inserts-or-replaces a role's inline policy. Same
 // contract as PutUserPolicy: aws_iam_role_policy hashes the document,
-// so it must round-trip verbatim.
+// so it must round-trip verbatim. A missing role fails the FK:
+// ErrNotFound.
 func (r *Repository) PutRolePolicy(account, role, name, document string) error {
-	if _, err := r.GetRole(account, role); err != nil {
-		return err
-	}
 	_, err := r.db.Exec(
 		`INSERT INTO role_inline_policies (account_id, role_name, name, document) VALUES (?, ?, ?, ?)
 		 ON CONFLICT (account_id, role_name, name) DO UPDATE SET document = excluded.document`,
 		account, role, name, document,
 	)
-	return err
+	return mapInsertError(err)
 }
 
 // GetRolePolicy returns the inline-policy document or ErrNotFound.

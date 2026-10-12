@@ -171,6 +171,74 @@ func TestIAM_InstanceProfileAddRemoveRole(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "RemoveRoleFromInstanceProfile")
 }
 
+// listInstanceProfilesForRole returns the profile names
+// ListInstanceProfilesForRole answers for a role.
+func listInstanceProfilesForRole(t *testing.T, srv *httptest.Server, role string) []string {
+	t.Helper()
+	resp, body := iamCall(t, srv, "ListInstanceProfilesForRole", url.Values{"RoleName": {role}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "ListInstanceProfilesForRole: %s", body)
+	var out struct {
+		Names []string `xml:"ListInstanceProfilesForRoleResult>InstanceProfiles>member>InstanceProfileName"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "ListInstanceProfilesForRole body: %s", body)
+	return out.Names
+}
+
+// TestIAM_DeleteRoleHeldByInstanceProfile pins the aws_iam_role delete
+// flow: ListInstanceProfilesForRole names the profiles holding the
+// role, so the provider can remove it from each; while one still holds
+// it DeleteRole is DeleteConflict.
+func TestIAM_DeleteRoleHeldByInstanceProfile(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	for _, c := range []struct{ action, param, name string }{
+		{"CreateRole", "RoleName", "r"},
+		{"CreateRole", "RoleName", "other"},
+		{"CreateInstanceProfile", "InstanceProfileName", "p1"},
+		{"CreateInstanceProfile", "InstanceProfileName", "p2"},
+		{"CreateInstanceProfile", "InstanceProfileName", "p3"},
+	} {
+		resp, body := iamCall(t, srv, c.action, url.Values{c.param: {c.name}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s %s: %s", c.action, c.name, body)
+	}
+	for profile, role := range map[string]string{"p1": "r", "p2": "r", "p3": "other"} {
+		resp, body := iamCall(t, srv, "AddRoleToInstanceProfile", url.Values{"InstanceProfileName": {profile}, "RoleName": {role}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "AddRoleToInstanceProfile %s: %s", profile, body)
+	}
+	assert.Equal(t, []string{"p1", "p2"}, listInstanceProfilesForRole(t, srv, "r"))
+
+	resp, body := iamCall(t, srv, "DeleteRole", url.Values{"RoleName": {"r"}})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "DeleteRole held by a profile: %s", body)
+	assert.Contains(t, string(body), "<Code>DeleteConflict</Code>")
+
+	for _, profile := range []string{"p1", "p2"} {
+		resp, body = iamCall(t, srv, "RemoveRoleFromInstanceProfile", url.Values{"InstanceProfileName": {profile}, "RoleName": {"r"}})
+		require.Equal(t, http.StatusOK, resp.StatusCode, "RemoveRoleFromInstanceProfile %s: %s", profile, body)
+	}
+	assert.Empty(t, listInstanceProfilesForRole(t, srv, "r"))
+	resp, body = iamCall(t, srv, "DeleteRole", url.Values{"RoleName": {"r"}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "DeleteRole after the profiles let go: %s", body)
+}
+
+// TestIAM_GetRoleAssumeRolePolicyWireEncoding: GetRole sends
+// AssumeRolePolicyDocument RFC 3986 encoded, as IAM does: a space is
+// %20 and a '+' is %2B.
+func TestIAM_GetRoleAssumeRolePolicyWireEncoding(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	doc := `{"Version":"2012-10-17","Statement":[{"Sid":"a+b c"}]}`
+	resp, body := iamCall(t, srv, "CreateRole", url.Values{"RoleName": {"r"}, "AssumeRolePolicyDocument": {doc}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateRole: %s", body)
+	resp, body = iamCall(t, srv, "GetRole", url.Values{"RoleName": {"r"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GetRole: %s", body)
+	var out struct {
+		Doc string `xml:"GetRoleResult>Role>AssumeRolePolicyDocument"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "GetRole body: %s", body)
+	assert.Contains(t, out.Doc, "a%2Bb%20c", "AssumeRolePolicyDocument on the wire")
+	decoded, err := url.QueryUnescape(out.Doc)
+	require.NoError(t, err)
+	assert.Equal(t, doc, decoded)
+}
+
 // FK contract: AddRoleToInstanceProfile with missing parent → 404.
 func TestIAM_AddRoleToInstanceProfileMissingProfile(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
