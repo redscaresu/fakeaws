@@ -1709,7 +1709,8 @@ func sweepClient(srv *httptest.Server) *ec2.Client {
 	})
 }
 
-// sweepFilter is a Filter.N none of the sweep's Describes model.
+// sweepFilter is a tag Filter.N no sweep resource matches: a Describe
+// that models tags answers it empty, the rest refuse it.
 var sweepFilter = []ec2types.Filter{{Name: aws.String("tag:Owner"), Values: []string{"sweep"}}}
 
 // assertRefused asserts err is fakeaws's 501 for an unmodelled param.
@@ -1734,10 +1735,19 @@ func TestRegressionSweepDescribeAddressesListsEveryAddress(t *testing.T) {
 	require.Len(t, out.Addresses, 1, "the region's address, not eu-west-2's")
 	assert.Equal(t, aws.ToString(alloc.AllocationId), aws.ToString(out.Addresses[0].AllocationId))
 
-	_, err = c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{Filters: sweepFilter})
-	assertRefused(t, err, "Filter.N")
-	_, err = c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{PublicIps: []string{aws.ToString(alloc.PublicIp)}})
-	assertRefused(t, err, "PublicIp.N")
+	out, err = c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{Filters: sweepFilter})
+	require.NoError(t, err)
+	assert.Empty(t, out.Addresses, "no address is tagged Owner=sweep")
+	out, err = c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{PublicIps: []string{aws.ToString(alloc.PublicIp)}})
+	require.NoError(t, err)
+	require.Len(t, out.Addresses, 1)
+	assert.Equal(t, aws.ToString(alloc.AllocationId), aws.ToString(out.Addresses[0].AllocationId))
+	// UNVERIFIED(aws-code): InvalidAddress.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+	_, err = c.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{PublicIps: []string{"198.51.100.1"}})
+	var re *awshttp.ResponseError
+	require.ErrorAs(t, err, &re)
+	assert.Equal(t, http.StatusBadRequest, re.HTTPStatusCode())
+	assert.ErrorContains(t, err, "InvalidAddress.NotFound")
 }
 
 func TestRegressionSweepDescribeSecurityGroupsListsEveryGroup(t *testing.T) {
@@ -2052,8 +2062,8 @@ func TestEC2_DescribeRefusesUnreadParams(t *testing.T) {
 		action, param, name string
 	}{
 		{"DescribeImages", "ExecutableBy.1", "ExecutableBy.N"},
-		{"DescribeKeyPairs", "KeyPairId.1", "KeyPairId.N"},
-		{"DescribeAddresses", "PublicIp.1", "PublicIp.N"},
+		{"DescribeKeyPairs", "IncludePublicKey", "IncludePublicKey"},
+		{"DescribeAddresses", "PublicIp.x", "PublicIp.x"},
 		{"DescribeSubnets", "SubnetId.x", "SubnetId.x"},
 	} {
 		resp, body := ec2Call(t, srv, tagRegion, c.action, url.Values{c.param: {"all"}})
@@ -2397,14 +2407,18 @@ func ec2FilterParams(kv ...string) url.Values {
 	return p
 }
 
-// describedIDs are the ids a VPC, subnet, internet gateway or route
-// table Describe answers, each from its own set.
+// describedIDs are the ids an EC2 Describe answers, each from its own
+// set.
 type describedIDs struct {
-	Vpcs           []string `xml:"vpcSet>item>vpcId"`
-	Subnets        []string `xml:"subnetSet>item>subnetId"`
-	Gateways       []string `xml:"internetGatewaySet>item>internetGatewayId"`
-	RouteTables    []string `xml:"routeTableSet>item>routeTableId"`
-	SecurityGroups []string `xml:"securityGroupInfo>item>groupId"`
+	Vpcs              []string `xml:"vpcSet>item>vpcId"`
+	Subnets           []string `xml:"subnetSet>item>subnetId"`
+	Gateways          []string `xml:"internetGatewaySet>item>internetGatewayId"`
+	RouteTables       []string `xml:"routeTableSet>item>routeTableId"`
+	SecurityGroups    []string `xml:"securityGroupInfo>item>groupId"`
+	Instances         []string `xml:"reservationSet>item>instancesSet>item>instanceId"`
+	NetworkInterfaces []string `xml:"networkInterfaceSet>item>networkInterfaceId"`
+	Addresses         []string `xml:"addressesSet>item>allocationId"`
+	KeyPairs          []string `xml:"keySet>item>keyPairId"`
 }
 
 func describeIDs(t *testing.T, srv *httptest.Server, action string, params url.Values) describedIDs {
@@ -2631,4 +2645,161 @@ func TestContract_ec2_sg_group_name_default_vpc_only(t *testing.T) {
 	})
 	assert.Equal(t, []string{sg}, describeIDs(t, srv, "DescribeSecurityGroups", url.Values{"GroupId.1": {sg}}).SecurityGroups,
 		"GroupId.N with an unreadable flag")
+}
+
+// filteredNet is an instance network in 10.<octet>.0.0/16, so no two
+// share a private IP, with its VPC id, which newInstanceNet does not
+// return.
+func filteredNet(t *testing.T, srv *httptest.Server, region, octet string) (instanceNet, string) {
+	t.Helper()
+	n := newInstanceNet(t, srv, region, "10."+octet+".0.0/16", "10."+octet+".1.0/24")
+	resp, body := ec2Call(t, srv, region, "DescribeSubnets", url.Values{"SubnetId.1": {n.subnet}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeSubnets: %s", body)
+	return n, extractEC2Tag(body, "vpcId")
+}
+
+// TestEC2_DescribeInstancesFilters: data.aws_instance and
+// infrafactory's reads select an instance by its surroundings; each
+// filter must select, not 501 and not list every instance, and the
+// unfiltered list answers one region.
+func TestEC2_DescribeInstancesFilters(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	netA, vpcA := filteredNet(t, srv, tagRegion, "1")
+	netB, vpcB := filteredNet(t, srv, tagRegion, "2")
+	netEU, _ := filteredNet(t, srv, "eu-west-2", "3")
+	a := runInstance(t, srv, tagRegion, withTagSpec(topLevelParams(netA.subnet, netA.sgs), 1, "instance", "Name", "a"))
+	gone := runInstance(t, srv, tagRegion, topLevelParams(netA.subnet, netA.sgs))
+	resp, body := ec2Call(t, srv, tagRegion, "TerminateInstances", url.Values{"InstanceId.1": {gone}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "TerminateInstances: %s", body)
+	b := runInstance(t, srv, tagRegion, nicParams(netB.subnet, netB.sgs[:1], true))
+	runInstance(t, srv, "eu-west-2", topLevelParams(netEU.subnet, netEU.sgs))
+	ipA, _ := describeInstance(t, srv, tagRegion, a)
+
+	for _, tc := range []struct {
+		kv   []string
+		want []string
+	}{
+		{nil, []string{a, gone, b}},
+		{[]string{"vpc-id", vpcA}, []string{a, gone}},
+		{[]string{"vpc-id", vpcB}, []string{b}},
+		{[]string{"instance-state-name", "running"}, []string{a, b}},
+		{[]string{"instance-id", b}, []string{b}},
+		{[]string{"instance-type", "t3.micro", "vpc-id", vpcA}, []string{a, gone}},
+		{[]string{"image-id", "ami-0abcd1234", "subnet-id", netB.subnet}, []string{b}},
+		{[]string{"private-ip-address", ipA.PrivateIpAddress}, []string{a}},
+		{[]string{"ip-address", "*"}, []string{b}},
+		{[]string{"availability-zone", tagRegion + "a", "instance-state-name", "running"}, []string{a, b}},
+		{[]string{"owner-id", "000000000000", "vpc-id", vpcB}, []string{b}},
+		{[]string{"tag:Name", "a"}, []string{a}},
+	} {
+		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeInstances", ec2FilterParams(tc.kv...)).Instances, "%v", tc.kv)
+	}
+
+	resp, body = ec2Call(t, srv, tagRegion, "DescribeInstances", ec2FilterParams("reservation-id", "r-1"))
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
+	assert.Equal(t, "DescribeInstances: not modelled by fakeaws: reservation-id", extractEC2Tag(body, "Message"))
+}
+
+func TestEC2_DescribeNetworkInterfacesFilters(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	netA, vpcA := filteredNet(t, srv, tagRegion, "1")
+	netB, _ := filteredNet(t, srv, tagRegion, "2")
+	a, _ := describeInstance(t, srv, tagRegion, runInstance(t, srv, tagRegion, withTagSpec(
+		topLevelParams(netA.subnet, netA.sgs), 1, "network-interface", "Name", "a")))
+	b, _ := describeInstance(t, srv, tagRegion, runInstance(t, srv, tagRegion, topLevelParams(netB.subnet, netB.sgs)))
+	eniA, eniB := a.ENIs[0].ID, b.ENIs[0].ID
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeNetworkInterfaces", url.Values{"NetworkInterfaceId.1": {eniA}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeNetworkInterfaces: %s", body)
+	attachA := extractEC2Tag(body, "attachmentId")
+	require.NotEmpty(t, attachA, "%s", body)
+
+	for _, tc := range []struct {
+		kv   []string
+		want []string
+	}{
+		{[]string{"vpc-id", vpcA}, []string{eniA}},
+		{[]string{"private-ip-address", b.PrivateIpAddress}, []string{eniB}},
+		{[]string{"attachment.attachment-id", attachA}, []string{eniA}},
+		{[]string{"owner-id", "000000000000"}, []string{eniA, eniB}},
+		{[]string{"tag:Name", "a"}, []string{eniA}},
+		{[]string{"subnet-id", netB.subnet}, []string{eniB}},
+	} {
+		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeNetworkInterfaces", ec2FilterParams(tc.kv...)).NetworkInterfaces, "%v", tc.kv)
+	}
+}
+
+func TestEC2_DescribeAddressesFilters(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	a := createOK(t, srv, "AllocateAddress", "allocationId", withTagSpec(url.Values{"Domain": {"vpc"}}, 1, "elastic-ip", "Name", "a"))
+	b := createOK(t, srv, "AllocateAddress", "allocationId", url.Values{"Domain": {"vpc"}})
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeAddresses", url.Values{"AllocationId.1": {b}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeAddresses: %s", body)
+	ipB := extractEC2Tag(body, "publicIp")
+	// a is associated, so instance-id, network-interface-id and
+	// private-ip-address each select it and not the unassociated b.
+	net, _ := filteredNet(t, srv, tagRegion, "1")
+	inst := runInstance(t, srv, tagRegion, topLevelParams(net.subnet, net.sgs))
+	nic, _ := describeInstance(t, srv, tagRegion, inst)
+	createOK(t, srv, "AssociateAddress", "associationId", url.Values{"AllocationId": {a}, "InstanceId": {inst}})
+
+	for _, tc := range []struct {
+		params url.Values
+		want   []string
+	}{
+		{url.Values{"PublicIp.1": {ipB}}, []string{b}},
+		{ec2FilterParams("allocation-id", a), []string{a}},
+		{ec2FilterParams("public-ip", ipB), []string{b}},
+		{ec2FilterParams("domain", "vpc"), []string{a, b}},
+		{ec2FilterParams("tag:Name", "a"), []string{a}},
+		{ec2FilterParams("instance-id", inst), []string{a}},
+		{ec2FilterParams("network-interface-id", nic.ENIs[0].ID), []string{a}},
+		{ec2FilterParams("private-ip-address", nic.PrivateIpAddress), []string{a}},
+		{ec2FilterParams("instance-id", "*"), []string{a}},
+		{ec2FilterParams("network-interface-id", "i-*"), nil},
+	} {
+		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeAddresses", tc.params).Addresses, "%v", tc.params)
+	}
+
+	// UNVERIFIED(aws-code): InvalidAddress.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+	resp, body = ec2Call(t, srv, tagRegion, "DescribeAddresses", url.Values{"PublicIp.1": {"198.51.100.1"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, "InvalidAddress.NotFound", extractEC2Tag(body, "Code"))
+}
+
+func TestEC2_DescribeKeyPairsFilters(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	importKey := func(name string, tags ...string) string {
+		return createOK(t, srv, "ImportKeyPair", "keyPairId", withTagSpec(url.Values{
+			"KeyName": {name}, "PublicKeyMaterial": {"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + name},
+		}, 1, "key-pair", tags...))
+	}
+	a, b := importKey("a", "Name", "a"), importKey("b", "Name", "b")
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeKeyPairs", url.Values{"KeyPairId.1": {b}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeKeyPairs: %s", body)
+	fingerprintB := extractEC2Tag(body, "keyFingerprint")
+
+	for _, tc := range []struct {
+		params url.Values
+		want   []string
+	}{
+		{url.Values{"KeyPairId.1": {a}}, []string{a}},
+		{url.Values{"KeyName.1": {"b"}}, []string{b}},
+		{ec2FilterParams("key-name", "a"), []string{a}},
+		{ec2FilterParams("key-pair-id", b), []string{b}},
+		{ec2FilterParams("fingerprint", fingerprintB, "key-name", "b"), []string{b}},
+		{ec2FilterParams("tag:Name", "a"), []string{a}},
+		{nil, []string{a, b}},
+	} {
+		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeKeyPairs", tc.params).KeyPairs, "%v", tc.params)
+	}
+
+	// UNVERIFIED(aws-code): InvalidKeyPair.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+	// The provider's aws_key_pair read takes only this code as gone, by
+	// KeyName.N as well as KeyPairId.N.
+	for param, key := range map[string]string{"KeyPairId.1": "key-0000000000000000", "KeyName.1": "missing"} {
+		resp, body = ec2Call(t, srv, tagRegion, "DescribeKeyPairs", url.Values{param: {key}})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s: %s", param, body)
+		assert.Equal(t, "InvalidKeyPair.NotFound", extractEC2Tag(body, "Code"), param)
+		assert.Contains(t, extractEC2Tag(body, "Message"), key, param)
+	}
 }

@@ -344,10 +344,6 @@ func TestCoverage_EC2ErrorPaths(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "CreateRoute missing rt")
 
-	// DescribeKeyPairs on a missing name → 404.
-	resp, _ = ec2Call(t, srv, region, "DescribeKeyPairs", url.Values{"KeyName.1": {"missing"}})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DescribeKeyPairs missing")
-
 	// DeleteKeyPair on missing → 404.
 	resp, _ = ec2Call(t, srv, region, "DeleteKeyPair", url.Values{"KeyName": {"missing"}})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "DeleteKeyPair missing")

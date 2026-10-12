@@ -272,3 +272,24 @@ func TestUpdateSubnet(t *testing.T) {
 	err = r.UpdateSubnet(testAccount, testRegion, "subnet-missing", func(*EC2Subnet) {})
 	assert.ErrorIs(t, err, models.ErrNotFound)
 }
+
+// TestCreateEIPStepsPastAHeldIP: AWS never gives two allocations one
+// IP, so CreateEIP takes the next free address in the /24, wrapping,
+// and only within the account and region.
+func TestCreateEIPStepsPastAHeldIP(t *testing.T) {
+	r := setupRepo(t)
+	create := func(id, region, ip string) string {
+		t.Helper()
+		eip := &EC2EIP{AllocationID: id, Domain: "vpc", PublicIP: ip, Region: region, CreatedAt: "t"}
+		require.NoError(t, r.CreateEIP(testAccount, eip))
+		got, err := r.GetEIP(testAccount, region, id)
+		require.NoError(t, err)
+		assert.Equal(t, eip.PublicIP, got.PublicIP, "%s: stored IP is the one set on eip", id)
+		return got.PublicIP
+	}
+	assert.Equal(t, "203.0.113.7", create("eipalloc-1", testRegion, "203.0.113.7"))
+	assert.Equal(t, "203.0.113.8", create("eipalloc-2", testRegion, "203.0.113.7"), "held: next one")
+	assert.Equal(t, "203.0.113.255", create("eipalloc-3", testRegion, "203.0.113.255"))
+	assert.Equal(t, "203.0.113.0", create("eipalloc-4", testRegion, "203.0.113.255"), "wraps within the /24")
+	assert.Equal(t, "203.0.113.7", create("eipalloc-5", "eu-west-2", "203.0.113.7"), "another region's IP is not held")
+}
