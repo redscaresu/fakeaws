@@ -43,7 +43,7 @@ var SSMParameterMetadata = ssmParameterMetadata
 // registered first on purpose: loaders run by table, so PutVpc's VPC is
 // stored before the subnet that names it. On ec2_vpcs they run in
 // registration order: Refuse, Fail, QuoteFailure, Panic, PutVpc,
-// ListVpcs, GetVpcs, DropField, RenderExtra, RenderPanic.
+// ListVpcs, GetVpcs, GetVpc, DropField, RenderExtra, RenderPanic.
 //   - fakeaws-test PutSubnet loads a subnetSet's items, each referencing
 //     its VPC. Each write reads the VPC through QueryRow and refuses,
 //     naming both ids, when it is not stored; else it stores the subnet.
@@ -66,7 +66,8 @@ var SSMParameterMetadata = ssmParameterMetadata
 //     Its render reads the VPCs back through Query.
 //   - fakeaws-test ListVpcs is PutVpc paging as IAM does (Marker,
 //     IsTruncated); GetVpcs, PutVpc answering JSON {"Vpcs": [...]} and
-//     paging as SSM does (NextToken, NextToken).
+//     paging as SSM does (NextToken, NextToken); GetVpc, answering one
+//     JSON {"Vpc": {...}} and paging not at all.
 //   - fakeaws-test DropField is PutVpc whose write drops cidrBlock;
 //     RenderExtra, whose render adds an extra field; RenderPanic, whose
 //     render panics quoting the ids.
@@ -90,10 +91,12 @@ func bodyText(ex *loadExchange) string {
 	return root.Text
 }
 
-// testVpcs is a test VPC loader's body, and its render's.
+// testVpcs is a test VPC loader's body, and its render's: GetVpc's
+// holds its one VPC in Vpc.
 type testVpcs struct {
 	XMLName xml.Name  `json:"-"`
-	Vpcs    []testVpc `xml:"vpcSet>item" json:"Vpcs"`
+	Vpcs    []testVpc `xml:"vpcSet>item" json:"Vpcs,omitempty"`
+	Vpc     *testVpc  `xml:"-" json:"Vpc,omitempty"`
 }
 
 // testVpc is a VPC item.
@@ -174,12 +177,15 @@ func testRows[T any](tx *repository.LoadTx, table string, ids []string) ([]T, er
 }
 
 // testVpcLoader is the test VPC loader on action, which pages as EC2
-// does; GetVpcs answers JSON, and DropField, RenderExtra and RenderPanic
-// each break one step.
+// does; GetVpcs and GetVpc answer JSON, and DropField, RenderExtra and
+// RenderPanic each break one step.
 func testVpcLoader(action string) loader {
 	unmarshal, marshal, path := xml.Unmarshal, xml.Marshal, "vpcSet/item"
-	if action == "GetVpcs" {
+	switch action {
+	case "GetVpcs":
 		unmarshal, marshal, path = json.Unmarshal, json.Marshal, "Vpcs"
+	case "GetVpc":
+		unmarshal, marshal, path = json.Unmarshal, json.Marshal, "Vpc"
 	}
 	return loader{
 		key: LoadKey{"fakeaws-test", action}, table: "ec2_vpcs", typ: "vpc",
@@ -189,6 +195,9 @@ func testVpcLoader(action string) loader {
 			var body testVpcs
 			if err := unmarshal([]byte(ex.Body), &body); err != nil {
 				return nil, err
+			}
+			if body.Vpc != nil {
+				body.Vpcs = []testVpc{*body.Vpc}
 			}
 			items := make([]loadItem, len(body.Vpcs))
 			for i, v := range body.Vpcs {
@@ -233,10 +242,22 @@ func testVpcLoader(action string) loader {
 					body.Vpcs[i].Extra = "minted"
 				}
 			}
+			if action == "GetVpc" && len(body.Vpcs) == 1 {
+				body.Vpc, body.Vpcs = &body.Vpcs[0], nil
+			}
 			return marshal(body)
 		},
 	}
 }
+
+// renderNothing is the render of a loader whose items are never
+// rendered: it decodes none, or each one's write aborts the load.
+func renderNothing(*repository.LoadTx, []string) ([]byte, error) {
+	return nil, errors.New("this test loader renders nothing")
+}
+
+// WithLoadIgnores replaces the registered ignore entries until t ends.
+var WithLoadIgnores = withDiffIgnores
 
 // failingItem is one item whose write runs fail.
 func failingItem(fail func(tx *repository.LoadTx) error) []loadItem {
@@ -286,15 +307,17 @@ func init() {
 		},
 	})
 	registerLoader(loader{
-		key:   LoadKey{"fakeaws-test", "Refuse"},
-		table: "ec2_vpcs",
+		key:    LoadKey{"fakeaws-test", "Refuse"},
+		table:  "ec2_vpcs",
+		render: renderNothing,
 		decode: func(_ *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 			return nil, loadRefusal(bodyText(ex))
 		},
 	})
 	registerLoader(loader{
-		key:   LoadKey{"fakeaws-test", "Fail"},
-		table: "ec2_vpcs",
+		key:    LoadKey{"fakeaws-test", "Fail"},
+		table:  "ec2_vpcs",
+		render: renderNothing,
 		decode: func(_ *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 			return failingItem(func(tx *repository.LoadTx) error {
 				if _, err := tx.Exec(`ROLLBACK`); err != nil {
@@ -305,8 +328,9 @@ func init() {
 		},
 	})
 	registerLoader(loader{
-		key:   LoadKey{"fakeaws-test", "QuoteFailure"},
-		table: "ec2_vpcs",
+		key:    LoadKey{"fakeaws-test", "QuoteFailure"},
+		table:  "ec2_vpcs",
+		render: renderNothing,
 		decode: func(_ *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 			return failingItem(func(tx *repository.LoadTx) error {
 				if _, err := tx.Exec(`ROLLBACK`); err != nil {
@@ -337,8 +361,9 @@ func init() {
 		},
 	})
 	registerLoader(loader{
-		key:   LoadKey{"fakeaws-test", "Panic"},
-		table: "ec2_vpcs",
+		key:    LoadKey{"fakeaws-test", "Panic"},
+		table:  "ec2_vpcs",
+		render: renderNothing,
 		decode: func(_ *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 			panic(fmt.Sprintf("cannot decode %q", bodyText(ex)))
 		},
@@ -350,6 +375,9 @@ func init() {
 	ssm := testVpcLoader("GetVpcs")
 	ssm.responseToken = "NextToken"
 	registerLoader(ssm)
+	get := testVpcLoader("GetVpc")
+	get.requestToken, get.responseToken = "", ""
+	registerLoader(get)
 	for _, action := range []string{"DropField", "RenderExtra", "RenderPanic"} {
 		registerLoader(testVpcLoader(action))
 	}

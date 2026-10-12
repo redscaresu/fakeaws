@@ -43,10 +43,11 @@ func loadExchange(service, action, body string) string {
 	return loadPage(service, action, map[string]string{}, http.StatusOK, body)
 }
 
-// jsonPage is a json-protocol GetVpcs exchange, whose body is JSON.
-func jsonPage(params map[string]string, status int, body string) string {
+// jsonPage is a json-protocol exchange of a fakeaws-test action, whose
+// body is JSON.
+func jsonPage(action string, params map[string]any, status int, body string) string {
 	b, _ := json.Marshal(map[string]any{
-		"service": "fakeaws-test", "protocol": "json", "action": "GetVpcs", "params": params,
+		"service": "fakeaws-test", "protocol": "json", "action": action, "params": params,
 		"status": status, "body": body,
 	})
 	return string(b)
@@ -348,7 +349,7 @@ func TestMockLoad_RefusalsChangeNothing(t *testing.T) {
 			loadPage("fakeaws-test", "PutVpc", map[string]string{"NextToken": "page-2"}, http.StatusOK, vpcBody("PutVpc", "<nextToken>page-2</nextToken>", vpcItem("vpc-0b")))),
 			[]string{"exchange 1: fakeaws-test PutVpc: truncated: it answers more pages, and no later page of its read carries its nextToken"}},
 		"a JSON NextToken no page carries": {loadEnvelope(loadAccount, loadRegion,
-			jsonPage(map[string]string{}, http.StatusOK, `{"Vpcs":[{"VpcId":"vpc-0json","CidrBlock":"10.0.0.0/16"}],"NextToken":"j-2"}`)),
+			jsonPage("GetVpcs", map[string]any{}, http.StatusOK, `{"Vpcs":[{"VpcId":"vpc-0json","CidrBlock":"10.0.0.0/16"}],"NextToken":"j-2"}`)),
 			[]string{"exchange 0: fakeaws-test GetVpcs: truncated: it answers more pages, and no later page of its read carries its NextToken"}},
 		"a nextToken no page carries": {loadEnvelope(loadAccount, loadRegion, pageOne),
 			[]string{"exchange 0: fakeaws-test PutVpc: truncated: it answers more pages, and no later page of its read carries its nextToken"}},
@@ -368,6 +369,10 @@ func TestMockLoad_RefusalsChangeNothing(t *testing.T) {
 			loadPage("fakeaws-test", "PutVpc", map[string]string{"Filter.1.Name": "tag-key"}, http.StatusOK, vpcBody("PutVpc", "", vpcItem("vpc-0dup"))),
 			loadPage("fakeaws-test", "PutVpc", map[string]string{"Filter.1.Name": "vpc-id"}, http.StatusOK, vpcBody("PutVpc", "", vpcItem("vpc-0dup"), vpcItem("vpc-0dup")))),
 			[]string{"exchange 1: fakeaws-test PutVpc: vpc vpc-0dup repeats in its page chain, first at exchange 1"}},
+		"one item recorded differently by two actions": {loadEnvelope(loadAccount, loadRegion,
+			loadExchange("fakeaws-test", "PutVpc", vpcBody("PutVpc", "", vpcItem("vpc-0both"))),
+			loadExchange("fakeaws-test", "ListVpcs", vpcBody("ListVpcs", "", "<item><vpcId>vpc-0both</vpcId><cidrBlock>10.9.0.0/16</cidrBlock></item>"))),
+			[]string{"exchange 1: fakeaws-test ListVpcs: vpc vpc-0both differs from exchange 0's (fakeaws-test PutVpc)"}},
 		"one item recorded differently by two reads": {loadEnvelope(loadAccount, loadRegion,
 			putVpc("vpc-0shared"), sharedGroup("tag-key", "web"), sharedGroup("vpc-id", "web-renamed")),
 			[]string{"exchange 2: fakeaws-test DescribeSecurityGroups: security-group sg-0shared differs from exchange 1's (fakeaws-test DescribeSecurityGroups)"}},
@@ -530,8 +535,8 @@ func TestMockLoad_NotFoundIsAbsent(t *testing.T) {
 	status, body := postLoad(t, srv, loadEnvelope(loadAccount, loadRegion, putVpc("vpc-0found"),
 		loadPage("fakeaws-test", "PutVpc", map[string]string{"VpcId.1": "vpc-0gone"}, http.StatusBadRequest,
 			"<Response><Errors><Error><Code>InvalidVpcID.NotFound</Code><Message>gone</Message></Error></Errors><RequestID>r</RequestID></Response>"),
-		jsonPage(map[string]string{"VpcId": "vpc-0gone"}, http.StatusBadRequest, `{"__type":"com.amazonaws.ec2#InvalidVpcID.NotFound","message":"gone"}`),
-		jsonPage(map[string]string{"VpcId": "vpc-0gone2"}, http.StatusBadRequest, `{"__type":"InvalidVpcID.NotFound:http://internal.amazon.com/coral/com.amazon.coral.service/"}`)))
+		jsonPage("GetVpcs", map[string]any{"VpcId": "vpc-0gone"}, http.StatusBadRequest, `{"__type":"com.amazonaws.ec2#InvalidVpcID.NotFound","message":"gone"}`),
+		jsonPage("GetVpcs", map[string]any{"VpcId": "vpc-0gone2"}, http.StatusBadRequest, `{"__type":"InvalidVpcID.NotFound:http://internal.amazon.com/coral/com.amazon.coral.service/"}`)))
 	require.Equal(t, http.StatusOK, status, body)
 	assert.JSONEq(t, `{"loaded":{"vpc":1},"absent":{"vpc":3},"unresolved":{}}`, body)
 }
@@ -553,8 +558,8 @@ func TestMockLoad_LoadsEveryPageOfAChain(t *testing.T) {
 		page("PutVpc", "page-2", "<nextToken>page-3</nextToken>", "vpc-0page2"),
 		page("ListVpcs", "m-2", "<IsTruncated>false</IsTruncated>", "vpc-0iam2"),
 		page("PutVpc", "page-3", "", "vpc-0page3"),
-		jsonPage(map[string]string{}, http.StatusOK, `{"Vpcs":[{"VpcId":"vpc-0json1","CidrBlock":"10.0.0.0/16"}],"NextToken":"j-2"}`),
-		jsonPage(map[string]string{"NextToken": "j-2"}, http.StatusOK, `{"Vpcs":[{"VpcId":"vpc-0json2","CidrBlock":"10.0.0.0/16"}]}`)))
+		jsonPage("GetVpcs", map[string]any{}, http.StatusOK, `{"Vpcs":[{"VpcId":"vpc-0json1","CidrBlock":"10.0.0.0/16"}],"NextToken":"j-2"}`),
+		jsonPage("GetVpcs", map[string]any{"NextToken": "j-2"}, http.StatusOK, `{"Vpcs":[{"VpcId":"vpc-0json2","CidrBlock":"10.0.0.0/16"}]}`)))
 	require.Equal(t, http.StatusOK, status, body)
 	assert.JSONEq(t, `{"loaded":{"vpc":7},"absent":{},"unresolved":{}}`, body)
 }
@@ -571,6 +576,59 @@ func TestMockLoad_SameItemInTwoReadsLoadsOnce(t *testing.T) {
 	var groups int
 	require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM ec2_security_groups`).Scan(&groups))
 	assert.Equal(t, 1, groups)
+}
+
+// TestMockLoad_SameItemFromTwoActionsLoadsOnce: one item two actions
+// answer under different roots, names and paths (as GetRole's Role and
+// ListRoles' member are) compares by its fields: equal, it loads once,
+// and a field either action's ignore entry names is not compared.
+func TestMockLoad_SameItemFromTwoActionsLoadsOnce(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	vpc := func(cidr string) string { return `{"VpcId":"vpc-0both","CidrBlock":"` + cidr + `"}` }
+	jsonBoth := func(getCidr string) string {
+		return loadEnvelope(loadAccount, loadRegion,
+			jsonPage("GetVpcs", map[string]any{}, http.StatusOK, `{"Vpcs":[`+vpc("10.0.0.0/16")+`]}`),
+			jsonPage("GetVpc", map[string]any{"VpcId": "vpc-0both"}, http.StatusOK, `{"Vpc":`+vpc(getCidr)+`}`))
+	}
+	for name, envelope := range map[string]string{
+		"XML roots": loadEnvelope(loadAccount, loadRegion,
+			loadExchange("fakeaws-test", "PutVpc", vpcBody("PutVpc", "", vpcItem("vpc-0both"))),
+			loadExchange("fakeaws-test", "ListVpcs", vpcBody("ListVpcs", "", vpcItem("vpc-0both")))),
+		"JSON paths": jsonBoth("10.0.0.0/16"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, body := postLoad(t, srv, envelope)
+			require.Equal(t, http.StatusOK, status, body)
+			assert.JSONEq(t, `{"loaded":{"vpc":1},"absent":{},"unresolved":{}}`, body)
+		})
+	}
+
+	status, body := postLoad(t, srv, jsonBoth("10.9.0.0/16"))
+	require.Equal(t, http.StatusBadRequest, status, body)
+	assert.Equal(t, []string{"exchange 1: fakeaws-test GetVpc: vpc vpc-0both differs from exchange 0's (fakeaws-test GetVpcs)"}, loadRefusals(t, body))
+	for action, path := range map[string]string{"GetVpcs": "Vpcs/CidrBlock", "GetVpc": "Vpc/CidrBlock"} {
+		t.Run("ignored by "+action, func(t *testing.T) {
+			handlers.WithLoadIgnores(t, handlers.IgnoreEntry{Key: handlers.LoadKey{Service: "fakeaws-test", Action: action},
+				Path: path, Cite: "terraform-provider-aws@v5.100.0/internal/service/ec2/vpc_.go"})
+			status, body := postLoad(t, srv, jsonBoth("10.9.0.0/16"))
+			require.Equal(t, http.StatusOK, status, body)
+			assert.JSONEq(t, `{"loaded":{"vpc":1},"absent":{},"unresolved":{}}`, body)
+		})
+	}
+}
+
+// TestMockLoad_NullOrEmptyTokenIsNone: a request token sent null or
+// empty, as an SSM client may on a first page, carries nothing.
+func TestMockLoad_NullOrEmptyTokenIsNone(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	for name, token := range map[string]any{"null": nil, "empty": ""} {
+		t.Run(name, func(t *testing.T) {
+			status, body := postLoad(t, srv, loadEnvelope(loadAccount, loadRegion,
+				jsonPage("GetVpcs", map[string]any{"NextToken": token}, http.StatusOK, `{"Vpcs":[{"VpcId":"vpc-0first","CidrBlock":"10.0.0.0/16"}]}`)))
+			require.Equal(t, http.StatusOK, status, body)
+			assert.JSONEq(t, `{"loaded":{"vpc":1},"absent":{},"unresolved":{}}`, body)
+		})
+	}
 }
 
 // TestMockLoad_UnreadReferenceIsUnresolved: a reference the reader never

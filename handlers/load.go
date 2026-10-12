@@ -116,14 +116,26 @@ func loaderFor(key LoadKey) *loader {
 var loaders []loader
 
 // registerLoader adds l in rank order. It panics on a table resetTables
-// does not hold or a key already registered.
+// does not hold, a key already registered, a missing decode or render,
+// half a pair of page tokens, a truncated field with no response token,
+// or NotFound codes with no typ to count them under.
 func registerLoader(l loader) {
+	name := l.key.Service + " " + l.key.Action
 	rank, ok := repository.LoadRank(l.table)
 	if !ok {
-		panic(fmt.Sprintf("loader %s %s writes %q, which is not a reset table", l.key.Service, l.key.Action, l.table))
+		panic(fmt.Sprintf("loader %s writes %q, which is not a reset table", name, l.table))
 	}
-	if slices.ContainsFunc(loaders, func(have loader) bool { return have.key == l.key }) {
-		panic(fmt.Sprintf("loader %s %s registered twice", l.key.Service, l.key.Action))
+	switch {
+	case slices.ContainsFunc(loaders, func(have loader) bool { return have.key == l.key }):
+		panic(fmt.Sprintf("loader %s registered twice", name))
+	case l.decode == nil || l.render == nil:
+		panic(fmt.Sprintf("loader %s needs both decode and render", name))
+	case (l.requestToken == "") != (l.responseToken == ""):
+		panic(fmt.Sprintf("loader %s pages with only one of requestToken and responseToken", name))
+	case l.truncated != "" && l.responseToken == "":
+		panic(fmt.Sprintf("loader %s answers truncated %q but no responseToken", name, l.truncated))
+	case len(l.notFound) > 0 && l.typ == "":
+		panic(fmt.Sprintf("loader %s has notFound codes but no typ to count them under", name))
 	}
 	l.rank = rank
 	i := slices.IndexFunc(loaders, func(have loader) bool { return have.rank > rank })
@@ -339,7 +351,7 @@ func (run *loadRun) link() map[LoadKey][]int {
 	for i := range run.env.Exchanges {
 		ex := &run.env.Exchanges[i]
 		l := loaderFor(ex.key())
-		if ex.Status < 200 || ex.Status > 299 {
+		if ex.Status < http.StatusOK || ex.Status >= http.StatusMultipleChoices {
 			run.status(l, i)
 			continue
 		}
@@ -448,10 +460,11 @@ func (run *loadRun) pages(l *loader, pages []int) {
 	}
 }
 
-// carried is the request token ex carries, "" for none.
+// carried is the request token ex carries, "" for none: an absent, null
+// or empty token. Any other value is a token, as fmt spells it.
 func (l *loader) carried(ex *loadExchange) string {
 	params, _ := ex.Params.(map[string]any)
-	if token, ok := params[l.requestToken]; ok && l.requestToken != "" {
+	if token := params[l.requestToken]; token != nil && l.requestToken != "" {
 		return fmt.Sprint(token)
 	}
 	return ""
@@ -524,11 +537,10 @@ func (run *loadRun) recorded(i int, item *loadItem) (*Tree, error) {
 
 // repeat answers item of exchange i, whose row first already wrote.
 // Within one page chain it is refused, naming it. Across chains it loads
-// once when the two recorded subtrees are equal by Diff, under first's
-// key, else it is refused naming it and both exchanges. A subtree keeps
-// its ancestors, so an XML item two actions answer differs at its root
-// (GetRole's and ListRoles' role); JSON roots are unnamed, so two
-// actions' items at one path compare field by field.
+// once when the two recorded items are equal by Diff, else it is refused
+// naming it and both exchanges. The items compare below their paths,
+// unnamed, so one item two actions answer (GetRole's Role, ListRoles'
+// member) compares by its fields, under both keys' ignore entries.
 func (run *loadRun) repeat(first *loadRow, i int, item *loadItem) error {
 	if at, ok := first.seen[run.chain[i]]; ok {
 		run.refuse(i, "%s %s repeats in its page chain, first at exchange %d", item.Type, item.ID, at)
@@ -544,10 +556,32 @@ func (run *loadRun) repeat(first *loadRow, i int, item *loadItem) error {
 		return err
 	}
 	key := run.env.Exchanges[first.exchange].key()
-	if rec, ren := Diff(key, was, now); len(rec)+len(ren) > 0 {
+	ignore := map[string]bool{}
+	for _, e := range loadIgnores {
+		for _, side := range []struct {
+			key  LoadKey
+			path string
+		}{{key, first.Path}, {run.env.Exchanges[i].key(), item.Path}} {
+			if rel, ok := strings.CutPrefix(e.Path, side.path+"/"); ok && e.Key == side.key {
+				ignore[rel] = true
+			}
+		}
+	}
+	if rec, ren := diffIgnoring(ignore, itemNode(was, first.Path), itemNode(now, item.Path)); len(rec)+len(ren) > 0 {
 		run.refuse(i, "%s %s differs from exchange %d's (%s %s)", item.Type, item.ID, first.exchange, key.Service, key.Action)
 	}
 	return nil
+}
+
+// itemNode is the node a Subtree chain at path ends at, unnamed, so two
+// actions' items compare by their fields whatever each calls them.
+func itemNode(chain *Tree, path string) *Tree {
+	for range strings.Count(path, "/") + 1 {
+		chain = chain.kids[0]
+	}
+	n := *chain
+	n.name, n.member, n.index = "", false, 0
+	return &n
 }
 
 // resolve checks every row's references: one naming no loaded row is
