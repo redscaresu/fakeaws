@@ -1,0 +1,769 @@
+dbSchemaVersion 2
+
+=== table audit
+CREATE TABLE audit (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts          TEXT NOT NULL,
+		account_id  TEXT NOT NULL,
+		region      TEXT,
+		method      TEXT NOT NULL,
+		path        TEXT NOT NULL,
+		status_code INTEGER NOT NULL
+	)
+
+=== table availability_zones
+CREATE TABLE availability_zones (
+		account_id           TEXT NOT NULL,
+		region               TEXT NOT NULL,
+		zone_name            TEXT NOT NULL,
+		zone_id              TEXT NOT NULL,
+		state                TEXT NOT NULL,
+		opt_in_status        TEXT NOT NULL,
+		zone_type            TEXT NOT NULL,
+		group_name           TEXT NOT NULL,
+		network_border_group TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, zone_name)
+	)
+
+=== table dynamodb_items
+CREATE TABLE dynamodb_items (
+		account_id  TEXT NOT NULL,
+		region      TEXT NOT NULL,
+		table_name  TEXT NOT NULL,
+		hash_value  TEXT NOT NULL,
+		range_value TEXT NOT NULL DEFAULT '',
+		item        TEXT NOT NULL,
+		-- Codex pass 6 BLOCKING #1: region must be in the PK so
+		-- same-named tables in different regions can hold their
+		-- own item sets without bleeding across regions.
+		PRIMARY KEY (account_id, region, table_name, hash_value, range_value),
+		FOREIGN KEY (account_id, region, table_name)
+		    REFERENCES dynamodb_tables(account_id, region, name) ON DELETE CASCADE
+	)
+
+=== table dynamodb_tables
+CREATE TABLE dynamodb_tables (
+		account_id   TEXT NOT NULL,
+		region       TEXT NOT NULL,
+		name         TEXT NOT NULL,
+		hash_key     TEXT NOT NULL,
+		range_key    TEXT NOT NULL DEFAULT '',
+		attributes   TEXT NOT NULL DEFAULT '[]',
+		billing_mode TEXT NOT NULL DEFAULT 'PAY_PER_REQUEST',
+		status       TEXT NOT NULL DEFAULT 'ACTIVE',
+		arn          TEXT NOT NULL,
+		data         TEXT NOT NULL,
+		created_at   TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, name)
+	)
+
+=== table ec2_amis
+CREATE TABLE ec2_amis (
+		account_id           TEXT NOT NULL,
+		region               TEXT NOT NULL,
+		id                   TEXT NOT NULL,
+		name                 TEXT NOT NULL,
+		owner_id             TEXT NOT NULL,
+		virtualization_type  TEXT NOT NULL DEFAULT 'hvm',
+		root_device_name     TEXT NOT NULL DEFAULT '/dev/xvda',
+		data                 TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, id)
+	)
+
+=== table ec2_eips
+CREATE TABLE ec2_eips (
+		account_id           TEXT NOT NULL,
+		region               TEXT NOT NULL,
+		allocation_id        TEXT NOT NULL,
+		domain               TEXT NOT NULL DEFAULT 'vpc',
+		public_ip            TEXT NOT NULL,
+		network_interface_id TEXT,
+		instance_id          TEXT,
+		association_id       TEXT,
+		data                 TEXT NOT NULL,
+		created_at           TEXT NOT NULL,
+		PRIMARY KEY (account_id, allocation_id)
+	)
+
+=== table ec2_instances
+CREATE TABLE ec2_instances (
+		account_id              TEXT NOT NULL,
+		region                  TEXT NOT NULL,
+		id                      TEXT NOT NULL,
+		subnet_id               TEXT NOT NULL,
+		ami_id                  TEXT NOT NULL,
+		instance_type           TEXT NOT NULL,
+		iam_instance_profile_name TEXT,
+		state                   TEXT NOT NULL DEFAULT 'running',
+		arn                     TEXT NOT NULL,
+		data                    TEXT NOT NULL,
+		created_at              TEXT NOT NULL,
+		PRIMARY KEY (account_id, id),
+		FOREIGN KEY (account_id, subnet_id) REFERENCES ec2_subnets(account_id, id) ON DELETE RESTRICT
+	)
+
+=== table ec2_internet_gateways
+CREATE TABLE ec2_internet_gateways (
+		account_id TEXT NOT NULL,
+		region     TEXT NOT NULL,
+		id         TEXT NOT NULL,
+		vpc_id     TEXT,
+		arn        TEXT NOT NULL,
+		data       TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (account_id, id)
+		-- Composite FK with ON DELETE SET NULL would NULL account_id
+		-- too (NOT NULL constraint trips). DeleteVPC handles IGW
+		-- detach manually via UPDATE before deleting the parent.
+	)
+
+=== table ec2_key_pairs
+CREATE TABLE ec2_key_pairs (
+		account_id  TEXT NOT NULL,
+		region      TEXT NOT NULL,
+		name        TEXT NOT NULL,
+		public_key  TEXT NOT NULL,
+		fingerprint TEXT NOT NULL,
+		data        TEXT NOT NULL,
+		created_at  TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, name)
+	)
+
+=== table ec2_network_interfaces
+CREATE TABLE ec2_network_interfaces (
+		account_id  TEXT NOT NULL,
+		region      TEXT NOT NULL,
+		id          TEXT NOT NULL,
+		instance_id TEXT NOT NULL,
+		subnet_id   TEXT NOT NULL,
+		private_ip  TEXT NOT NULL,
+		data        TEXT NOT NULL,
+		PRIMARY KEY (account_id, id),
+		UNIQUE (account_id, subnet_id, private_ip),
+		FOREIGN KEY (account_id, instance_id) REFERENCES ec2_instances(account_id, id) ON DELETE CASCADE
+	)
+
+=== table ec2_route_table_associations
+CREATE TABLE ec2_route_table_associations (
+		account_id     TEXT NOT NULL,
+		id             TEXT NOT NULL,
+		route_table_id TEXT NOT NULL,
+		subnet_id      TEXT NOT NULL,
+		PRIMARY KEY (account_id, id),
+		FOREIGN KEY (account_id, route_table_id) REFERENCES ec2_route_tables(account_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (account_id, subnet_id)      REFERENCES ec2_subnets(account_id, id)      ON DELETE CASCADE,
+		UNIQUE (account_id, subnet_id) -- one association per subnet (real EC2 contract)
+	)
+
+=== table ec2_route_tables
+CREATE TABLE ec2_route_tables (
+		account_id TEXT NOT NULL,
+		region     TEXT NOT NULL,
+		id         TEXT NOT NULL,
+		vpc_id     TEXT NOT NULL,
+		arn        TEXT NOT NULL,
+		data       TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (account_id, id),
+		FOREIGN KEY (account_id, vpc_id) REFERENCES ec2_vpcs(account_id, id) ON DELETE CASCADE
+	)
+
+=== table ec2_routes
+CREATE TABLE ec2_routes (
+		account_id              TEXT NOT NULL,
+		route_table_id          TEXT NOT NULL,
+		destination_cidr_block  TEXT NOT NULL,
+		gateway_id              TEXT,
+		nat_gateway_id          TEXT,
+		instance_id             TEXT,
+		network_interface_id    TEXT,
+		PRIMARY KEY (account_id, route_table_id, destination_cidr_block),
+		FOREIGN KEY (account_id, route_table_id) REFERENCES ec2_route_tables(account_id, id) ON DELETE CASCADE
+	)
+
+=== table ec2_security_groups
+CREATE TABLE ec2_security_groups (
+		account_id   TEXT NOT NULL,
+		region       TEXT NOT NULL,
+		id           TEXT NOT NULL,
+		vpc_id       TEXT NOT NULL,
+		group_name   TEXT NOT NULL,
+		description  TEXT NOT NULL,
+		ingress      TEXT NOT NULL DEFAULT '[]',
+		egress       TEXT NOT NULL DEFAULT '[]',
+		arn          TEXT NOT NULL,
+		data         TEXT NOT NULL,
+		created_at   TEXT NOT NULL,
+		PRIMARY KEY (account_id, id),
+		FOREIGN KEY (account_id, vpc_id) REFERENCES ec2_vpcs(account_id, id) ON DELETE CASCADE,
+		UNIQUE (account_id, vpc_id, group_name)
+	)
+
+=== table ec2_subnets
+CREATE TABLE ec2_subnets (
+		account_id        TEXT NOT NULL,
+		region            TEXT NOT NULL,
+		id                TEXT NOT NULL,
+		vpc_id            TEXT NOT NULL,
+		cidr_block        TEXT NOT NULL,
+		availability_zone TEXT NOT NULL,
+		arn               TEXT NOT NULL,
+		data              TEXT NOT NULL,
+		created_at        TEXT NOT NULL,
+		PRIMARY KEY (account_id, id),
+		FOREIGN KEY (account_id, vpc_id) REFERENCES ec2_vpcs(account_id, id) ON DELETE CASCADE
+	)
+
+=== table ec2_tags
+CREATE TABLE ec2_tags (
+		account_id    TEXT NOT NULL,
+		region        TEXT NOT NULL,
+		resource_id   TEXT NOT NULL,
+		resource_type TEXT NOT NULL,
+		key           TEXT NOT NULL,
+		value         TEXT NOT NULL,
+		PRIMARY KEY (account_id, resource_id, key)
+	)
+
+=== table ec2_vpcs
+CREATE TABLE ec2_vpcs (
+		account_id TEXT NOT NULL,
+		region     TEXT NOT NULL,
+		id         TEXT NOT NULL,
+		cidr_block TEXT NOT NULL,
+		arn        TEXT NOT NULL,
+		data       TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (account_id, id)
+	)
+
+=== table eks_addons
+CREATE TABLE eks_addons (
+		account_id    TEXT NOT NULL,
+		region        TEXT NOT NULL,
+		cluster_name  TEXT NOT NULL,
+		name          TEXT NOT NULL,
+		version       TEXT NOT NULL DEFAULT '',
+		status        TEXT NOT NULL DEFAULT 'ACTIVE',
+		arn           TEXT NOT NULL,
+		data          TEXT NOT NULL,
+		created_at    TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, cluster_name, name),
+		FOREIGN KEY (account_id, region, cluster_name) REFERENCES eks_clusters(account_id, region, name) ON DELETE CASCADE
+	)
+
+=== table eks_clusters
+CREATE TABLE eks_clusters (
+		account_id        TEXT NOT NULL,
+		region            TEXT NOT NULL,
+		name              TEXT NOT NULL,
+		role_arn          TEXT NOT NULL,
+		subnet_ids        TEXT NOT NULL DEFAULT '[]',
+		security_group_ids TEXT NOT NULL DEFAULT '[]',
+		kubernetes_version TEXT NOT NULL DEFAULT '',
+		status            TEXT NOT NULL DEFAULT 'ACTIVE',
+		arn               TEXT NOT NULL,
+		data              TEXT NOT NULL,
+		created_at        TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, name)
+	)
+
+=== table eks_node_groups
+CREATE TABLE eks_node_groups (
+		account_id     TEXT NOT NULL,
+		region         TEXT NOT NULL,
+		cluster_name   TEXT NOT NULL,
+		name           TEXT NOT NULL,
+		node_role_arn  TEXT NOT NULL,
+		subnet_ids     TEXT NOT NULL DEFAULT '[]',
+		instance_types TEXT NOT NULL DEFAULT '[]',
+		scaling_config TEXT NOT NULL DEFAULT '{}',
+		status         TEXT NOT NULL DEFAULT 'ACTIVE',
+		arn            TEXT NOT NULL,
+		data           TEXT NOT NULL,
+		created_at     TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, cluster_name, name),
+		FOREIGN KEY (account_id, region, cluster_name) REFERENCES eks_clusters(account_id, region, name) ON DELETE CASCADE
+	)
+
+=== table iam_access_keys
+CREATE TABLE iam_access_keys (
+		account_id TEXT NOT NULL,
+		user_name  TEXT NOT NULL,
+		id         TEXT NOT NULL,
+		secret     TEXT NOT NULL,
+		status     TEXT NOT NULL DEFAULT 'Active',
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (account_id, user_name, id),
+		FOREIGN KEY (account_id, user_name) REFERENCES iam_users(account_id, name) ON DELETE CASCADE
+	)
+
+=== table iam_instance_profiles
+CREATE TABLE iam_instance_profiles (
+		account_id TEXT NOT NULL,
+		name       TEXT NOT NULL,
+		path       TEXT NOT NULL DEFAULT '/',
+		arn        TEXT NOT NULL,
+		data       TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (account_id, name)
+	)
+
+=== table iam_policies
+CREATE TABLE iam_policies (
+		account_id TEXT NOT NULL,
+		name       TEXT NOT NULL,
+		path       TEXT NOT NULL DEFAULT '/',
+		arn        TEXT NOT NULL,
+		data       TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (account_id, name)
+	)
+
+=== table iam_roles
+CREATE TABLE iam_roles (
+		account_id TEXT NOT NULL,
+		name       TEXT NOT NULL,
+		path       TEXT NOT NULL DEFAULT '/',
+		arn        TEXT NOT NULL,
+		data       TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (account_id, name)
+	)
+
+=== table iam_users
+CREATE TABLE iam_users (
+		account_id TEXT NOT NULL,
+		name       TEXT NOT NULL,
+		path       TEXT NOT NULL DEFAULT '/',
+		arn        TEXT NOT NULL,
+		data       TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (account_id, name)
+	)
+
+=== table identity
+CREATE TABLE identity (
+		id         INTEGER PRIMARY KEY CHECK(id=1),
+		account_id TEXT NOT NULL,
+		region     TEXT NOT NULL DEFAULT '',
+		loaded     INTEGER NOT NULL DEFAULT 0
+	)
+
+=== table instance_profile_roles
+CREATE TABLE instance_profile_roles (
+		account_id   TEXT NOT NULL,
+		profile_name TEXT NOT NULL,
+		role_name    TEXT NOT NULL,
+		PRIMARY KEY (account_id, profile_name),
+		FOREIGN KEY (account_id, profile_name) REFERENCES iam_instance_profiles(account_id, name) ON DELETE CASCADE,
+		FOREIGN KEY (account_id, role_name)    REFERENCES iam_roles(account_id, name)              ON DELETE RESTRICT
+	)
+
+=== table kms_keys
+CREATE TABLE kms_keys (
+		account_id TEXT NOT NULL,
+		region     TEXT NOT NULL,
+		key_id     TEXT NOT NULL,
+		state      TEXT NOT NULL,
+		data       TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, key_id)
+	)
+
+=== table operations
+CREATE TABLE operations (
+		id          TEXT NOT NULL PRIMARY KEY,
+		account_id  TEXT NOT NULL,
+		region      TEXT,
+		service     TEXT NOT NULL,
+		operation   TEXT NOT NULL,
+		status      TEXT NOT NULL,
+		started_at  TEXT NOT NULL,
+		completed_at TEXT,
+		data        TEXT NOT NULL
+	)
+
+=== table rds_db_cluster_parameter_groups
+CREATE TABLE rds_db_cluster_parameter_groups (
+		account_id  TEXT NOT NULL,
+		region      TEXT NOT NULL,
+		name        TEXT NOT NULL,
+		family      TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		arn         TEXT NOT NULL,
+		data        TEXT NOT NULL,
+		created_at  TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, name)
+	)
+
+=== table rds_db_clusters
+CREATE TABLE rds_db_clusters (
+		account_id                       TEXT NOT NULL,
+		region                           TEXT NOT NULL,
+		id                               TEXT NOT NULL,
+		engine                           TEXT NOT NULL,
+		engine_version                   TEXT NOT NULL DEFAULT '',
+		subnet_group_name                TEXT,
+		cluster_parameter_group_name     TEXT,
+		master_username                  TEXT NOT NULL DEFAULT '',
+		deletion_protection              INTEGER NOT NULL DEFAULT 0,
+		state                            TEXT NOT NULL DEFAULT 'available',
+		arn                              TEXT NOT NULL,
+		data                             TEXT NOT NULL,
+		created_at                       TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, id),
+		FOREIGN KEY (account_id, region, subnet_group_name) REFERENCES rds_db_subnet_groups(account_id, region, name) ON DELETE RESTRICT,
+		FOREIGN KEY (account_id, region, cluster_parameter_group_name) REFERENCES rds_db_cluster_parameter_groups(account_id, region, name) ON DELETE RESTRICT
+	)
+
+=== table rds_db_instances
+CREATE TABLE rds_db_instances (
+		account_id              TEXT NOT NULL,
+		region                  TEXT NOT NULL,
+		id                      TEXT NOT NULL,
+		engine                  TEXT NOT NULL,
+		engine_version          TEXT NOT NULL DEFAULT '',
+		instance_class          TEXT NOT NULL,
+		subnet_group_name       TEXT,
+		cluster_id              TEXT,
+		parameter_group_name    TEXT,
+		replicate_source_db     TEXT,
+		deletion_protection     INTEGER NOT NULL DEFAULT 0,
+		skip_final_snapshot     INTEGER NOT NULL DEFAULT 1,
+		state                   TEXT NOT NULL DEFAULT 'available',
+		arn                     TEXT NOT NULL,
+		data                    TEXT NOT NULL,
+		created_at              TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, id),
+		FOREIGN KEY (account_id, region, subnet_group_name)    REFERENCES rds_db_subnet_groups(account_id, region, name)    ON DELETE RESTRICT,
+		FOREIGN KEY (account_id, region, cluster_id)           REFERENCES rds_db_clusters(account_id, region, id)           ON DELETE RESTRICT,
+		FOREIGN KEY (account_id, region, parameter_group_name) REFERENCES rds_db_parameter_groups(account_id, region, name) ON DELETE RESTRICT,
+		FOREIGN KEY (account_id, region, replicate_source_db)  REFERENCES rds_db_instances(account_id, region, id)          ON DELETE RESTRICT
+	)
+
+=== table rds_db_parameter_groups
+CREATE TABLE rds_db_parameter_groups (
+		account_id  TEXT NOT NULL,
+		region      TEXT NOT NULL,
+		name        TEXT NOT NULL,
+		family      TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		arn         TEXT NOT NULL,
+		data        TEXT NOT NULL,
+		created_at  TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, name)
+	)
+
+=== table rds_db_subnet_groups
+CREATE TABLE rds_db_subnet_groups (
+		account_id   TEXT NOT NULL,
+		region       TEXT NOT NULL,
+		name         TEXT NOT NULL,
+		description  TEXT NOT NULL DEFAULT '',
+		vpc_id       TEXT NOT NULL,
+		subnet_ids   TEXT NOT NULL DEFAULT '[]',
+		arn          TEXT NOT NULL,
+		data         TEXT NOT NULL,
+		created_at   TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, name)
+	)
+
+=== table resource_tags
+CREATE TABLE resource_tags (
+		account_id TEXT NOT NULL,
+		arn        TEXT NOT NULL,
+		key        TEXT NOT NULL,
+		value      TEXT NOT NULL,
+		PRIMARY KEY (account_id, arn, key)
+	)
+
+=== table role_policy_attachments
+CREATE TABLE role_policy_attachments (
+		account_id TEXT NOT NULL,
+		role_name  TEXT NOT NULL,
+		policy_arn TEXT NOT NULL,
+		PRIMARY KEY (account_id, role_name, policy_arn),
+		FOREIGN KEY (account_id, role_name) REFERENCES iam_roles(account_id, name) ON DELETE CASCADE
+	)
+
+=== table route53_changes
+CREATE TABLE route53_changes (
+		account_id   TEXT NOT NULL,
+		change_id    TEXT NOT NULL,
+		zone_id      TEXT NOT NULL,
+		status       TEXT NOT NULL DEFAULT 'INSYNC',
+		submitted_at TEXT NOT NULL,
+		PRIMARY KEY (account_id, change_id)
+	)
+
+=== table route53_hosted_zones
+CREATE TABLE route53_hosted_zones (
+		account_id  TEXT NOT NULL,
+		id          TEXT NOT NULL,
+		name        TEXT NOT NULL,
+		comment     TEXT NOT NULL DEFAULT '',
+		private     INTEGER NOT NULL DEFAULT 0,
+		arn         TEXT NOT NULL,
+		data        TEXT NOT NULL,
+		created_at  TEXT NOT NULL,
+		PRIMARY KEY (account_id, id)
+	)
+
+=== table route53_record_sets
+CREATE TABLE route53_record_sets (
+		account_id     TEXT NOT NULL,
+		zone_id        TEXT NOT NULL,
+		name           TEXT NOT NULL,
+		type           TEXT NOT NULL,
+		ttl            INTEGER NOT NULL DEFAULT 300,
+		records        TEXT NOT NULL DEFAULT '[]',
+		alias_target   TEXT NOT NULL DEFAULT '',
+		set_identifier TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (account_id, zone_id, name, type, set_identifier),
+		FOREIGN KEY (account_id, zone_id) REFERENCES route53_hosted_zones(account_id, id) ON DELETE CASCADE
+	)
+
+=== table s3_bucket_configs
+CREATE TABLE s3_bucket_configs (
+		account_id  TEXT NOT NULL,
+		bucket_name TEXT NOT NULL,
+		kind        TEXT NOT NULL,
+		data        TEXT NOT NULL,
+		updated_at  TEXT NOT NULL,
+		PRIMARY KEY (account_id, bucket_name, kind),
+		FOREIGN KEY (account_id, bucket_name) REFERENCES s3_buckets(account_id, name) ON DELETE CASCADE
+	)
+
+=== table s3_buckets
+CREATE TABLE s3_buckets (
+		account_id TEXT NOT NULL,
+		name       TEXT NOT NULL,
+		region     TEXT NOT NULL,
+		arn        TEXT NOT NULL,
+		data       TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (account_id, name)
+	)
+
+=== table schema_version
+CREATE TABLE schema_version (
+		version INTEGER NOT NULL PRIMARY KEY,
+		applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+	)
+
+=== table secretsmanager_secrets
+CREATE TABLE secretsmanager_secrets (
+		account_id              TEXT NOT NULL,
+		region                  TEXT NOT NULL,
+		name                    TEXT NOT NULL,
+		arn                     TEXT NOT NULL,
+		description             TEXT NOT NULL DEFAULT '',
+		kms_key_id              TEXT NOT NULL DEFAULT '',
+		recovery_window_in_days INTEGER NOT NULL DEFAULT 30,
+		deleted_at              TEXT NOT NULL DEFAULT '',
+		state                   TEXT NOT NULL DEFAULT 'Active',
+		tags                    TEXT NOT NULL DEFAULT '{}',
+		created_at              TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, name)
+	)
+
+=== table secretsmanager_versions
+CREATE TABLE secretsmanager_versions (
+		account_id  TEXT NOT NULL,
+		region      TEXT NOT NULL,
+		secret_name TEXT NOT NULL,
+		version_id  TEXT NOT NULL,
+		secret_string TEXT NOT NULL DEFAULT '',
+		stages      TEXT NOT NULL DEFAULT '[]',
+		created_at  TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, secret_name, version_id),
+		FOREIGN KEY (account_id, region, secret_name) REFERENCES secretsmanager_secrets(account_id, region, name) ON DELETE CASCADE
+	)
+
+=== table sqlite_sequence
+CREATE TABLE sqlite_sequence(name,seq)
+
+=== table sqs_messages
+CREATE TABLE sqs_messages (
+		account_id     TEXT NOT NULL,
+		region         TEXT NOT NULL,
+		queue_name     TEXT NOT NULL,
+		message_id     TEXT NOT NULL,
+		body           TEXT NOT NULL,
+		receipt_handle TEXT NOT NULL DEFAULT '',
+		visible_after  INTEGER NOT NULL DEFAULT 0,
+		receive_count  INTEGER NOT NULL DEFAULT 0,
+		created_at     TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, queue_name, message_id)
+	)
+
+=== table sqs_queues
+CREATE TABLE sqs_queues (
+		account_id TEXT NOT NULL,
+		region     TEXT NOT NULL,
+		name       TEXT NOT NULL,
+		queue_url  TEXT NOT NULL,
+		arn        TEXT NOT NULL,
+		attributes TEXT NOT NULL DEFAULT '{}',
+		fifo       INTEGER NOT NULL DEFAULT 0,
+		data       TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, name)
+	)
+
+=== table ssm_parameters
+CREATE TABLE ssm_parameters (
+		account_id      TEXT NOT NULL,
+		region          TEXT NOT NULL,
+		name            TEXT NOT NULL,
+		type            TEXT NOT NULL,
+		value           TEXT NOT NULL,
+		version         INTEGER NOT NULL,
+		description     TEXT NOT NULL,
+		allowed_pattern TEXT NOT NULL,
+		data_type       TEXT NOT NULL,
+		key_id          TEXT NOT NULL,
+		tier            TEXT NOT NULL,
+		tags            TEXT NOT NULL,
+		last_modified   TEXT NOT NULL,
+		PRIMARY KEY (account_id, region, name)
+	)
+
+=== table user_inline_policies
+CREATE TABLE user_inline_policies (
+		account_id TEXT NOT NULL,
+		user_name  TEXT NOT NULL,
+		name       TEXT NOT NULL,
+		document   TEXT NOT NULL,
+		PRIMARY KEY (account_id, user_name, name),
+		FOREIGN KEY (account_id, user_name) REFERENCES iam_users(account_id, name) ON DELETE CASCADE
+	)
+
+=== table user_policy_attachments
+CREATE TABLE user_policy_attachments (
+		account_id TEXT NOT NULL,
+		user_name  TEXT NOT NULL,
+		policy_arn TEXT NOT NULL,
+		PRIMARY KEY (account_id, user_name, policy_arn),
+		FOREIGN KEY (account_id, user_name) REFERENCES iam_users(account_id, name) ON DELETE CASCADE
+	)
+
+=== trigger dynamodb_tables_drop_resource_tags
+CREATE TRIGGER dynamodb_tables_drop_resource_tags AFTER DELETE ON dynamodb_tables BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger ec2_eips_drop_tags
+CREATE TRIGGER ec2_eips_drop_tags AFTER DELETE ON ec2_eips BEGIN
+			DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.allocation_id;
+		END
+
+=== trigger ec2_instances_drop_tags
+CREATE TRIGGER ec2_instances_drop_tags AFTER DELETE ON ec2_instances BEGIN
+				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
+			END
+
+=== trigger ec2_internet_gateways_drop_tags
+CREATE TRIGGER ec2_internet_gateways_drop_tags AFTER DELETE ON ec2_internet_gateways BEGIN
+				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
+			END
+
+=== trigger ec2_key_pairs_drop_tags
+CREATE TRIGGER ec2_key_pairs_drop_tags AFTER DELETE ON ec2_key_pairs BEGIN
+			DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = json_extract(OLD.data, '$.key_pair_id');
+		END
+
+=== trigger ec2_network_interfaces_drop_tags
+CREATE TRIGGER ec2_network_interfaces_drop_tags AFTER DELETE ON ec2_network_interfaces BEGIN
+				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
+			END
+
+=== trigger ec2_route_tables_drop_tags
+CREATE TRIGGER ec2_route_tables_drop_tags AFTER DELETE ON ec2_route_tables BEGIN
+				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
+			END
+
+=== trigger ec2_security_groups_drop_tags
+CREATE TRIGGER ec2_security_groups_drop_tags AFTER DELETE ON ec2_security_groups BEGIN
+				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
+			END
+
+=== trigger ec2_subnets_drop_tags
+CREATE TRIGGER ec2_subnets_drop_tags AFTER DELETE ON ec2_subnets BEGIN
+				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
+			END
+
+=== trigger ec2_vpcs_drop_tags
+CREATE TRIGGER ec2_vpcs_drop_tags AFTER DELETE ON ec2_vpcs BEGIN
+				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
+			END
+
+=== trigger eks_addons_drop_resource_tags
+CREATE TRIGGER eks_addons_drop_resource_tags AFTER DELETE ON eks_addons BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger eks_clusters_drop_resource_tags
+CREATE TRIGGER eks_clusters_drop_resource_tags AFTER DELETE ON eks_clusters BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger eks_node_groups_drop_resource_tags
+CREATE TRIGGER eks_node_groups_drop_resource_tags AFTER DELETE ON eks_node_groups BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger iam_instance_profiles_drop_resource_tags
+CREATE TRIGGER iam_instance_profiles_drop_resource_tags AFTER DELETE ON iam_instance_profiles BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger iam_policies_drop_resource_tags
+CREATE TRIGGER iam_policies_drop_resource_tags AFTER DELETE ON iam_policies BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger iam_roles_drop_resource_tags
+CREATE TRIGGER iam_roles_drop_resource_tags AFTER DELETE ON iam_roles BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger iam_users_drop_resource_tags
+CREATE TRIGGER iam_users_drop_resource_tags AFTER DELETE ON iam_users BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger rds_db_cluster_parameter_groups_drop_resource_tags
+CREATE TRIGGER rds_db_cluster_parameter_groups_drop_resource_tags AFTER DELETE ON rds_db_cluster_parameter_groups BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger rds_db_clusters_drop_resource_tags
+CREATE TRIGGER rds_db_clusters_drop_resource_tags AFTER DELETE ON rds_db_clusters BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger rds_db_instances_drop_resource_tags
+CREATE TRIGGER rds_db_instances_drop_resource_tags AFTER DELETE ON rds_db_instances BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger rds_db_parameter_groups_drop_resource_tags
+CREATE TRIGGER rds_db_parameter_groups_drop_resource_tags AFTER DELETE ON rds_db_parameter_groups BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger rds_db_subnet_groups_drop_resource_tags
+CREATE TRIGGER rds_db_subnet_groups_drop_resource_tags AFTER DELETE ON rds_db_subnet_groups BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger route53_hosted_zones_drop_resource_tags
+CREATE TRIGGER route53_hosted_zones_drop_resource_tags AFTER DELETE ON route53_hosted_zones BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END
+
+=== trigger sqs_queues_drop_resource_tags
+CREATE TRIGGER sqs_queues_drop_resource_tags AFTER DELETE ON sqs_queues BEGIN
+				DELETE FROM resource_tags WHERE account_id = OLD.account_id AND arn = OLD.arn;
+			END

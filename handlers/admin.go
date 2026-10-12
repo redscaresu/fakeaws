@@ -427,7 +427,8 @@ func (app *Application) handleMockRestore(w http.ResponseWriter, _ *http.Request
 	backfill := func(staged *repository.Repository) error { return staged.BackfillDefaultGroups(newDefaultGroup) }
 	if err := app.repo.Restore(backfill); err != nil {
 		// ErrNotFound = no snapshot baseline (404).
-		// ErrConflict = :memory: db (409).
+		// ErrConflict = :memory: db, or a snapshot at another db
+		// schema version (409).
 		status := http.StatusInternalServerError
 		switch {
 		case errors.Is(err, models.ErrNotFound):
