@@ -68,6 +68,9 @@ func (app *Application) registerAdminRoutes(r chi.Router) {
 			mr.Get("/requests", app.handleMockRequests)
 			mr.Post("/requests/clear", app.handleMockRequestsClear)
 		}
+		if app.loadMaxBytes > 0 {
+			mr.Post("/load", app.handleMockLoad)
+		}
 	})
 }
 
@@ -274,17 +277,25 @@ func validateSeedImage(req *seedImageRequest, account string) string {
 // most maxAdminBodyBytes, from r's body into v. It writes the 400 and
 // returns false when it cannot.
 func decodeAdminBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminBodyBytes))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
+	if err := decodeStrict(http.MaxBytesReader(w, r.Body, maxAdminBodyBytes), v); err != nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return false
 	}
-	if dec.Decode(&struct{}{}) != io.EOF {
-		writeAdminError(w, http.StatusBadRequest, "invalid body: one JSON object expected")
-		return false
-	}
 	return true
+}
+
+// decodeStrict decodes one JSON object, with no unknown fields, from
+// body into v; an unknown field's error names it.
+func decodeStrict(body io.Reader, v any) error {
+	dec := json.NewDecoder(body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.Decode(&struct{}{}) != io.EOF {
+		return errors.New("one JSON object expected")
+	}
+	return nil
 }
 
 // AccountID is the stored account id, or awsproto.FakeAccountID when

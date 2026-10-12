@@ -1,11 +1,17 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -132,4 +138,66 @@ func TestRecordRequestsNeedsAToken(t *testing.T) {
 			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		})
 	}
+}
+
+func TestOptionsFromFlags_LoadMaxBytes(t *testing.T) {
+	opts, err := optionsFromFlags(nil, env(nil))
+	require.NoError(t, err)
+	assert.Zero(t, opts.LoadMaxBytes, "off by default")
+
+	for name, tc := range map[string]struct {
+		args []string
+		env  map[string]string
+	}{
+		"-admin-token": {[]string{"-load-max-bytes", "1048576", "-admin-token", testToken}, nil},
+		adminTokenEnv:  {[]string{"-load-max-bytes", "1048576"}, map[string]string{adminTokenEnv: testToken}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts, err := optionsFromFlags(tc.args, env(tc.env))
+			require.NoError(t, err)
+			assert.Equal(t, int64(1048576), opts.LoadMaxBytes)
+		})
+	}
+
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"no token": {[]string{"-load-max-bytes", "1048576"}, "-load-max-bytes needs -admin-token or " + adminTokenEnv},
+		"negative": {[]string{"-load-max-bytes", "-1", "-admin-token", testToken}, `invalid value "-1" for flag -load-max-bytes: must be a byte count, 0 or more`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := optionsFromFlags(tc.args, env(nil))
+			assert.EqualError(t, err, tc.want)
+		})
+	}
+}
+
+// mainArgsEnv, set, makes TestLoadMaxBytesWithoutTokenExits run main
+// with its value's fields as the arguments.
+const mainArgsEnv = "FAKEAWS_TEST_MAIN_ARGS"
+
+// TestLoadMaxBytesWithoutTokenExits runs this binary as fakeaws with
+// -load-max-bytes and no token: it exits non-zero, naming the flag and
+// both token sources.
+func TestLoadMaxBytesWithoutTokenExits(t *testing.T) {
+	if args := os.Getenv(mainArgsEnv); args != "" {
+		os.Args = append([]string{"fakeaws"}, strings.Fields(args)...)
+		main()
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLoadMaxBytesWithoutTokenExits$")
+	cmd.Env = append(os.Environ(), adminTokenEnv+"=", mainArgsEnv+"=-load-max-bytes 1048576 -bind 127.0.0.1 -port 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 10 * time.Second
+	out, err := cmd.CombinedOutput()
+
+	require.NoError(t, ctx.Err(), "fakeaws started: %s", out)
+	var exit *exec.ExitError
+	require.ErrorAs(t, err, &exit, "%s", out)
+	assert.NotZero(t, exit.ExitCode())
+	assert.Contains(t, string(out), "-load-max-bytes needs -admin-token or "+adminTokenEnv)
 }

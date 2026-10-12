@@ -35,6 +35,8 @@ fakeaws serves the AWS surface and the `/mock` admin endpoints with no authentic
 
 With `-db <file>`, the db holds every secret a run wrote (Secrets Manager values, SSM SecureStrings, IAM access keys). When fakeaws creates it, the db, its `-wal`/`-shm`, the `.snapshot` that `/mock/snapshot` writes (through a `.snapshot.tmp` it renames) and a db `/mock/restore` recreates are 0600 (owner only). A db that already exists keeps its mode, so `chmod 600` one (and its `-wal`/`-shm`) created by an older fakeaws.
 
+`POST /mock/load` (off unless `-load-max-bytes` is set, and refused at startup without an admin token) writes a real account's read into the database: with `-db <file>`, into that file and its `-wal`, and into the `.snapshot` a later `/mock/snapshot` writes. fakeaws creates both 0600, as above. Prefer `-db :memory:` for a loaded read, so it never reaches disk (snapshot and restore then answer 409).
+
 ## Pre-commit hook
 
 `make install-hooks` configures `gitleaks protect --staged` to block accidental AWS-credential commits. The hook also runs `go test ./...`. Full-history `gitleaks detect` is run periodically — last clean sweep recorded in this repo's git log under the `S48-T8` commit message.

@@ -32,12 +32,14 @@ type Application struct {
 	dbPath     string
 	adminToken string
 	requests   *requestLog // nil unless Options.RecordRequests
+	// loadMaxBytes is Options.LoadMaxBytes.
+	loadMaxBytes int64
 	// identityMu is held shared by every AWS request, /mock/images and
 	// /mock/state, from the account read to the last read or write, and
 	// exclusively by everything that changes the identity or the db
-	// handle (setIdentity, /mock/reset, /mock/restore) and by
-	// /mock/snapshot, so none of them lands between a handler's account
-	// read and the rows it reads or writes under that account.
+	// handle (setIdentity, /mock/reset, /mock/restore, /mock/load) and
+	// by /mock/snapshot, so none of them lands between a handler's
+	// account read and the rows it reads or writes under that account.
 	identityMu sync.RWMutex
 }
 
@@ -68,6 +70,10 @@ type Options struct {
 	// recorded, /mock/state's audit is [], and /mock/requests and
 	// /mock/requests/clear are the router's 501.
 	RecordRequests bool
+	// LoadMaxBytes, when above 0, serves POST /mock/load, which takes a
+	// recorded read of at most this many bytes; 0 leaves it unrouted.
+	// cmd/fakeaws refuses it without an AdminToken.
+	LoadMaxBytes int64
 }
 
 // ListenAddr is the address to listen on.
@@ -101,11 +107,12 @@ func NewApplication(opts Options) (*Application, error) {
 		return nil, err
 	}
 	app := &Application{
-		router:     chi.NewRouter(),
-		repo:       repo,
-		echo:       opts.Echo,
-		dbPath:     opts.DBPath,
-		adminToken: opts.AdminToken,
+		router:       chi.NewRouter(),
+		repo:         repo,
+		echo:         opts.Echo,
+		dbPath:       opts.DBPath,
+		adminToken:   opts.AdminToken,
+		loadMaxBytes: opts.LoadMaxBytes,
 	}
 
 	app.router.Use(middleware.Recoverer)
