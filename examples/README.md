@@ -163,6 +163,7 @@ Valid Terraform that produces a clean plan, but the apply fails because fakeaws 
 | `misconfigured/instance_missing_subnet` | EC2 instance references a non-existent subnet |
 | `misconfigured/rds_missing_subnet_group` | RDS instance references a DB subnet group that hasn't been declared |
 | `misconfigured/ssm_parameter_duplicate` | Two `aws_ssm_parameter` resources claim one name; the second create is refused with `ParameterAlreadyExists` |
+| `misconfigured/subnet_cidr_overlap` | Two `aws_subnet` resources in one VPC with overlapping CIDRs; the second create is refused with `InvalidSubnet.Conflict` |
 | `misconfigured/route53_apex_cname` | CNAME record on the apex of a hosted zone (AWS rejects; CNAME at apex isn't valid per RFC 1034) |
 
 ### updates

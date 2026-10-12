@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -3068,4 +3069,29 @@ func TestEC2_CreateSubnetAvailabilityZoneId(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "loaded: %s", body)
 	assert.Equal(t, "us-east-1d", extractEC2Tag(body, "availabilityZone"), "loaded")
 	assert.Equal(t, "use1-az4", extractEC2Tag(body, "availabilityZoneId"), "loaded")
+}
+
+// UNVERIFIED(aws-code): InvalidSubnet.Conflict from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func TestContract_ec2_subnet_overlap_refused(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	vpc, other := tagVPC(t, srv), tagVPC(t, srv)
+	create := func(vpcID, cidr string) (*http.Response, []byte) {
+		return ec2Call(t, srv, tagRegion, "CreateSubnet", url.Values{"VpcId": {vpcID}, "CidrBlock": {cidr}})
+	}
+	subnetID := createOK(t, srv, "CreateSubnet", "subnetId", url.Values{"VpcId": {vpc}, "CidrBlock": {"10.0.1.0/24"}})
+
+	resp, body := create(vpc, "10.0.1.128/25")
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, "InvalidSubnet.Conflict", extractEC2Tag(body, "Code"))
+	assert.Equal(t, "The CIDR '10.0.1.128/25' conflicts with another subnet", html.UnescapeString(extractEC2Tag(body, "Message")))
+	resp, body = ec2Call(t, srv, tagRegion, "DescribeSubnets", url.Values{"Filter.1.Name": {"vpc-id"}, "Filter.1.Value.1": {vpc}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	assert.NotContains(t, string(body), "10.0.1.128/25", "the refused subnet is not stored")
+
+	createOK(t, srv, "CreateSubnet", "subnetId", url.Values{"VpcId": {other}, "CidrBlock": {"10.0.1.128/25"}})
+	createOK(t, srv, "CreateSubnet", "subnetId", url.Values{"VpcId": {vpc}, "CidrBlock": {"10.0.2.0/24"}})
+
+	resp, body = ec2Call(t, srv, tagRegion, "DeleteSubnet", url.Values{"SubnetId": {subnetID}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	createOK(t, srv, "CreateSubnet", "subnetId", url.Values{"VpcId": {vpc}, "CidrBlock": {"10.0.1.0/24"}})
 }
