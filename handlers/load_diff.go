@@ -70,7 +70,19 @@ type Tree struct {
 	json   bool // name is a JSON key
 	member bool
 	kids   []*Tree
-	index  int // among its same-named siblings in the tree Diff was given; prune sets it
+	index  int // among its same-named siblings, set by diffAppend
+}
+
+// diffAppend adds kid to parent, indexed among parent's same-named kids:
+// the index a path names, which Subtree and prune keep.
+func diffAppend(parent, kid *Tree) {
+	kid.index = 0
+	for _, k := range parent.kids {
+		if k.name == kid.name && k.json == kid.json && k.member == kid.member {
+			kid.index++
+		}
+	}
+	parent.kids = append(parent.kids, kid)
 }
 
 // valued says whether t holds a value of its own, which an XML element
@@ -138,8 +150,7 @@ func ParseXML(body []byte) (*Tree, error) {
 			if len(stack) == 0 {
 				root = n
 			} else {
-				parent := stack[len(stack)-1]
-				parent.kids = append(parent.kids, n)
+				diffAppend(stack[len(stack)-1], n)
 			}
 		}
 	}
@@ -190,19 +201,19 @@ func ParseJSON(body []byte) (*Tree, error) {
 	return diffJSONValue("", v), nil
 }
 
-// diffJSONField returns the nodes a field holds: one set member per array
-// element, or the value itself.
-func diffJSONField(name string, v any) []*Tree {
+// diffJSONField adds to parent the nodes a field holds: one set member
+// per array element, or the value itself.
+func diffJSONField(parent *Tree, name string, v any) {
 	arr, ok := v.([]any)
 	if !ok {
-		return []*Tree{diffJSONValue(name, v)}
+		diffAppend(parent, diffJSONValue(name, v))
+		return
 	}
-	out := make([]*Tree, len(arr))
-	for i, e := range arr {
-		out[i] = diffJSONValue(name, e)
-		out[i].member = true
+	for _, e := range arr {
+		n := diffJSONValue(name, e)
+		n.member = true
+		diffAppend(parent, n)
 	}
-	return out
 }
 
 // diffJSONValue returns v as a node named name. An array reaches it only
@@ -217,10 +228,10 @@ func diffJSONValue(name string, v any) *Tree {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			n.kids = append(n.kids, diffJSONField(k, v[k])...)
+			diffJSONField(n, k, v[k])
 		}
 	case []any:
-		n.kids = diffJSONField("", v)
+		diffJSONField(n, "", v)
 	case string:
 		n.text, n.kind = v, nodeJSONString
 	case json.Number:
@@ -261,8 +272,9 @@ func diffNumber(num json.Number) string {
 
 // Subtree returns the index-th node, in document order, at path
 // (index-free and from the root: vpcSet/item, Parameter), under the
-// chain of its ancestors and nothing else, so its paths and ignore
-// entries read as the whole body's. It returns nil when there is none.
+// chain of its ancestors and nothing else, each keeping its index, so
+// its paths and ignore entries read as the whole body's. It returns nil
+// when there is none.
 func (t *Tree) Subtree(path string, index int) *Tree {
 	segs := strings.Split(path, "/")
 	seen := 0
@@ -280,7 +292,7 @@ func (t *Tree) Subtree(path string, index int) *Tree {
 				continue
 			}
 			if got := walk(k, depth+1); got != nil {
-				return &Tree{name: n.name, json: n.json, member: n.member, kids: []*Tree{got}}
+				return &Tree{name: n.name, json: n.json, member: n.member, index: n.index, kids: []*Tree{got}}
 			}
 		}
 		return nil
@@ -313,7 +325,8 @@ func MergePages(pages ...*Tree) (*Tree, error) {
 	return out, nil
 }
 
-// diffMerge adds src's kids to dst, which MergePages owns.
+// diffMerge adds src's kids to dst, which MergePages owns, each indexed
+// in the merged tree.
 func diffMerge(dst, src *Tree) {
 	for _, k := range src.kids {
 		i := -1
@@ -321,7 +334,7 @@ func diffMerge(dst, src *Tree) {
 			i = slices.IndexFunc(dst.kids, func(d *Tree) bool { return !d.member && d.name == k.name })
 		}
 		if i < 0 {
-			dst.kids = append(dst.kids, diffClone(k))
+			diffAppend(dst, diffClone(k))
 			continue
 		}
 		diffMerge(dst.kids[i], k)
@@ -409,23 +422,18 @@ func (d treeDiffer) pruneRoot(t *Tree) *Tree {
 
 // prune returns a copy of t without the fields Diff never compares and
 // without any node that holds no value and no kids, before or after
-// that, or nil when nothing is left: an empty element is absent. Each
-// kid kept carries its index in t, counted before anything is dropped.
-// shape is t's index-free path, which ignore entries name.
+// that, or nil when nothing is left: an empty element is absent. A kid
+// kept keeps its index, so a dropped member still counts. shape is t's
+// index-free path, which ignore entries name.
 func (d treeDiffer) prune(t *Tree, shape string) *Tree {
 	c := *t
 	c.kids = nil
-	seen := map[diffGroupKey]int{}
 	for _, k := range t.kids {
-		g := diffGroupKey{k.name, k.json, k.member}
-		index := seen[g]
-		seen[g]++
 		kShape := diffJoin(shape, k.name)
 		if diffAlwaysIgnored[k.name] || d.ignore[kShape] {
 			continue
 		}
 		if p := d.prune(k, kShape); p != nil {
-			p.index = index
 			c.kids = append(c.kids, p)
 		}
 	}

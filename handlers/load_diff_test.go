@@ -445,6 +445,12 @@ func TestLoadDiffMergePages(t *testing.T) {
 	assert.Empty(t, rec, "merging leaves its pages unchanged")
 	assert.Empty(t, ren)
 
+	merged, err = MergePages(page1, mustParseXML(t, diffVpcs(diffVpcItem("vpc-3", "true"))))
+	require.NoError(t, err)
+	rec, ren = Diff(diffVpcsKey, merged, mustParseXML(t, diffVpcs(a, b, c)))
+	assert.Equal(t, []string{"vpcSet/item[2]/isDefault"}, rec, "a later page's member is indexed in the merged tree")
+	assert.Equal(t, []string{"vpcSet/item[2]/isDefault"}, ren)
+
 	merged, err = MergePages(mustParseJSON(t, `{"Parameters":[{"Name":"/a"}],"NextToken":"tok"}`), mustParseJSON(t, `{"Parameters":[{"Name":"/b"}]}`))
 	require.NoError(t, err)
 	rec, ren = Diff(diffVpcsKey, merged, mustParseJSON(t, `{"Parameters":[{"Name":"/b"},{"Name":"/a"}]}`))
@@ -565,4 +571,36 @@ func TestLoadDiffNestedSetsPairWithoutRecursing(t *testing.T) {
 	// About 20ms, or 0.5s under CI's -race; scoring each pairing by a
 	// recursive node diff took about 30s at this size.
 	assert.Less(t, elapsed, 5*time.Second, "100 groups whose every range differs")
+}
+
+func TestLoadDiffSubtreeKeepsBodyIndex(t *testing.T) {
+	items := func(ids ...string) *Tree {
+		var b strings.Builder
+		for _, id := range ids {
+			b.WriteString("<item><id>" + id + "</id></item>")
+		}
+		return mustParseXML(t, "<r><s>"+b.String()+"</s></r>")
+	}
+	recorded, rendered := items("a", "b", "c"), items("a", "b", "z")
+
+	rec, ren := Diff(diffVpcsKey, recorded.Subtree("s/item", 2), rendered.Subtree("s/item", 2))
+	assert.Equal(t, []string{"s/item[2]/id"}, rec, "a Subtree'd member keeps its body index")
+	assert.Equal(t, []string{"s/item[2]/id"}, ren)
+
+	rec, ren = Diff(diffVpcsKey, recorded.Subtree("s/item", 1), items("x"))
+	assert.Equal(t, []string{"s/item[1]/id"}, rec)
+	assert.Equal(t, []string{"s/item[0]/id"}, ren, "a one-item rendering names its own index")
+
+	instance := func(id, state string) string {
+		return "<item><instanceId>" + id + "</instanceId><state>" + state + "</state></item>"
+	}
+	reservations := mustParseXML(t, "<DescribeInstancesResponse><reservationSet>"+
+		"<item><instancesSet>"+instance("i-1", "running")+instance("i-2", "running")+"</instancesSet></item>"+
+		"<item><instancesSet>"+instance("i-3", "running")+"</instancesSet></item>"+
+		"</reservationSet></DescribeInstancesResponse>")
+	rec, ren = Diff(diffVpcsKey, reservations.Subtree("reservationSet/item/instancesSet/item", 2),
+		mustParseXML(t, "<DescribeInstancesResponse><reservationSet><item><instancesSet>"+instance("i-3", "stopped")+
+			"</instancesSet></item></reservationSet></DescribeInstancesResponse>"))
+	assert.Equal(t, []string{"reservationSet/item[1]/instancesSet/item[0]/state"}, rec, "its ancestors keep their body indexes too")
+	assert.Equal(t, []string{"reservationSet/item[0]/instancesSet/item[0]/state"}, ren)
 }
