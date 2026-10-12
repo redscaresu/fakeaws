@@ -140,7 +140,7 @@ func (app *Application) boot(opts Options) error {
 	if err != nil {
 		return err
 	}
-	if err := app.backfillDefaultGroups(); err != nil {
+	if err := app.repo.BackfillDefaultGroups(newDefaultGroup); err != nil {
 		return fmt.Errorf("backfill default security groups: %w", err)
 	}
 	loaded, err := app.repo.Loaded()

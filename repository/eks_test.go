@@ -81,7 +81,7 @@ func TestEKSNodeGroup_SubnetMustBeInClusterVPC(t *testing.T) {
 	bad := &EKSNodeGroup{
 		ClusterName: "demo", Name: "ng-2", NodeRoleARN: nodeRole,
 		SubnetIDs: []string{subnets[1]}, // second subnet, not in cluster
-		Region: testRegion, ARN: "arn:ng", CreatedAt: "t",
+		Region:    testRegion, ARN: "arn:ng", CreatedAt: "t",
 	}
 	if err := r.CreateEKSNodeGroup(testAccount, bad); !errors.Is(err, models.ErrConflict) {
 		t.Errorf("nodegroup subnet outside cluster: want ErrConflict, got %v", err)
@@ -97,14 +97,14 @@ func TestEKSCluster_SubnetsMustShareVPC(t *testing.T) {
 	clusterRole, _, subnets := setupEKSPrereqs(t, r)
 
 	// Add a second VPC with its own subnet.
-	r.CreateVPC(testAccount, &EC2VPC{ID: "vpc-other", CidrBlock: "10.1.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"})
+	createVPC(r, &EC2VPC{ID: "vpc-other", CidrBlock: "10.1.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"})
 	r.CreateSubnet(testAccount, &EC2Subnet{ID: "subnet-other", VPCID: "vpc-other", CidrBlock: "10.1.1.0/24", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"})
 
 	// Mixing subnets from vpc-1 and vpc-other rejects.
 	bad := &EKSCluster{
 		Name: "x", RoleARN: clusterRole,
 		SubnetIDs: []string{subnets[0], "subnet-other"},
-		Region: testRegion, ARN: "arn:c", CreatedAt: "t",
+		Region:    testRegion, ARN: "arn:c", CreatedAt: "t",
 	}
 	if err := r.CreateEKSCluster(testAccount, bad); !errors.Is(err, models.ErrConflict) {
 		t.Errorf("mixed-VPC subnets: want ErrConflict, got %v", err)
@@ -117,9 +117,9 @@ func TestEKSCluster_SubnetsMustShareVPC(t *testing.T) {
 	})
 	bad2 := &EKSCluster{
 		Name: "y", RoleARN: clusterRole,
-		SubnetIDs: subnets, // both in vpc-1
+		SubnetIDs:        subnets, // both in vpc-1
 		SecurityGroupIDs: []string{"sg-other"},
-		Region: testRegion, ARN: "arn:c", CreatedAt: "t",
+		Region:           testRegion, ARN: "arn:c", CreatedAt: "t",
 	}
 	if err := r.CreateEKSCluster(testAccount, bad2); !errors.Is(err, models.ErrConflict) {
 		t.Errorf("SG from different VPC: want ErrConflict, got %v", err)

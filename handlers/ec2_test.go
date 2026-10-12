@@ -1096,13 +1096,17 @@ func TestEC2_TerminateInstancesDeletesENI(t *testing.T) {
 	assert.Equal(t, inst.PrivateIpAddress, state.Instances[0].PrivateIP, "state private_ip after terminate")
 }
 
+// keyMaterial is PublicKeyMaterial as the SDK sends a key's text: a
+// blob, base64-encoded on the Query wire.
+func keyMaterial(text string) string { return base64.StdEncoding.EncodeToString([]byte(text)) }
+
 func TestEC2_KeyPairImportDescribeDelete(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	const region = "us-east-1"
 
 	resp, body := ec2Call(t, srv, region, "ImportKeyPair", url.Values{
 		"KeyName":           {"deploy"},
-		"PublicKeyMaterial": {"ssh-rsa AAAAB3NzaC1yc2E"},
+		"PublicKeyMaterial": {keyMaterial("ssh-rsa AAAAB3NzaC1yc2E")},
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "ImportKeyPair: %s", body)
 	assert.Contains(t, string(body), "<keyName>deploy</keyName>", "ImportKeyPair: %s", body)
@@ -1122,7 +1126,7 @@ func TestEC2_DeleteKeyPairByID(t *testing.T) {
 
 	resp, body := ec2Call(t, srv, region, "ImportKeyPair", url.Values{
 		"KeyName":           {"deploy"},
-		"PublicKeyMaterial": {"ssh-rsa AAAAB3NzaC1yc2E"},
+		"PublicKeyMaterial": {keyMaterial("ssh-rsa AAAAB3NzaC1yc2E")},
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode, "ImportKeyPair: %s", body)
 	id := extractEC2Tag(body, "keyPairId")
@@ -1532,7 +1536,7 @@ func describedTags(t *testing.T, srv *httptest.Server, k taggedKind, id string) 
 // ownerId. Its tag calls name it by KeyPairId, not by name.
 var keyPairKind = taggedKind{"key-pair", func(t *testing.T, srv *httptest.Server, tags ...string) string {
 	return createOK(t, srv, "ImportKeyPair", "keyPairId", withTagSpec(url.Values{
-		"KeyName": {"tagged"}, "PublicKeyMaterial": {"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterial"},
+		"KeyName": {"tagged"}, "PublicKeyMaterial": {keyMaterial("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterial")},
 	}, 1, "key-pair", tags...))
 }, func(string) (string, url.Values) { return "DescribeKeyPairs", url.Values{"KeyName.1": {"tagged"}} }}
 
@@ -2765,47 +2769,81 @@ func TestContract_ec2_vpc_default_security_group(t *testing.T) {
 	assert.NotContains(t, string(mustOK(t)(ec2Call(t, srv, tagRegion, "DescribeVpcs", nil))), "10.9.0.0/16", "no VPC without its default group")
 }
 
+// bareVPC stores a VPC without its default group, as fakeaws stored
+// every VPC before CreateVpc made the group.
+func bareVPC(t *testing.T, repo *repository.Repository, id string) {
+	t.Helper()
+	require.NoError(t, repo.CreateVPCWithDefaultGroup(awsproto.FakeAccountID, &repository.EC2VPC{
+		ID: id, CidrBlock: "10.0.0.0/16", Region: tagRegion, ARN: "arn", State: "available", CreatedAt: "t",
+	}, &repository.EC2SecurityGroup{ID: "sg-" + id, VPCID: id, GroupName: repository.DefaultGroupName, Region: tagRegion, ARN: "arn", CreatedAt: "t"}))
+	_, err := repo.DB().Exec(`DELETE FROM ec2_security_groups WHERE vpc_id = ?`, id)
+	require.NoError(t, err)
+}
+
+// defaultGroups lists vpc's groups named default.
+func defaultGroups(t *testing.T, srv *httptest.Server, vpc string) []string {
+	t.Helper()
+	return describeIDs(t, srv, "DescribeSecurityGroups", ec2FilterParams("group-name", "default", "vpc-id", vpc)).SecurityGroups
+}
+
 // TestEC2_DefaultGroupBackfilled: a VPC stored without its default
-// group (repository.CreateVPC, as fakeaws wrote every VPC before
-// CreateVpc made the group) gets it at boot and after /mock/restore, so
+// group gets it at boot and when /mock/restore brings it back, so
 // group-name=default never answers it with nothing. A loaded database
 // answers its rows.
 func TestEC2_DefaultGroupBackfilled(t *testing.T) {
-	storeBare := func(repo *repository.Repository, id string) {
-		t.Helper()
-		require.NoError(t, repo.CreateVPC(awsproto.FakeAccountID, &repository.EC2VPC{
-			ID: id, CidrBlock: "10.0.0.0/16", Region: tagRegion, ARN: "arn", State: "available", CreatedAt: "t",
-		}))
-	}
 	openBare := func(dbPath, id string) {
 		t.Helper()
 		repo, err := repository.New(dbPath)
 		require.NoError(t, err)
-		storeBare(repo, id)
+		bareVPC(t, repo, id)
 		require.NoError(t, repo.Close())
-	}
-	defaults := func(srv *httptest.Server, vpc string) []string {
-		t.Helper()
-		return describeIDs(t, srv, "DescribeSecurityGroups", ec2FilterParams("group-name", "default", "vpc-id", vpc)).SecurityGroups
 	}
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	openBare(dbPath, "vpc-old")
 	app, srv := newTestApp(t, dbPath)
-	assert.Len(t, defaults(srv, "vpc-old"), 1, "boot")
+	assert.Len(t, defaultGroups(t, srv, "vpc-old"), 1, "boot")
 
-	storeBare(app.Repository(), "vpc-snap")
-	require.Empty(t, defaults(srv, "vpc-snap"), "stored bare after boot")
+	bareVPC(t, app.Repository(), "vpc-snap")
+	require.Empty(t, defaultGroups(t, srv, "vpc-snap"), "stored bare after boot")
 	mustOK(t)(doPost(t, srv, "/mock/snapshot"))
 	mustOK(t)(doPost(t, srv, "/mock/restore"))
-	assert.Len(t, defaults(srv, "vpc-snap"), 1, "restore")
-	assert.Len(t, defaults(srv, "vpc-old"), 1, "never a second")
+	assert.Len(t, defaultGroups(t, srv, "vpc-snap"), 1, "restore")
+	assert.Len(t, defaultGroups(t, srv, "vpc-old"), 1, "never a second")
 
 	loadedPath := filepath.Join(t.TempDir(), "loaded.db")
 	openBare(loadedPath, "vpc-loaded")
 	markLoaded(t, loadedPath, true)
 	_, srv = newTestApp(t, loadedPath)
-	assert.Empty(t, defaults(srv, "vpc-loaded"), "a loaded database answers its rows")
+	assert.Empty(t, defaultGroups(t, srv, "vpc-loaded"), "a loaded database answers its rows")
+}
+
+// TestEC2_RestoreBackfillFailureKeepsLiveState: /mock/restore backfills
+// the snapshot's copy before it goes live, so a backfill that fails
+// answers 500 with the live state as it was, never the snapshot's state
+// half backfilled. The snapshot carries a trigger that refuses every
+// group insert; the live db does not.
+func TestEC2_RestoreBackfillFailureKeepsLiveState(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	app, srv := newTestApp(t, dbPath)
+	db := app.Repository().DB()
+	bareVPC(t, app.Repository(), "vpc-bare")
+	_, err := db.Exec(`CREATE TRIGGER refuse_groups BEFORE INSERT ON ec2_security_groups BEGIN SELECT RAISE(ABORT, 'refused'); END`)
+	require.NoError(t, err)
+	mustOK(t)(doPost(t, srv, "/mock/snapshot"))
+	_, err = db.Exec(`DROP TRIGGER refuse_groups`)
+	require.NoError(t, err)
+	live := tagVPC(t, srv)
+
+	resp, body := doPost(t, srv, "/mock/restore")
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "%s", body)
+	assert.Contains(t, describeIDs(t, srv, "DescribeVpcs", nil).Vpcs, live, "the live state stays")
+	assert.Len(t, defaultGroups(t, srv, live), 1)
+	assert.Empty(t, defaultGroups(t, srv, "vpc-bare"), "nothing backfilled into the live state")
+	assert.NoFileExists(t, dbPath+".restore", "the staged copy is removed")
+	_, err = db.Exec(`INSERT INTO ec2_security_groups (account_id, region, id, vpc_id, group_name, description, arn, data, created_at)
+		VALUES (?, ?, 'sg-probe', ?, 'probe', 'd', 'arn', '{}', 't')`, awsproto.FakeAccountID, tagRegion, live)
+	assert.NoError(t, err, "the live db has no trigger: it was never swapped for the snapshot's copy")
 }
 
 // UNVERIFIED(aws-code): VPCIdNotSpecified from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
@@ -2973,7 +3011,7 @@ func TestEC2_DescribeKeyPairsFilters(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	importKey := func(name string, tags ...string) string {
 		return createOK(t, srv, "ImportKeyPair", "keyPairId", withTagSpec(url.Values{
-			"KeyName": {name}, "PublicKeyMaterial": {"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + name},
+			"KeyName": {name}, "PublicKeyMaterial": {keyMaterial("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + name)},
 		}, 1, "key-pair", tags...))
 	}
 	a, b := importKey("a", "Name", "a"), importKey("b", "Name", "b")

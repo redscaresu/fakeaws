@@ -14,11 +14,19 @@ import (
 
 const testRegion = "us-east-1"
 
+// createVPC stores v with its default security group, as CreateVpc does.
+func createVPC(r *Repository, v *EC2VPC) error {
+	return r.CreateVPCWithDefaultGroup(testAccount, v, &EC2SecurityGroup{
+		ID: "sg-default-" + v.ID, VPCID: v.ID, GroupName: DefaultGroupName, Description: "default VPC security group",
+		Region: v.Region, ARN: "arn", CreatedAt: "t",
+	})
+}
+
 func TestVPCCRUD(t *testing.T) {
 	r := setupRepo(t)
 	v := &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}
 
-	if err := r.CreateVPC(testAccount, v); err != nil {
+	if err := createVPC(r, v); err != nil {
 		t.Fatalf("CreateVPC: %v", err)
 	}
 	got, err := r.GetVPC(testAccount, testRegion, "vpc-1")
@@ -50,7 +58,7 @@ func TestSubnetFKToVPC(t *testing.T) {
 
 	// Now create the VPC + subnet.
 	v := &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}
-	if err := r.CreateVPC(testAccount, v); err != nil {
+	if err := createVPC(r, v); err != nil {
 		t.Fatal(err)
 	}
 	s.VPCID = "vpc-1"
@@ -70,7 +78,7 @@ func TestSubnetFKToVPC(t *testing.T) {
 func TestInternetGatewayDetachOnVPCDelete(t *testing.T) {
 	r := setupRepo(t)
 	v := &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}
-	if err := r.CreateVPC(testAccount, v); err != nil {
+	if err := createVPC(r, v); err != nil {
 		t.Fatal(err)
 	}
 	igw := &EC2InternetGateway{ID: "igw-1", VPCID: "vpc-1", Region: testRegion, ARN: "arn", CreatedAt: "t"}
@@ -95,7 +103,7 @@ func TestInternetGatewayDetachOnVPCDelete(t *testing.T) {
 func TestRouteTableAssociationOnePerSubnet(t *testing.T) {
 	r := setupRepo(t)
 	v := &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}
-	r.CreateVPC(testAccount, v)
+	createVPC(r, v)
 	s := &EC2Subnet{ID: "subnet-1", VPCID: "vpc-1", CidrBlock: "10.0.1.0/24", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}
 	r.CreateSubnet(testAccount, s)
 	rt := &EC2RouteTable{ID: "rtb-1", VPCID: "vpc-1", Region: testRegion, ARN: "arn", CreatedAt: "t"}
@@ -120,7 +128,7 @@ func TestRouteTableAssociationOnePerSubnet(t *testing.T) {
 func TestSecurityGroupCRUDPlusRules(t *testing.T) {
 	r := setupRepo(t)
 	v := &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}
-	r.CreateVPC(testAccount, v)
+	createVPC(r, v)
 
 	sg := &EC2SecurityGroup{
 		ID: "sg-1", VPCID: "vpc-1", GroupName: "web", Description: "web tier",
@@ -194,7 +202,7 @@ func TestEC2_CrossRegionFKRejected(t *testing.T) {
 		ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: regionUS,
 		ARN: "arn:us", State: "available", CreatedAt: "t",
 	}
-	if err := r.CreateVPC(testAccount, usVPC); err != nil {
+	if err := createVPC(r, usVPC); err != nil {
 		t.Fatalf("seed us VPC: %v", err)
 	}
 
@@ -233,7 +241,7 @@ func TestEC2_CrossRegionFKRejected(t *testing.T) {
 		ID: "vpc-2", CidrBlock: "10.1.0.0/16", Region: regionEU,
 		ARN: "arn:eu", State: "available", CreatedAt: "t",
 	}
-	if err := r.CreateVPC(testAccount, euVPC); err != nil {
+	if err := createVPC(r, euVPC); err != nil {
 		t.Fatalf("seed eu VPC: %v", err)
 	}
 	euSubnet.VPCID = "vpc-2"
@@ -263,7 +271,7 @@ func TestEC2_CrossRegionFKRejected(t *testing.T) {
 
 func TestUpdateSubnet(t *testing.T) {
 	r := setupRepo(t)
-	require.NoError(t, r.CreateVPC(testAccount, &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
+	require.NoError(t, createVPC(r, &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
 	require.NoError(t, r.CreateSubnet(testAccount, &EC2Subnet{ID: "subnet-1", VPCID: "vpc-1", CidrBlock: "10.0.1.0/24", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
 
 	require.NoError(t, r.UpdateSubnet(testAccount, testRegion, "subnet-1", func(s *EC2Subnet) { s.MapPublicIPOnLaunch = true }))
@@ -327,7 +335,7 @@ func TestAvailabilityZonesLifecycle(t *testing.T) {
 	require.NoError(t, r.Snapshot())
 	_, err = r.DB().Exec(`DELETE FROM availability_zones`)
 	require.NoError(t, err)
-	require.NoError(t, r.Restore())
+	require.NoError(t, r.Restore(nil))
 	assert.Equal(t, []AvailabilityZone{a, b}, zones(t, r, testRegion), "restore")
 
 	require.NoError(t, r.Close())
@@ -357,7 +365,7 @@ func TestCreateSubnetOverlapIsAtomic(t *testing.T) {
 	const goroutines, rounds = 8, 50
 	for round := range rounds {
 		vpcID := fmt.Sprintf("vpc-%d", round)
-		require.NoError(t, r.CreateVPC(testAccount, &EC2VPC{ID: vpcID, CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
+		require.NoError(t, createVPC(r, &EC2VPC{ID: vpcID, CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
 		errs := make([]error, goroutines)
 		start := make(chan struct{})
 		var wg sync.WaitGroup
@@ -386,4 +394,46 @@ func TestCreateSubnetOverlapIsAtomic(t *testing.T) {
 		assert.Equal(t, 1, won, "round %d successes", round)
 		assert.Equal(t, goroutines-1, refused, "round %d ErrSubnetConflict", round)
 	}
+}
+
+// TestBackfillDefaultGroupsIsAtomic: the backfill lists the bare VPCs
+// and inserts their groups in one transaction, so a failed insert adds
+// no group at all; a loaded database gets none.
+func TestBackfillDefaultGroupsIsAtomic(t *testing.T) {
+	r := setupRepo(t)
+	for _, id := range []string{"vpc-1", "vpc-2"} {
+		require.NoError(t, createVPC(r, &EC2VPC{ID: id, CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
+	}
+	_, err := r.DB().Exec(`DELETE FROM ec2_security_groups`)
+	require.NoError(t, err)
+	newGroup := func(account, region, vpcID string) *EC2SecurityGroup {
+		return &EC2SecurityGroup{ID: "sg-" + vpcID, VPCID: vpcID, GroupName: DefaultGroupName, Region: region, ARN: "arn", CreatedAt: "t"}
+	}
+	groups := func() []string {
+		t.Helper()
+		sgs, err := r.ListSecurityGroups(testAccount, "")
+		require.NoError(t, err)
+		var ids []string
+		for _, sg := range sgs {
+			ids = append(ids, sg.ID)
+		}
+		return ids
+	}
+
+	_, err = r.DB().Exec(`CREATE TRIGGER refuse_vpc2 BEFORE INSERT ON ec2_security_groups WHEN NEW.vpc_id = 'vpc-2'
+		BEGIN SELECT RAISE(ABORT, 'refused'); END`)
+	require.NoError(t, err)
+	assert.Error(t, r.BackfillDefaultGroups(newGroup))
+	assert.Empty(t, groups(), "vpc-1's group rolled back with vpc-2's")
+
+	_, err = r.DB().Exec(`DROP TRIGGER refuse_vpc2`)
+	require.NoError(t, err)
+	require.NoError(t, r.SetLoaded(true, testAccount))
+	require.NoError(t, r.BackfillDefaultGroups(newGroup))
+	assert.Empty(t, groups(), "loaded: none")
+
+	require.NoError(t, r.SetLoaded(false, testAccount))
+	require.NoError(t, r.BackfillDefaultGroups(newGroup))
+	require.NoError(t, r.BackfillDefaultGroups(newGroup), "a second run finds nothing bare")
+	assert.ElementsMatch(t, []string{"sg-vpc-1", "sg-vpc-2"}, groups())
 }

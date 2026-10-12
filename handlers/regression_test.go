@@ -662,7 +662,7 @@ func TestRegressionStateGatherAccountWide(t *testing.T) {
 	// Key pair in odd region.
 	ec2PostRegression(t, srv, oddRegion, "ImportKeyPair", url.Values{
 		"KeyName":           {"odd-kp"},
-		"PublicKeyMaterial": {"c3NoLXJzYSBBQUFBQjN... AmZmFrZQ=="},
+		"PublicKeyMaterial": {keyMaterial("ssh-rsa AAAAB3odd")},
 	})
 
 	// Secret in odd region.
@@ -1404,7 +1404,7 @@ func TestRegressionKeyPairFingerprintSelectsOneKey(t *testing.T) {
 	const material = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" // + aa and + bB collide under the old hash
 	ids, fingerprints := map[string]string{}, map[string]string{}
 	for _, name := range []string{"aa", "bB"} {
-		resp, body := ec2Call(t, srv, tagRegion, "ImportKeyPair", url.Values{"KeyName": {name}, "PublicKeyMaterial": {material + name}})
+		resp, body := ec2Call(t, srv, tagRegion, "ImportKeyPair", url.Values{"KeyName": {name}, "PublicKeyMaterial": {keyMaterial(material + name)}})
 		require.Equal(t, http.StatusOK, resp.StatusCode, "ImportKeyPair: %s", body)
 		ids[name], fingerprints[name] = extractEC2Tag(body, "keyPairId"), extractEC2Tag(body, "keyFingerprint")
 	}
@@ -1707,7 +1707,7 @@ func TestRegressionDescribeRepeatedIDAnswersOnce(t *testing.T) {
 	n, vpc := filteredNet(t, srv, tagRegion, "1")
 	inst := runInstance(t, srv, tagRegion, topLevelParams(n.subnet, n.sgs))
 	x, _ := describeInstance(t, srv, tagRegion, inst)
-	key := createOK(t, srv, "ImportKeyPair", "keyPairId", url.Values{"KeyName": {"twice"}, "PublicKeyMaterial": {"ssh-ed25519 AAAAtwice"}})
+	key := createOK(t, srv, "ImportKeyPair", "keyPairId", url.Values{"KeyName": {"twice"}, "PublicKeyMaterial": {keyMaterial("ssh-ed25519 AAAAtwice")}})
 
 	for _, c := range []struct {
 		action, param, id string
@@ -1742,7 +1742,7 @@ func TestRegressionDescribeRepeatedIDAnswersOnce(t *testing.T) {
 func TestRegressionRunInstancesKeyNameRoundTrips(t *testing.T) {
 	srv := newTestServerForRegression(t)
 	n := newInstanceNet(t, srv, tagRegion, "10.0.0.0/16", "10.0.1.0/24")
-	createOK(t, srv, "ImportKeyPair", "keyPairId", url.Values{"KeyName": {"deploy"}, "PublicKeyMaterial": {"ssh-ed25519 AAAAdeploy"}})
+	createOK(t, srv, "ImportKeyPair", "keyPairId", url.Values{"KeyName": {"deploy"}, "PublicKeyMaterial": {keyMaterial("ssh-ed25519 AAAAdeploy")}})
 	launch := topLevelParams(n.subnet, n.sgs)
 	launch.Set("KeyName", "deploy")
 	_, body := describeInstance(t, srv, tagRegion, runInstance(t, srv, tagRegion, launch))
@@ -1760,14 +1760,24 @@ func TestRegressionRunInstancesKeyNameRoundTrips(t *testing.T) {
 
 // TestRegressionDescribeKeyPairsIncludePublicKey: DescribeKeyPairs
 // refused IncludePublicKey (data.aws_key_pair's include_public_key)
-// with 501 though every row has the key. true answers it; false or
-// none leaves it out; any other value is 400 InvalidParameterValue.
+// with 501 though every row has the key. true answers the key text
+// aws_key_pair imported, which the SDK sent base64-encoded (a first fix
+// answered that base64, so the data source's public_key never equalled
+// the resource's); false or none leaves it out; any other value is 400
+// InvalidParameterValue. Material that is not base64 is refused.
 //
-// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+// UNVERIFIED(aws-code): InvalidParameterValue and InvalidKeyPair.Format from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func TestRegressionDescribeKeyPairsIncludePublicKey(t *testing.T) {
 	srv := newTestServerForRegression(t)
 	const material = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIinclude"
-	createOK(t, srv, "ImportKeyPair", "keyPairId", url.Values{"KeyName": {"include"}, "PublicKeyMaterial": {material}})
+	c, ctx := sweepClient(srv), t.Context()
+	_, err := c.ImportKeyPair(ctx, &ec2.ImportKeyPairInput{KeyName: aws.String("include"), PublicKeyMaterial: []byte(material)})
+	require.NoError(t, err)
+	out, err := c.DescribeKeyPairs(ctx, &ec2.DescribeKeyPairsInput{KeyNames: []string{"include"}, IncludePublicKey: aws.Bool(true)})
+	require.NoError(t, err)
+	require.Len(t, out.KeyPairs, 1)
+	assert.Equal(t, material, aws.ToString(out.KeyPairs[0].PublicKey), "the key text, as aws_key_pair sent it")
+
 	for include, want := range map[string]string{"true": material, "false": "", "": ""} {
 		params := url.Values{"KeyName.1": {"include"}}
 		if include != "" {
@@ -1779,6 +1789,11 @@ func TestRegressionDescribeKeyPairsIncludePublicKey(t *testing.T) {
 	resp, body := ec2Call(t, srv, tagRegion, "DescribeKeyPairs", url.Values{"IncludePublicKey": {"True"}})
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
 	assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"))
+
+	resp, body = ec2Call(t, srv, tagRegion, "ImportKeyPair", url.Values{"KeyName": {"raw"}, "PublicKeyMaterial": {material}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "raw key text: %s", body)
+	assert.Equal(t, "InvalidKeyPair.Format", extractEC2Tag(body, "Code"))
+	assert.Empty(t, describeIDs(t, srv, "DescribeKeyPairs", ec2FilterParams("key-name", "raw")).KeyPairs, "nothing stored")
 }
 
 // TestRegressionTerminatedInstanceMatchesNoNetworkFilter: a terminated

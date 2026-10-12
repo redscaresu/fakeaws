@@ -17,7 +17,7 @@ import (
 func setupVPCSubnet(t *testing.T, r *Repository) (vpcID, subnetID string) {
 	t.Helper()
 	v := &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}
-	if err := r.CreateVPC(testAccount, v); err != nil {
+	if err := createVPC(r, v); err != nil {
 		t.Fatalf("seed VPC: %v", err)
 	}
 	s := &EC2Subnet{ID: "subnet-1", VPCID: "vpc-1", CidrBlock: "10.0.1.0/24", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}

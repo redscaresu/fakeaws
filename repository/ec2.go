@@ -253,21 +253,25 @@ type execer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
 
-func (r *Repository) CreateVPC(account string, v *EC2VPC) error {
-	return insertVPC(r.db, account, v)
-}
+// DefaultGroupName is the security group every VPC has. AWS reserves
+// it: no other group may take the name, and it cannot be deleted.
+const DefaultGroupName = "default"
 
 // CreateVPCWithDefaultGroup stores v and sg, its security group named
-// default, in one transaction: EC2's CreateVpc makes both, so no read
-// sees the VPC without its default group.
+// DefaultGroupName, in one transaction: EC2's CreateVpc makes both, so
+// no read sees the VPC without its default group.
 func (r *Repository) CreateVPCWithDefaultGroup(account string, v *EC2VPC, sg *EC2SecurityGroup) error {
 	tx, err := r.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := insertVPC(tx, account, v); err != nil {
-		return err
+	body, _ := json.Marshal(v)
+	if _, err := tx.Exec(
+		`INSERT INTO ec2_vpcs (account_id, region, id, cidr_block, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		account, v.Region, v.ID, v.CidrBlock, v.ARN, string(body), v.CreatedAt,
+	); err != nil {
+		return mapInsertError(err)
 	}
 	if err := insertSecurityGroup(tx, account, sg); err != nil {
 		return err
@@ -275,13 +279,51 @@ func (r *Repository) CreateVPCWithDefaultGroup(account string, v *EC2VPC, sg *EC
 	return tx.Commit()
 }
 
-func insertVPC(ex execer, account string, v *EC2VPC) error {
-	body, _ := json.Marshal(v)
-	_, err := ex.Exec(
-		`INSERT INTO ec2_vpcs (account_id, region, id, cidr_block, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		account, v.Region, v.ID, v.CidrBlock, v.ARN, string(body), v.CreatedAt,
-	)
-	return mapInsertError(err)
+// BackfillDefaultGroups gives each VPC that has no group named
+// DefaultGroupName the one newGroup makes, unless the database is
+// loaded, whose rows are answered as they are. A VPC stored before
+// CreateVpc made its default group (a file database, a snapshot) would
+// otherwise answer group-name=default with nothing. The loaded read,
+// the list and the inserts share one transaction, so a failure adds
+// no group.
+func (r *Repository) BackfillDefaultGroups(newGroup func(account, region, vpcID string) *EC2SecurityGroup) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	loaded, err := readLoaded(tx)
+	if err != nil {
+		return fmt.Errorf("read loaded flag: %w", err)
+	}
+	if loaded {
+		return nil
+	}
+	rows, err := tx.Query(`SELECT v.account_id, v.region, v.id FROM ec2_vpcs v
+		WHERE NOT EXISTS (SELECT 1 FROM ec2_security_groups g
+		                  WHERE g.account_id = v.account_id AND g.vpc_id = v.id AND g.group_name = ?)`, DefaultGroupName)
+	if err != nil {
+		return err
+	}
+	var bare [][3]string
+	for rows.Next() {
+		var v [3]string
+		if err := rows.Scan(&v[0], &v[1], &v[2]); err != nil {
+			rows.Close()
+			return err
+		}
+		bare = append(bare, v)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, v := range bare {
+		if err := insertSecurityGroup(tx, v[0], newGroup(v[0], v[1], v[2])); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // GetVPC looks up a VPC by id, optionally scoped to a region. Pass

@@ -87,7 +87,7 @@ func TestSSMParameterResetSnapshotRestore(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, r.Snapshot())
 	require.NoError(t, r.DeleteSSMParameter(testAccount, testRegion, "kept"))
-	require.NoError(t, r.Restore())
+	require.NoError(t, r.Restore(nil))
 
 	got, err := r.GetSSMParameter(testAccount, testRegion, "kept")
 	require.NoError(t, err)

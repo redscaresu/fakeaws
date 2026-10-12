@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -263,10 +264,6 @@ type ec2CreateVpcResult struct {
 	Vpc ec2VpcXML `xml:"vpc"`
 }
 
-// ec2DefaultGroupName is the security group every VPC has, which AWS
-// reserves: no other group may take the name, and it cannot be deleted.
-const ec2DefaultGroupName = "default"
-
 // ec2CreateVpc stores the VPC and its default security group.
 //
 // CRITICAL[ec2-vpc-default-security-group]: CreateVpc stores the VPC
@@ -278,8 +275,9 @@ const ec2DefaultGroupName = "default"
 // name with 400 InvalidGroup.Reserved and DeleteSecurityGroup refuses
 // the group with 400 CannotDelete, so the VPC keeps it until DeleteVpc.
 // A database that is not loaded gets one for each VPC stored without
-// it (backfillDefaultGroups) at boot and after /mock/restore; a loaded
-// database answers its rows. The group has no rules: AWS's allows all traffic from itself and all
+// it (repository.BackfillDefaultGroups) at boot and in /mock/restore's
+// copy of the snapshot before it goes live; a loaded database answers
+// its rows. The group has no rules: AWS's allows all traffic from itself and all
 // egress, but fakeaws gives a created group no default egress either.
 //
 // UNVERIFIED(aws-code): InvalidGroup.Reserved and CannotDelete from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
@@ -736,43 +734,7 @@ func newEC2SecurityGroup(account, region, vpcID, name, desc string) *repository.
 
 // newDefaultGroup is vpcID's security group named default.
 func newDefaultGroup(account, region, vpcID string) *repository.EC2SecurityGroup {
-	return newEC2SecurityGroup(account, region, vpcID, ec2DefaultGroupName, "default VPC security group")
-}
-
-// backfillDefaultGroups gives each VPC of a database that is not
-// loaded, stored before CreateVpc made its default group (a file
-// database, a snapshot), that group, so group-name=default never
-// answers such a VPC with nothing.
-func (app *Application) backfillDefaultGroups() error {
-	loaded, err := app.repo.Loaded()
-	if err != nil {
-		return fmt.Errorf("read loaded flag: %w", err)
-	}
-	if loaded {
-		return nil
-	}
-	account, err := app.AccountID()
-	if err != nil {
-		return err
-	}
-	vpcs, err := app.repo.ListVPCs(account, "")
-	if err != nil {
-		return err
-	}
-	sgs, err := app.repo.ListSecurityGroups(account, "")
-	if err != nil {
-		return err
-	}
-	for _, v := range vpcs {
-		if !slices.ContainsFunc(sgs, func(sg *repository.EC2SecurityGroup) bool {
-			return sg.VPCID == v.ID && sg.GroupName == ec2DefaultGroupName
-		}) {
-			if err := app.repo.CreateSecurityGroup(account, newDefaultGroup(account, v.Region, v.ID)); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return newEC2SecurityGroup(account, region, vpcID, repository.DefaultGroupName, "default VPC security group")
 }
 
 func ec2VpcToXML(account string, v *repository.EC2VPC) ec2VpcXML {
@@ -1797,9 +1759,9 @@ func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, r
 		ec2Refuse(w, req.Action, "no GroupName, GroupDescription or VpcId") // AWS puts a group without VpcId in the default VPC
 		return
 	}
-	if groupName == ec2DefaultGroupName {
+	if groupName == repository.DefaultGroupName {
 		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidGroup.Reserved",
-			fmt.Sprintf("The name '%s' is reserved, and cannot be used to create a new security group.", ec2DefaultGroupName))
+			fmt.Sprintf("The name '%s' is reserved, and cannot be used to create a new security group.", repository.DefaultGroupName))
 		return
 	}
 	specs, refused := refuseTagSpecifications(w, req.Params, "security-group")
@@ -1957,9 +1919,9 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, r
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	if sg.GroupName == ec2DefaultGroupName {
+	if sg.GroupName == repository.DefaultGroupName {
 		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "CannotDelete",
-			fmt.Sprintf("the specified group: %q name: %q cannot be deleted by a user", id, ec2DefaultGroupName))
+			fmt.Sprintf("the specified group: %q name: %q cannot be deleted by a user", id, repository.DefaultGroupName))
 		return
 	}
 	if err := app.repo.DeleteSecurityGroup(account, region, id); err != nil {
@@ -3028,14 +2990,28 @@ func ec2KeyFingerprint(publicKey string) string {
 	return strings.Join(parts, ":")
 }
 
+// ec2ImportKeyPair stores the key text: PublicKeyMaterial is a blob,
+// which the SDK sends base64-encoded on the Query wire, so the row holds
+// what aws_key_pair's public_key said and DescribeKeyPairs'
+// IncludePublicKey answers it as is. Material that is not base64 is
+// 400 InvalidKeyPair.Format.
+//
+// UNVERIFIED(aws-code): InvalidKeyPair.Format from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("KeyName")
-	publicKey := req.Params.Get("PublicKeyMaterial")
-	if name == "" || publicKey == "" {
+	material := req.Params.Get("PublicKeyMaterial")
+	if name == "" || material == "" {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query,
 			fmt.Errorf("KeyName and PublicKeyMaterial required: %w", models.ErrConflict))
 		return
 	}
+	decoded, err := base64.StdEncoding.DecodeString(material)
+	if err != nil {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidKeyPair.Format",
+			"Key is not in valid OpenSSH public key format: PublicKeyMaterial is not base64-encoded")
+		return
+	}
+	publicKey := string(decoded)
 	specs, refused := refuseTagSpecifications(w, req.Params, "key-pair")
 	if refused {
 		return
@@ -3046,7 +3022,7 @@ func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region 
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	tags := onResource(specs["key-pair"], kp.ID, "key-pair")
-	err := app.repo.CreateKeyPair(account, kp)
+	err = app.repo.CreateKeyPair(account, kp)
 	if err == nil {
 		err = app.tagNew(account, region, tags,
 			func() error { return app.repo.DeleteKeyPair(account, region, name) })
