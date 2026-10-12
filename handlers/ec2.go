@@ -548,7 +548,7 @@ func subnetZone(p url.Values, region string, zones []repository.AvailabilityZone
 
 // subnetCIDRInRange reports whether EC2 accepts cidr as a subnet of a
 // VPC whose block is vpcCIDR: inside it, and between /16 and /28.
-// Overlap with sibling subnets is not checked.
+// Overlap with sibling subnets is refused by repository.CreateSubnet.
 func subnetCIDRInRange(vpcCIDR, cidr string) bool {
 	vpc, err := netip.ParsePrefix(vpcCIDR)
 	if err != nil {
