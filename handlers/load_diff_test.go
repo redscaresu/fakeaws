@@ -505,3 +505,64 @@ func TestLoadDiffDeepSetsStayLinear(t *testing.T) {
 	assert.Equal(t, rec, ren)
 	assert.Less(t, time.Since(start), time.Second, "64-level sets diff in well under a second")
 }
+
+func TestLoadDiffMemberIndexCountsPrunedMembers(t *testing.T) {
+	rec, ren := Diff(diffVpcsKey, mustParseXML(t, "<r><s><item/><item><v>1</v></item></s></r>"), mustParseXML(t, "<r><s><item><v>2</v></item></s></r>"))
+	assert.Equal(t, []string{"s/item[1]/v"}, rec, "an empty member before it still counts")
+	assert.Equal(t, []string{"s/item[0]/v"}, ren)
+
+	rec, ren = diffJSON(t, `{"A":[null,{"V":1}]}`, `{"A":[{"V":2}]}`)
+	assert.Equal(t, []string{"A[1]/V"}, rec, "a null element before it still counts")
+	assert.Equal(t, []string{"A[0]/V"}, ren)
+
+	rec, ren = Diff(diffVpcsKey, mustParseXML(t, "<r><s><item><requestId>r-5</requestId></item><item><v>1</v></item></s></r>"),
+		mustParseXML(t, "<r><s><item><v>2</v></item></s></r>"))
+	assert.Equal(t, []string{"s/item[1]/v"}, rec, "a member holding only requestId before it still counts")
+	assert.Equal(t, []string{"s/item[0]/v"}, ren)
+
+	rec, ren = Diff(diffVpcsKey, mustParseXML(t, "<r><s><item/><item><v>1</v></item></s></r>"), mustParseXML(t, "<r/>"))
+	assert.Equal(t, []string{"s/item[1]"}, rec, "a member named whole keeps its index too")
+	assert.Empty(t, ren)
+
+	rec, ren = Diff(diffVpcsKey, mustParseXML(t, "<r><x/><x>1</x></r>"), mustParseXML(t, "<r><x>2</x></r>"))
+	assert.Equal(t, []string{"x[1]"}, rec, "a repeated field that is not a set member keeps its index")
+	assert.Equal(t, []string{"x[0]"}, ren)
+}
+
+// diffSecurityGroups returns a DescribeSecurityGroups body of groups SGs,
+// each with 10 permissions of 5 ranges, every range described or none.
+func diffSecurityGroups(groups int, described bool) string {
+	var b strings.Builder
+	b.WriteString("<DescribeSecurityGroupsResponse><securityGroupInfo>")
+	for g := range groups {
+		fmt.Fprintf(&b, "<item><groupId>sg-%d</groupId><ipPermissions>", g)
+		for p := range 10 {
+			fmt.Fprintf(&b, "<item><ipProtocol>tcp</ipProtocol><fromPort>%d</fromPort><toPort>%d</toPort><ipRanges>", 1000+p, 1000+p)
+			for r := range 5 {
+				fmt.Fprintf(&b, "<item><cidrIp>10.%d.%d.0/24</cidrIp>", p, r)
+				if described {
+					b.WriteString("<description>web</description>")
+				}
+				b.WriteString("</item>")
+			}
+			b.WriteString("</ipRanges></item>")
+		}
+		b.WriteString("</ipPermissions></item>")
+	}
+	b.WriteString("</securityGroupInfo></DescribeSecurityGroupsResponse>")
+	return b.String()
+}
+
+func TestLoadDiffNestedSetsPairWithoutRecursing(t *testing.T) {
+	recorded, rendered := mustParseXML(t, diffSecurityGroups(100, true)), mustParseXML(t, diffSecurityGroups(100, false))
+	start := time.Now()
+	rec, ren := Diff(LoadKey{Service: "ec2", Action: "DescribeSecurityGroups"}, recorded, rendered)
+	elapsed := time.Since(start)
+
+	assert.Len(t, rec, 100*10*5, "one description per range")
+	assert.Contains(t, rec, "securityGroupInfo/item[42]/ipPermissions/item[7]/ipRanges/item[3]/description", "each group pairs with its own")
+	assert.Empty(t, ren)
+	// About 20ms, or 0.5s under CI's -race; scoring each pairing by a
+	// recursive node diff took about 30s at this size.
+	assert.Less(t, elapsed, 5*time.Second, "100 groups whose every range differs")
+}

@@ -11,6 +11,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"regexp"
 	"slices"
@@ -69,6 +70,7 @@ type Tree struct {
 	json   bool // name is a JSON key
 	member bool
 	kids   []*Tree
+	index  int // among its same-named siblings in the tree Diff was given; prune sets it
 }
 
 // valued says whether t holds a value of its own, which an XML element
@@ -348,7 +350,8 @@ func diffRootPath(t *Tree) string {
 // paths only the recording holds or whose value differs, and the paths
 // only the rendering holds, each sorted; equal is both empty. A path
 // runs from below the root and names a set member's index in its own
-// tree (vpcSet/item[2]/isDefault); a root's own value is named by
+// tree, counting the members pruning drops (vpcSet/item[2]/isDefault);
+// a root's own value is named by
 // diffRootPath, and a member with no counterpart is named whole. Two
 // differently named XML roots are named and nothing under them compared.
 // diffAlwaysIgnored's fields and key's ignore entries (applied here and
@@ -406,17 +409,23 @@ func (d treeDiffer) pruneRoot(t *Tree) *Tree {
 
 // prune returns a copy of t without the fields Diff never compares and
 // without any node that holds no value and no kids, before or after
-// that, or nil when nothing is left: an empty element is absent. shape is
-// t's index-free path, which ignore entries name.
+// that, or nil when nothing is left: an empty element is absent. Each
+// kid kept carries its index in t, counted before anything is dropped.
+// shape is t's index-free path, which ignore entries name.
 func (d treeDiffer) prune(t *Tree, shape string) *Tree {
 	c := *t
 	c.kids = nil
+	seen := map[diffGroupKey]int{}
 	for _, k := range t.kids {
+		g := diffGroupKey{k.name, k.json, k.member}
+		index := seen[g]
+		seen[g]++
 		kShape := diffJoin(shape, k.name)
 		if diffAlwaysIgnored[k.name] || d.ignore[kShape] {
 			continue
 		}
 		if p := d.prune(k, kShape); p != nil {
+			p.index = index
 			c.kids = append(c.kids, p)
 		}
 	}
@@ -483,13 +492,9 @@ func (d treeDiffer) node(a, b *Tree) (rec, ren []string) {
 }
 
 // fields pairs same-named kids that are not set members by position,
-// naming the index only when a name repeats.
+// each side naming its own index only when a name repeats.
 func (d treeDiffer) fields(name string, as, bs []*Tree) (rec, ren []string) {
 	for i := range max(len(as), len(bs)) {
-		seg := name
-		if len(as) > 1 || len(bs) > 1 {
-			seg = fmt.Sprintf("%s[%d]", name, i)
-		}
 		a, b := &Tree{}, &Tree{}
 		if i < len(as) {
 			a = as[i]
@@ -497,21 +502,27 @@ func (d treeDiffer) fields(name string, as, bs []*Tree) (rec, ren []string) {
 		if i < len(bs) {
 			b = bs[i]
 		}
+		segA, segB := name, name
+		if len(as) > 1 || len(bs) > 1 || a.index > 0 || b.index > 0 {
+			segA, segB = fmt.Sprintf("%s[%d]", name, a.index), fmt.Sprintf("%s[%d]", name, b.index)
+		}
 		r, n := d.node(a, b)
-		rec, ren = append(rec, diffUnder(seg, r)...), append(ren, diffUnder(seg, n)...)
+		rec, ren = append(rec, diffUnder(segA, r)...), append(ren, diffUnder(segB, n)...)
 	}
 	return rec, ren
 }
 
 // members pairs set members as a multiset. Equal members pair first, by
-// form; each remaining one pairs with the remaining member on the other
-// side it differs from on the fewest paths, ties by index. A member left
-// over is named whole.
+// form. Each remaining one pairs with the remaining member on the other
+// side it differs from least, ties by index, scored by diffDistance
+// rather than a node diff, so scoring never recurses: only the pairs
+// chosen are node-diffed. A member left over is named whole.
 //
-// ponytail: O(n·m) node diffs over the members no equal one pairs; fine
-// for one account's read, index members by id if loads reach thousands.
+// ponytail: O(n·m) diffDistance scores over the members no equal one
+// pairs; fine for one account's read, index members by id if loads reach
+// thousands.
 func (d treeDiffer) members(name string, as, bs []*Tree) (rec, ren []string) {
-	seg := func(i int) string { return fmt.Sprintf("%s[%d]", name, i) }
+	seg := func(t *Tree) string { return fmt.Sprintf("%s[%d]", name, t.index) }
 	usedA, usedB := make([]bool, len(as)), make([]bool, len(bs))
 	byForm := map[string][]int{}
 	for j, b := range bs {
@@ -524,40 +535,86 @@ func (d treeDiffer) members(name string, as, bs []*Tree) (rec, ren []string) {
 			usedA[i], usedB[js[0]], byForm[f] = true, true, js[1:]
 		}
 	}
-	type pair struct {
-		i, j     int
-		rec, ren []string
-	}
-	var pairs []pair
+	leavesA, leavesB := make([][]uint64, len(as)), make([][]uint64, len(bs))
 	for i, a := range as {
-		for j, b := range bs {
+		if !usedA[i] {
+			leavesA[i] = diffLeaves(a)
+		}
+	}
+	for j, b := range bs {
+		if !usedB[j] {
+			leavesB[j] = diffLeaves(b)
+		}
+	}
+	type pair struct{ i, j, distance int }
+	var pairs []pair
+	for i := range as {
+		for j := range bs {
 			if !usedA[i] && !usedB[j] {
-				r, n := d.node(a, b)
-				pairs = append(pairs, pair{i, j, r, n})
+				pairs = append(pairs, pair{i, j, diffDistance(leavesA[i], leavesB[j])})
 			}
 		}
 	}
-	sort.SliceStable(pairs, func(x, y int) bool {
-		return len(pairs[x].rec)+len(pairs[x].ren) < len(pairs[y].rec)+len(pairs[y].ren)
-	})
+	sort.SliceStable(pairs, func(x, y int) bool { return pairs[x].distance < pairs[y].distance })
 	for _, p := range pairs {
 		if usedA[p.i] || usedB[p.j] {
 			continue
 		}
 		usedA[p.i], usedB[p.j] = true, true
-		rec, ren = append(rec, diffUnder(seg(p.i), p.rec)...), append(ren, diffUnder(seg(p.j), p.ren)...)
+		r, n := d.node(as[p.i], bs[p.j])
+		rec, ren = append(rec, diffUnder(seg(as[p.i]), r)...), append(ren, diffUnder(seg(bs[p.j]), n)...)
 	}
 	for i, used := range usedA {
 		if !used {
-			rec = append(rec, seg(i))
+			rec = append(rec, seg(as[i]))
 		}
 	}
 	for j, used := range usedB {
 		if !used {
-			ren = append(ren, seg(j))
+			ren = append(ren, seg(bs[j]))
 		}
 	}
 	return rec, ren
+}
+
+// diffLeaves returns t's leaves, each its index-free path, kind and
+// value, hashed and sorted: the multiset diffDistance compares.
+func diffLeaves(t *Tree) []uint64 {
+	var out []uint64
+	h := fnv.New64a()
+	var walk func(n *Tree, path string)
+	walk = func(n *Tree, path string) {
+		if n.valued() {
+			h.Reset()
+			h.Write([]byte(path + "\x00" + string(byte(n.kind)) + n.text))
+			out = append(out, h.Sum64())
+		}
+		for _, k := range n.kids {
+			walk(k, path+"/"+k.name)
+		}
+	}
+	walk(t, "")
+	slices.Sort(out)
+	return out
+}
+
+// diffDistance is the size of the symmetric difference of two sorted
+// leaf multisets: a cheap stand-in for the number of paths a node diff
+// of the two would name. A hash collision can only change which members
+// pair, never what is reported, since each chosen pair is node-diffed.
+func diffDistance(a, b []uint64) int {
+	n, i, j := 0, 0, 0
+	for i < len(a) && j < len(b) {
+		switch {
+		case a[i] == b[j]:
+			i, j = i+1, j+1
+		case a[i] < b[j]:
+			n, i = n+1, i+1
+		default:
+			n, j = n+1, j+1
+		}
+	}
+	return n + len(a) - i + len(b) - j
 }
 
 // form spells a pruned node by the rules node compares by, so two nodes
