@@ -2680,10 +2680,11 @@ type ec2DescribeImagesResult struct {
 // ec2DescribeImages answers ImageId.N, most common from
 // terraform-provider-aws where users pass a literal AMI id, and
 // Owner.N. data.aws_ami's filters are refused per the S44-T0 pitfall,
-// as is ExecutableBy.N. IncludeDisabled is read: there are no disabled
-// images, so it cannot change the answer.
+// as is ExecutableBy.N. IncludeDisabled and IncludeDeprecated (which
+// data.aws_ami always sends) are read: no image is disabled or
+// deprecated, so neither can change the answer.
 func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if _, ok := ec2NoFilters.read(w, req, "ImageId.N", "Owner.N", "IncludeDisabled"); !ok {
+	if _, ok := ec2NoFilters.read(w, req, "ImageId.N", "Owner.N", "IncludeDisabled", "IncludeDeprecated"); !ok {
 		return
 	}
 	// Lazy-seed canonical AMI fixtures for this region (Codex pass 9

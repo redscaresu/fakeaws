@@ -1977,6 +1977,20 @@ func TestEC2_DescribeRefusesUnreadParams(t *testing.T) {
 	}
 }
 
+// TestEC2_DescribeImagesReadsIncludeDeprecated: data.aws_ami always
+// sends IncludeDeprecated; no image is deprecated, so it is read, not
+// refused.
+func TestEC2_DescribeImagesReadsIncludeDeprecated(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, body := ec2Call(t, srv, tagRegion, "DescribeImages", url.Values{"Owner.1": {"099720109477"}, "IncludeDeprecated": {"false"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	var out struct {
+		IDs []string `xml:"imagesSet>item>imageId"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	assert.ElementsMatch(t, []string{"ami-0ubuntu2004", "ami-0ubuntu2204"}, out.IDs)
+}
+
 // TestEC2_DescribeIdListReadsEveryIndex: VpcId.1 and VpcId.3 with no
 // VpcId.2 look up both.
 func TestEC2_DescribeIdListReadsEveryIndex(t *testing.T) {
