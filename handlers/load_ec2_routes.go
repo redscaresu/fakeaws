@@ -37,13 +37,13 @@ func decodeRouteTables(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) 
 	return items, nil
 }
 
-// routeTargets are the rows routes target, each once: an internet
-// gateway (not the local route's "local"), which must be loaded, and a
-// NAT gateway, instance or network interface, which no loader loads yet,
-// so the answer names them unresolved.
-//
-// ponytail: a vgw-, vpce- or other gatewayId is not referenced; add its
-// type when a loader loads it.
+// routeTargets are the rows routes target, each once. An internet
+// gateway must be loaded, unless its route is blackhole: AWS keeps the
+// route of a deleted gateway, which no recording can hold. Every other
+// target is named unresolved, as no loader loads it yet: a blackhole
+// route's gateway, a NAT gateway, instance or network interface, and any
+// other gatewayId (vgw-, vpce-, ...) as a "gateway". The local route's
+// "local" references nothing.
 func routeTargets(routes []ec2RouteXML) []loadReference {
 	var refs []loadReference
 	add := func(typ, id string, unread bool) {
@@ -53,8 +53,12 @@ func routeTargets(routes []ec2RouteXML) []loadReference {
 		}
 	}
 	for _, r := range routes {
-		if strings.HasPrefix(r.GatewayId, "igw-") {
-			add("internet-gateway", r.GatewayId, false)
+		switch {
+		case r.GatewayId == "local":
+		case strings.HasPrefix(r.GatewayId, "igw-"):
+			add("internet-gateway", r.GatewayId, r.State == "blackhole")
+		default:
+			add("gateway", r.GatewayId, true)
 		}
 		add("nat-gateway", r.NatGatewayId, true)
 		add("instance", r.InstanceId, true)

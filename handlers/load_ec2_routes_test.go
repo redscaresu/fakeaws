@@ -183,25 +183,33 @@ func TestLoadEC2Routes_SubnetAssociations(t *testing.T) {
 }
 
 // TestLoadEC2Routes_UnloadedTargetsUnresolved: a route to a network
-// interface, instance or NAT gateway loads, and the answer names its
-// target unresolved, as no loader loads those rows yet.
+// interface, instance, NAT gateway or a gateway that is not an internet
+// gateway loads, and so does a blackhole route to an internet gateway
+// no exchange loaded; the answer names each target unresolved.
 func TestLoadEC2Routes_UnloadedTargetsUnresolved(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	const vpc = "vpc-0a"
 	route := func(dest, target string) string {
 		return "<item><destinationCidrBlock>" + dest + "</destinationCidrBlock>" + target + "<state>active</state><origin>CreateRoute</origin></item>"
 	}
+	blackhole := "<item><destinationCidrBlock>0.0.0.0/0</destinationCidrBlock><gatewayId>igw-0dead</gatewayId><state>blackhole</state><origin>CreateRoute</origin></item>"
 	rts := netRouteTables(strings.Replace(netRouteTable("rtb-0a", vpc, ""), "</routeSet>",
 		route("10.1.0.0/16", "<networkInterfaceId>eni-0a</networkInterfaceId>")+
 			route("10.2.0.0/16", "<instanceId>i-0a</instanceId>")+
 			route("10.3.0.0/16", "<natGatewayId>nat-0a</natGatewayId>")+
-			route("10.4.0.0/16", "<networkInterfaceId>eni-0a</networkInterfaceId>")+"</routeSet>", 1))
+			route("10.4.0.0/16", "<networkInterfaceId>eni-0a</networkInterfaceId>")+
+			route("10.5.0.0/16", "<gatewayId>vgw-0a</gatewayId>")+
+			route("10.6.0.0/16", "<gatewayId>vpce-0a</gatewayId>")+blackhole+"</routeSet>", 1))
 	var answer struct{ Unresolved map[string][]string }
 	body := loadNet(t, srv, append([]netRecorded{netVpcs(netVpc(vpc, "<isDefault>false</isDefault>")), rts}, netDNS(vpc, true)...)...)
 	require.NoError(t, json.Unmarshal([]byte(body), &answer))
 	assert.Equal(t, map[string][]string{
 		"dhcp-options": {"dopt-0abc"}, "network-interface": {"eni-0a"}, "instance": {"i-0a"}, "nat-gateway": {"nat-0a"},
+		"gateway": {"vgw-0a", "vpce-0a"}, "internet-gateway": {"igw-0dead"},
 	}, answer.Unresolved)
+	rec, ren := diffAnswer(t, srv, rts)
+	assert.Empty(t, rec)
+	assert.Empty(t, ren)
 }
 
 func TestLoadEC2Routes_Refusals(t *testing.T) {
