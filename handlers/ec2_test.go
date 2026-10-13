@@ -2846,8 +2846,9 @@ func describeImageIDs(t *testing.T, srv *httptest.Server, params url.Values) []s
 
 // TestEC2_DescribeImagesFilters: each imageFilters name selects the
 // fixtures whose row answers it; Owner.1=self with a name filter keeps
-// none, and a filter on a field AMI rows do not store, or
-// ExecutableBy.N, is refused by name. An image answers the owner-alias
+// none, and a filter on a field AMI rows do not store, one on a loaded
+// image's recorded field (which no fixture holds), or ExecutableBy.N,
+// is refused by name, all in one sorted refusal. An image answers the owner-alias
 // the filter reads: amazon for an Amazon fixture, none for Ubuntu's.
 func TestEC2_DescribeImagesFilters(t *testing.T) {
 	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
@@ -2894,7 +2895,13 @@ func TestEC2_DescribeImagesFilters(t *testing.T) {
 		params url.Values
 		name   string
 	}{
+		{filter("platform", "windows"), "platform"},
 		{filter("architecture", "x86_64"), "architecture"},
+		{filter("is-public", "true"), "is-public"},
+		{filter("root-device-type", "ebs"), "root-device-type"},
+		{filter("platform-details", "Linux/UNIX"), "platform-details"},
+		{url.Values{"Filter.1.Name": {"platform"}, "Filter.1.Value.1": {"windows"},
+			"Filter.2.Name": {"architecture"}, "Filter.2.Value.1": {"x86_64"}}, "architecture, platform"},
 		{url.Values{"ExecutableBy.1": {"all"}}, "ExecutableBy.N"},
 	} {
 		resp, body = ec2Call(t, srv, tagRegion, "DescribeImages", c.params)
