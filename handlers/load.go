@@ -116,6 +116,17 @@ func loaderFor(key LoadKey) *loader {
 	return &loaders[slices.IndexFunc(loaders, func(l loader) bool { return l.key == key })]
 }
 
+// LoadAttributeReads are the attributes a load needs one recorded answer
+// of per loaded row, by the EC2 action that reads one: a loaded VPC
+// references each DescribeVpcAttribute, and an instance each
+// DescribeInstanceAttribute, so a recording that lacks one is refused.
+func LoadAttributeReads() map[string][]string {
+	return map[string][]string{
+		"DescribeVpcAttribute":      slices.Clone(ec2VpcDNSAttributes),
+		"DescribeInstanceAttribute": slices.Clone(ec2InstanceReadAttributes),
+	}
+}
+
 // loaders is the registry, in the order a load runs them: by table
 // rank, then registration order. Init order is file-name order, so it
 // never decides which table loads first.

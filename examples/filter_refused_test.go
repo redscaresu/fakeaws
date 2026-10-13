@@ -56,9 +56,8 @@ func TestFilterRefused(t *testing.T) {
 	requireTofu(t)
 	requireShard(t)
 	t.Parallel()
-	const token = "filter-refused-test-token"
-	url := startFakeAWS(t, buildFakeAWS(t), "-admin-token", token, "-record-requests")
-	env := identityEnv(t, url)
+	fakeaws := startFakeAWS(t, buildFakeAWS(t), "-record-requests")
+	env := identityEnv(t, fakeaws.url)
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(filterRefusedHCL), 0o644))
 
@@ -73,9 +72,9 @@ func TestFilterRefused(t *testing.T) {
 	}
 	t.Logf("tofu plan:\n%s", out)
 
-	req, err := http.NewRequest(http.MethodGet, url+"/mock/requests", nil)
+	req, err := http.NewRequest(http.MethodGet, fakeaws.url+"/mock/requests", nil)
 	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+fakeaws.token)
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()

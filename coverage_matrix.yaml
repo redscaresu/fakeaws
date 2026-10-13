@@ -1,11 +1,13 @@
 # fakeaws coverage_matrix.yaml — sole source of truth for S48-T7's
-# TestFullCoverageAudit. Each entry asserts five invariants:
+# TestFullCoverageAudit. Each entry asserts six invariants:
 #  (a) integration test in handlers/handlers_test.go matches integration_test_func_name
 #  (b) examples/working/<working_dir_name>/ exists OR working_exempt: true with reason
 #  (c) examples/misconfigured/<misconfigured_dir_name>/ exists OR misconfigured_exempt
 #  (d) examples/updates/<updates_dir_name>/ exists OR updates_exempt
 #  (e) for non-null scenario_resource_type, ≥1 aws-*.yaml has the key under resources:
 #      AND the matrix entry's aws_resource_type is named in aws_resource_anchors
+#  (f) exactly one of loadable: true and loadable_exempt_reason; a loadable type is
+#      declared by >=1 example examples/load_round_trip_test.go round-trips
 #
 # Per S43-T10 acceptance: this file ships EMPTY at S43-T1 (just this header).
 # Entries land in the SAME PR that ships the bundle (handler + tests + examples
@@ -26,6 +28,11 @@
 #   *_exempt_reason: required iff exempt
 # - integration_test_func_name: regex matching ≥1 TestXxx in handlers_test.go
 #   (default: ^Test.*<aws_resource_type-camel-cased>.*)
+# - loadable: true when a POST /mock/load of a recorded read gives a fresh
+#   fakeaws the type, so a plan of its applied state there is clean; else
+#   loadable_exempt_reason says why not. A working example whose every type is
+#   loadable is round-tripped by examples/load_round_trip_test.go.
+# - Any other column fails the decode (KnownFields), so a misspelling is an error.
 #
 # AWS provider version pin: hashicorp/aws exactly 5.100.0 (concepts.md §
 # Resolved decisions item 14). Bumps require a single PR updating this
@@ -37,6 +44,7 @@ entries:
   # IAM (S43-T6 handlers, S43-T14 e2e + this matrix entry).
   - aws_service: iam
     aws_resource_type: aws_iam_role
+    loadable: true
     scenario_resource_type: iam
     working_dir_name: iam_role
     misconfigured_dir_name: iam_attachment_missing_role
@@ -44,6 +52,7 @@ entries:
     integration_test_func_name: "^TestIAM_CreateGetListUpdateDeleteRole$"
   - aws_service: iam
     aws_resource_type: aws_iam_policy
+    loadable_exempt_reason: "Outside the reader table: it never reads GetPolicy, so a customer-managed policy loads only as an unresolved reference."
     scenario_resource_type: iam
     working_exempt: true
     working_exempt_reason: "Policy lifecycle is exercised inside iam_attachment_missing_role (creates a policy, attaches it, then asserts the misconfigured FK rejection); standalone working/iam_policy/ is gap-filled in S48-T6."
@@ -54,6 +63,7 @@ entries:
     integration_test_func_name: "^TestIAM_PolicyCRUD$"
   - aws_service: iam
     aws_resource_type: aws_iam_role_policy_attachment
+    loadable_exempt_reason: "ListAttachedRolePolicies loads one (TestLoadIAM_CustomerManagedPolicyIsUnresolved), but no working example declares one to round-trip."
     scenario_resource_type: iam
     working_exempt: true
     working_exempt_reason: "Attachment lifecycle is asserted inside TestIAM_AttachDetachRolePolicy; standalone working/role_policy_attachment/ would duplicate that coverage."
@@ -63,6 +73,7 @@ entries:
     integration_test_func_name: "^TestIAM_AttachDetachRolePolicy$"
   - aws_service: iam
     aws_resource_type: aws_iam_role_policy
+    loadable: true
     working_dir_name: iam_role_inline_policy
     misconfigured_exempt: true
     misconfigured_exempt_reason: "The one FK gate, PutRolePolicy on a missing role answering NoSuchEntity naming the role, is pinned by TestIAM_RoleInlinePolicyLifecycle's missing-role case."
@@ -75,6 +86,7 @@ entries:
   # S3 v1 has no cross-resource FK refs, so misconfigured_exempt.
   - aws_service: s3
     aws_resource_type: aws_s3_bucket
+    loadable_exempt_reason: "Outside the reader table: S3 is rest, and the reader refuses every rest entry by name (ADR-0041)."
     scenario_resource_type: storage
     working_dir_name: s3_bucket
     misconfigured_exempt: true
@@ -83,6 +95,7 @@ entries:
     integration_test_func_name: "^TestS3_CreateHeadGetDeleteBucket$"
   - aws_service: s3
     aws_resource_type: aws_s3_bucket_versioning
+    loadable_exempt_reason: "Outside the reader table: S3 is rest, and the reader refuses every rest entry by name (ADR-0041)."
     scenario_resource_type: storage
     working_exempt: true
     working_exempt_reason: "Versioning lifecycle is exercised inside working/s3_bucket via aws_s3_bucket_versioning."
@@ -92,6 +105,7 @@ entries:
     integration_test_func_name: "^TestS3_VersioningRoundTrip$"
   - aws_service: s3
     aws_resource_type: aws_s3_bucket_server_side_encryption_configuration
+    loadable_exempt_reason: "Outside the reader table: S3 is rest, and the reader refuses every rest entry by name (ADR-0041)."
     scenario_resource_type: storage
     working_exempt: true
     working_exempt_reason: "Encryption Put/Get round-trip is asserted in TestCoverage_S3OwnershipAndEncryption; standalone working dir would duplicate."
@@ -107,6 +121,7 @@ entries:
   # these specifically; coverage is via inline tests.
   - aws_service: s3
     aws_resource_type: aws_s3_bucket_policy
+    loadable_exempt_reason: "Outside the reader table: S3 is rest, and the reader refuses every rest entry by name (ADR-0041)."
     working_exempt: true
     working_exempt_reason: "Bucket policy round-trip is asserted in TestS3_PolicyRoundTripJSON; standalone working/s3_bucket_policy/ would duplicate."
     misconfigured_exempt: true
@@ -116,6 +131,7 @@ entries:
     integration_test_func_name: "^TestS3_PolicyRoundTripJSON$"
   - aws_service: s3
     aws_resource_type: aws_s3_bucket_public_access_block
+    loadable_exempt_reason: "Outside the reader table: S3 is rest, and the reader refuses every rest entry by name (ADR-0041)."
     working_exempt: true
     working_exempt_reason: "PAB Put/Get/Delete is asserted in TestS3_PublicAccessBlockRoundTrip; standalone working dir would duplicate."
     misconfigured_exempt: true
@@ -125,6 +141,7 @@ entries:
     integration_test_func_name: "^TestS3_PublicAccessBlockRoundTrip$"
   - aws_service: s3
     aws_resource_type: aws_s3_bucket_ownership_controls
+    loadable_exempt_reason: "Outside the reader table: S3 is rest, and the reader refuses every rest entry by name (ADR-0041)."
     working_exempt: true
     working_exempt_reason: "Ownership controls Put/Get is asserted in TestCoverage_S3OwnershipAndEncryption; standalone working dir would duplicate."
     misconfigured_exempt: true
@@ -137,6 +154,7 @@ entries:
   # TestFullCoverageAudit blind to them.
   - aws_service: s3
     aws_resource_type: aws_s3_bucket_tagging
+    loadable_exempt_reason: "Outside the reader table: S3 is rest, and the reader refuses every rest entry by name (ADR-0041)."
     working_exempt: true
     working_exempt_reason: "Tagging round-trip is asserted in TestS3_TaggingRoundTrip; standalone working/s3_bucket_tagging/ would duplicate."
     misconfigured_exempt: true
@@ -152,6 +170,7 @@ entries:
   # aws-instance.yaml.
   - aws_service: ec2
     aws_resource_type: aws_vpc
+    loadable: true
     scenario_resource_type: networking
     working_dir_name: vpc_network
     misconfigured_exempt: true
@@ -160,6 +179,7 @@ entries:
     integration_test_func_name: "^TestEC2_CreateDescribeDeleteVPC$"
   - aws_service: ec2
     aws_resource_type: aws_subnet
+    loadable: true
     scenario_resource_type: networking
     working_dir_name: vpc_network
     misconfigured_dir_name: instance_missing_subnet
@@ -167,6 +187,7 @@ entries:
     integration_test_func_name: "^TestEC2_SubnetCRUDAndFK$"
   - aws_service: ec2
     aws_resource_type: aws_internet_gateway
+    loadable: true
     scenario_resource_type: networking
     working_dir_name: vpc_network
     misconfigured_exempt: true
@@ -176,6 +197,7 @@ entries:
     integration_test_func_name: "^TestEC2_InternetGatewayLifecycle$"
   - aws_service: ec2
     aws_resource_type: aws_route_table
+    loadable: true
     scenario_resource_type: networking
     working_dir_name: vpc_network
     misconfigured_exempt: true
@@ -185,6 +207,7 @@ entries:
     integration_test_func_name: "^TestEC2_RouteTableAndAssociation$"
   - aws_service: ec2
     aws_resource_type: aws_route
+    loadable: true
     scenario_resource_type: networking
     working_dir_name: vpc_network
     misconfigured_exempt: true
@@ -194,6 +217,7 @@ entries:
     integration_test_func_name: "^TestEC2_RouteTableAndAssociation$"
   - aws_service: ec2
     aws_resource_type: aws_route_table_association
+    loadable: true
     scenario_resource_type: networking
     working_dir_name: vpc_network
     misconfigured_exempt: true
@@ -203,6 +227,7 @@ entries:
     integration_test_func_name: "^TestEC2_RouteTableAndAssociation$"
   - aws_service: ec2
     aws_resource_type: aws_security_group
+    loadable: true
     scenario_resource_type: networking
     working_dir_name: vpc_network
     misconfigured_exempt: true
@@ -216,6 +241,7 @@ entries:
   # inside the parent SG resource in scenarios.
   - aws_service: ec2
     aws_resource_type: aws_security_group_rule
+    loadable_exempt_reason: "DescribeSecurityGroupRules loads one (TestLoadEC2Groups_FixturesAnswerAsRecorded), but no working example declares one to round-trip."
     working_exempt: true
     working_exempt_reason: "Authorize/Revoke + idempotency are asserted inside TestEC2_SecurityGroupCRUDPlusRules; standalone working/security_group_rule/ would duplicate."
     misconfigured_exempt: true
@@ -224,6 +250,7 @@ entries:
     integration_test_func_name: "^(TestEC2_SecurityGroupCRUDPlusRules|TestEC2_DescribeSecurityGroupRules)$"
   - aws_service: ec2
     aws_resource_type: aws_instance
+    loadable: true
     scenario_resource_type: compute
     working_dir_name: basic_instance
     misconfigured_dir_name: instance_missing_subnet
@@ -236,6 +263,7 @@ entries:
   # (aws_vpc + aws_subnet are already credited via EC2 entries).
   - aws_service: rds
     aws_resource_type: aws_db_subnet_group
+    loadable_exempt_reason: "Outside the reader table: it reads no RDS, and fakeaws has no RDS loader."
     scenario_resource_type: database
     working_dir_name: rds_instance
     misconfigured_dir_name: rds_missing_subnet_group
@@ -244,6 +272,7 @@ entries:
     integration_test_func_name: "^TestRDS_DBSubnetGroupCRUD$"
   - aws_service: rds
     aws_resource_type: aws_db_parameter_group
+    loadable_exempt_reason: "Outside the reader table: it reads no RDS, and fakeaws has no RDS loader."
     scenario_resource_type: database
     working_dir_name: rds_instance
     misconfigured_exempt: true
@@ -252,6 +281,7 @@ entries:
     integration_test_func_name: "^TestRDS_ParameterGroupCRUD$"
   - aws_service: rds
     aws_resource_type: aws_db_instance
+    loadable_exempt_reason: "Outside the reader table: it reads no RDS, and fakeaws has no RDS loader."
     scenario_resource_type: database
     working_dir_name: rds_instance
     misconfigured_dir_name: rds_missing_subnet_group
@@ -272,6 +302,7 @@ entries:
   # scenario_resource_type is empty.
   - aws_service: iam
     aws_resource_type: aws_iam_instance_profile
+    loadable_exempt_reason: "ListInstanceProfilesForRole loads one (TestLoadIAM_TagCallsFindAPathedRoleAndProfile), but no working example declares one to round-trip."
     working_exempt: true
     working_exempt_reason: "Instance-profile lifecycle is asserted inline in TestCoverage_IAMInstanceProfileAndUser; standalone working/iam_instance_profile/ would duplicate."
     misconfigured_exempt: true
@@ -280,6 +311,7 @@ entries:
     integration_test_func_name: "^TestCoverage_IAMInstanceProfileAndUser$"
   - aws_service: iam
     aws_resource_type: aws_iam_user
+    loadable_exempt_reason: "Outside the reader table: it reads no IAM user, and fakeaws has no user loader."
     working_exempt: true
     working_exempt_reason: "User CRUD is exercised in TestCoverage_IAMInstanceProfileAndUser; aws-iam.yaml scenarios focus on the role+policy chain at v1."
     misconfigured_exempt: true
@@ -289,6 +321,7 @@ entries:
     integration_test_func_name: "^TestCoverage_IAMInstanceProfileAndUser$"
   - aws_service: iam
     aws_resource_type: aws_iam_access_key
+    loadable_exempt_reason: "Outside the reader table: it reads no access key, and fakeaws has no access-key loader."
     working_exempt: true
     working_exempt_reason: "Access-key Create/Delete is exercised in TestCoverage_IAMInstanceProfileAndUser inline; standalone working/iam_access_key/ would duplicate."
     misconfigured_exempt: true
@@ -301,6 +334,7 @@ entries:
   # see IAM-side comment above.
   - aws_service: ec2
     aws_resource_type: aws_eip
+    loadable: true
     working_dir_name: eip_instance
     misconfigured_exempt: true
     misconfigured_exempt_reason: "Domain=standard rejection asserted in TestEC2_EIPLifecycle; standalone misconfigured tofu example would duplicate."
@@ -313,6 +347,7 @@ entries:
   # omitted: read surfaces, not generator resources.
   - aws_service: ec2
     aws_resource_type: aws_ami
+    loadable: true
     working_dir_name: ec2_data_sources
     misconfigured_dir_name: instance_unknown_ami
     updates_exempt: true
@@ -320,6 +355,7 @@ entries:
     integration_test_func_name: "^(TestEC2_DescribeImagesFixtures|TestRegressionSweepDescribeImagesOwnerSelf|TestEC2_DescribeImagesFilters|TestRegressionDescribeImagesNameFilter)$"
   - aws_service: ec2
     aws_resource_type: aws_network_interface
+    loadable_exempt_reason: "DescribeNetworkInterfaces loads one, an instance's primary interface in every instance round trip, but no working example declares one."
     working_exempt: true
     working_exempt_reason: "Only an instance's primary ENI, applied by working/basic_instance, or a loaded one (TestLoadEC2Compute_*) exists; an unfiltered DescribeNetworkInterfaces omits a terminated instance's ENI (TestRegressionSweepTerminatedInstanceENIGone)."
     misconfigured_exempt: true
@@ -329,6 +365,7 @@ entries:
     integration_test_func_name: "^(TestEC2_TerminateInstancesDeletesENI|TestRegressionSweepTerminatedInstanceENIGone)$"
   - aws_service: ec2
     aws_resource_type: aws_ebs_volume
+    loadable_exempt_reason: "DescribeVolumes loads one (TestLoadEC2Volumes_AnswerAsRecorded), but fakeaws has no CreateVolume and RunInstances makes no root volume, so no example applies one."
     working_exempt: true
     working_exempt_reason: "Read and terminate only: fakeaws has no CreateVolume and RunInstances makes no root volume, so only a load stores one (TestLoadEC2Volumes_AnswerAsRecorded); DescribeVolumes answers the loaded rows, and TerminateInstances deletes or detaches them."
     misconfigured_exempt: true
@@ -338,6 +375,7 @@ entries:
     integration_test_func_name: "^(TestLoadEC2Volumes_AnswerAsRecorded|TestLoadEC2Volumes_Filters|TestRegressionSweepDescribesNeverCreated)$"
   - aws_service: ec2
     aws_resource_type: aws_nat_gateway
+    loadable_exempt_reason: "Outside the reader table: it never reads DescribeNatGateways, and fakeaws has no NAT gateway loader."
     working_exempt: true
     working_exempt_reason: "Describe-only: fakeaws creates no NAT gateways, so DescribeNatGateways answers an empty set (TestRegressionSweepDescribesNeverCreated)."
     misconfigured_exempt: true
@@ -347,6 +385,7 @@ entries:
     integration_test_func_name: "^TestRegressionSweepDescribesNeverCreated$"
   - aws_service: ec2
     aws_resource_type: aws_ebs_snapshot
+    loadable_exempt_reason: "Outside the reader table: it never reads DescribeSnapshots, and fakeaws has no snapshot loader."
     working_exempt: true
     working_exempt_reason: "Describe-only: fakeaws creates no snapshots, so DescribeSnapshots (Owner.1=self) answers an empty set (TestRegressionSweepDescribesNeverCreated)."
     misconfigured_exempt: true
@@ -356,6 +395,7 @@ entries:
     integration_test_func_name: "^TestRegressionSweepDescribesNeverCreated$"
   - aws_service: ec2
     aws_resource_type: aws_launch_template
+    loadable_exempt_reason: "Outside the reader table: it never reads DescribeLaunchTemplates, and fakeaws has no launch template loader."
     working_exempt: true
     working_exempt_reason: "Describe-only: fakeaws creates no launch templates, so DescribeLaunchTemplates answers an empty set (TestRegressionSweepDescribesNeverCreated)."
     misconfigured_exempt: true
@@ -365,6 +405,7 @@ entries:
     integration_test_func_name: "^TestRegressionSweepDescribesNeverCreated$"
   - aws_service: ec2
     aws_resource_type: aws_key_pair
+    loadable_exempt_reason: "DescribeKeyPairs loads one (TestLoadEC2Compute_KeyPairAsRecorded), but no working example declares one to round-trip."
     working_exempt: true
     working_exempt_reason: "KeyPair Import/Describe/Delete is exercised in TestEC2_KeyPairImportDescribeDelete; aws-instance.yaml scenarios don't pin a key pair at v1."
     misconfigured_exempt: true
@@ -378,6 +419,7 @@ entries:
   # from the provider to the request log in examples/filter_refused_test.go.
   - aws_service: ec2
     aws_resource_type: data.aws_vpc
+    loadable: true
     working_dir_name: ec2_data_sources
     misconfigured_exempt: true
     misconfigured_exempt_reason: "DescribeVpcs answers an unknown VpcId.N (data.aws_vpc id) 400 InvalidVpcID.NotFound, pinned in TestEC2_DescribeVpcsAndIGWsByID; fakeaws's own refusal of a filter it does not model is proved end to end in examples/filter_refused_test.go."
@@ -386,6 +428,7 @@ entries:
     integration_test_func_name: "^(TestEC2_DescribeVpcsFilters|TestRegressionNetworkDescribesHonourTagFilters)$"
   - aws_service: ec2
     aws_resource_type: data.aws_security_group
+    loadable: true
     working_dir_name: ec2_data_sources
     misconfigured_exempt: true
     misconfigured_exempt_reason: "data.aws_security_group sends GroupId.N (id) and Filter.N group-name (name), vpc-id (vpc_id), tag:<key> (tags) and its filter blocks; an unknown GroupId.N answers 400 InvalidGroup.NotFound, which no test pins yet; fakeaws's own refusal of a filter it does not model is proved end to end in examples/filter_refused_test.go."
@@ -394,6 +437,7 @@ entries:
     integration_test_func_name: "^(TestEC2_DescribeSecurityGroupsFilters|TestContract_ec2_sg_group_name_default_vpc_only)$"
   - aws_service: ec2
     aws_resource_type: data.aws_availability_zones
+    loadable: true
     working_dir_name: ec2_data_sources
     misconfigured_exempt: true
     misconfigured_exempt_reason: "data.aws_availability_zones sends only Filter.N and AllAvailabilityZones, and AWS refuses neither for a valid state; fakeaws's own refusal of a filter it does not model is proved end to end in examples/filter_refused_test.go."
@@ -405,6 +449,7 @@ entries:
   # scenario_resource_type omitted: see IAM-side comment.
   - aws_service: rds
     aws_resource_type: aws_rds_cluster
+    loadable_exempt_reason: "Outside the reader table: it reads no RDS, and fakeaws has no RDS loader."
     working_exempt: true
     working_exempt_reason: "Aurora cluster lifecycle is asserted in TestCoverage_RDSCluster (CreateDBCluster + DescribeDBClusters + DeleteDBCluster). aws-rds.yaml currently uses a single instance — Aurora-specific scenario reconsidered if/when scenarios require it."
     misconfigured_exempt: true
@@ -413,6 +458,7 @@ entries:
     integration_test_func_name: "^TestCoverage_RDSCluster$"
   - aws_service: rds
     aws_resource_type: aws_rds_cluster_parameter_group
+    loadable_exempt_reason: "Outside the reader table: it reads no RDS, and fakeaws has no RDS loader."
     working_exempt: true
     working_exempt_reason: "Cluster parameter group create/describe/delete is exercised in TestCoverage_RDSParameterGroupDescribe alongside the instance parameter group."
     misconfigured_exempt: true
@@ -423,6 +469,7 @@ entries:
   # DynamoDB (S45-T5 handlers, S45-T10 e2e + this matrix entry).
   - aws_service: dynamodb
     aws_resource_type: aws_dynamodb_table
+    loadable_exempt_reason: "Outside the reader table: it reads no DynamoDB, and fakeaws has no DynamoDB loader."
     scenario_resource_type: dynamodb
     working_dir_name: dynamodb_table
     misconfigured_exempt: true
@@ -433,6 +480,7 @@ entries:
   # EKS (S46-T3 handlers, S46-T10 e2e + these matrix entries).
   - aws_service: eks
     aws_resource_type: aws_eks_cluster
+    loadable_exempt_reason: "Outside the reader table: EKS is rest, and fakeaws has no EKS loader."
     scenario_resource_type: kubernetes
     working_dir_name: eks_cluster
     misconfigured_dir_name: eks_node_group_subnet_outside_cluster
@@ -440,6 +488,7 @@ entries:
     integration_test_func_name: "^TestEKS_ClusterLifecycle$"
   - aws_service: eks
     aws_resource_type: aws_eks_node_group
+    loadable_exempt_reason: "Outside the reader table: EKS is rest, and fakeaws has no EKS loader."
     scenario_resource_type: kubernetes
     working_dir_name: eks_cluster
     misconfigured_dir_name: eks_node_group_subnet_outside_cluster
@@ -447,6 +496,7 @@ entries:
     integration_test_func_name: "^TestEKS_NodeGroupSubnetMustBeInCluster$"
   - aws_service: eks
     aws_resource_type: aws_eks_addon
+    loadable_exempt_reason: "Outside the reader table: EKS is rest, and fakeaws has no EKS loader."
     scenario_resource_type: kubernetes
     working_dir_name: eks_cluster
     misconfigured_exempt: true
@@ -457,6 +507,7 @@ entries:
   # SQS (S46-T5 handlers, S46-T10 e2e + this matrix entry).
   - aws_service: sqs
     aws_resource_type: aws_sqs_queue
+    loadable_exempt_reason: "Outside the reader table: it reads no SQS, and fakeaws has no SQS loader."
     scenario_resource_type: messaging
     working_dir_name: sqs_queue
     misconfigured_exempt: true
@@ -467,6 +518,7 @@ entries:
   # Route53 (S47-T3 handlers, S47-T10 e2e + these matrix entries).
   - aws_service: route53
     aws_resource_type: aws_route53_zone
+    loadable_exempt_reason: "Outside the reader table: Route 53 is rest, and fakeaws has no Route 53 loader."
     scenario_resource_type: dns
     working_dir_name: route53
     misconfigured_exempt: true
@@ -475,6 +527,7 @@ entries:
     integration_test_func_name: "^TestRoute53_HostedZoneLifecycle$"
   - aws_service: route53
     aws_resource_type: aws_route53_record
+    loadable_exempt_reason: "Outside the reader table: Route 53 is rest, and fakeaws has no Route 53 loader."
     scenario_resource_type: dns
     working_dir_name: route53
     misconfigured_dir_name: route53_apex_cname
@@ -485,6 +538,7 @@ entries:
   # Secrets Manager (S47-T5 handlers, S47-T10 e2e + these matrix entries).
   - aws_service: secretsmanager
     aws_resource_type: aws_secretsmanager_secret
+    loadable_exempt_reason: "Outside the reader table: it reads no Secrets Manager, and fakeaws has no Secrets Manager loader."
     scenario_resource_type: secret_manager
     working_dir_name: secrets_manager
     misconfigured_exempt: true
@@ -493,6 +547,7 @@ entries:
     integration_test_func_name: "^TestSecretsManager_CreateGetSecret$"
   - aws_service: secretsmanager
     aws_resource_type: aws_secretsmanager_secret_version
+    loadable_exempt_reason: "Outside the reader table: it reads no Secrets Manager, and fakeaws has no Secrets Manager loader."
     scenario_resource_type: secret_manager
     working_dir_name: secrets_manager
     misconfigured_exempt: true
@@ -504,6 +559,7 @@ entries:
   # scenario_resource_type omitted: a data source, not a generator resource.
   - aws_service: sts
     aws_resource_type: aws_caller_identity
+    loadable_exempt_reason: "No row to load: a load stores the envelope's account as the identity GetCallerIdentity answers (TestContract_identity_stored_in_database), and a fresh fakeaws answers 000000000000 with no load, the account the round trip records, so its round trip could not fail."
     working_dir_name: env_endpoints
     misconfigured_exempt: true
     misconfigured_exempt_reason: "GetCallerIdentity takes no input to misconfigure; a wrong account fails working/env_endpoints via allowed_account_ids (Arn) and its precondition (Account)."
@@ -514,6 +570,7 @@ entries:
   # SSM Parameter Store. scenario_resource_type omitted: no generator key yet.
   - aws_service: ssm
     aws_resource_type: aws_ssm_parameter
+    loadable_exempt_reason: "A non-public parameter is refused at load (TestLoadSSM_NonPublicParameterIsRefused): aws_ssm_parameter's read also calls DescribeParameters and lists tags, which the reader never records."
     working_dir_name: ssm_parameter
     misconfigured_dir_name: ssm_parameter_duplicate
     updates_exempt: true

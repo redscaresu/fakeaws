@@ -204,6 +204,10 @@ The harness runs every `tofu` call in `smokeEnv` (`examples/smoke_env_test.go`):
 
 The harness assumes a fakeaws server is reachable at `FAKEAWS_URL` (default `http://127.0.0.1:8082`); the [infrafactory](https://github.com/redscaresu/infrafactory) cross-repo runner starts one via `make fakeaws-up` before running the gated AWS e2e tests.
 
+## Load round trip
+
+`examples/load_round_trip_test.go` (`TestLoadRoundTrip`, one slot in the `SMOKE_SHARD` deal) proves `POST /mock/load`, not real AWS shape. It takes each `working/` example whose every type is a `loadable: true` row of `coverage_matrix.yaml`, and for each starts its own two fakeaws processes on free loopback ports: it applies the example on A, refreshes state from A (`apply -refresh-only`, since the provider's read of an applied object differs from what apply stored), records A's rows as an ADR-0041 recorded read, loads that into B, runs `tofu plan -detailed-exitcode` and `tofu plan -refresh-only -detailed-exitcode` with A's state against B (both must exit 0: a plain plan exits 0 on drift it plans no action for), then destroys on A. It logs the examples it round-trips. A row is `loadable: true` or carries a `loadable_exempt_reason`, and `TestFullCoverageAudit` fails a loadable row that no round-tripped example declares.
+
 **No allowlist** — mockway and fakegcp use an `examples/known_broken.yaml` ratchet for examples whose idempotency gate is currently expected to fail. fakeaws's S43–S48 codex review loop closed at pass 17 with zero allowlist entries, so the smoke harness enforces the working-tree contract strictly. Any new example that drifts must be fixed before merge, not allowlisted.
 
 ---
@@ -214,5 +218,6 @@ The harness assumes a fakeaws server is reachable at `FAKEAWS_URL` (default `htt
 2. Start fakeaws (`make build && ./fakeaws --port 8082`).
 3. Run `INFRAFACTORY_ENABLE_E2E=1 go test ./examples/...` — auto-discovery picks it up.
 4. If it drifts: fix the handler — the drift is the signal.
-5. Mirror with `examples/misconfigured/<svc>/` (FK / validation paths) and `examples/updates/<svc>/` (update paths) as the service warrants.
-6. Add a `TestE2E_AWS<Svc>` in [infrafactory](https://github.com/redscaresu/infrafactory)'s `internal/e2e/aws_services_test.go` so the cross-repo gate covers the scenario flow too.
+5. Give the type's `coverage_matrix.yaml` row `loadable: true` if a load gives a fresh fakeaws its rows, else a `loadable_exempt_reason`.
+6. Mirror with `examples/misconfigured/<svc>/` (FK / validation paths) and `examples/updates/<svc>/` (update paths) as the service warrants.
+7. Add a `TestE2E_AWS<Svc>` in [infrafactory](https://github.com/redscaresu/infrafactory)'s `internal/e2e/aws_services_test.go` so the cross-repo gate covers the scenario flow too.
