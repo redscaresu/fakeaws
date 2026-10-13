@@ -3846,7 +3846,7 @@ func (x ec2ImageXML) recorded() repository.EC2AMIRecorded {
 // fixtures' literal ec2AmazonOwner and a loaded image's recorded
 // imageOwnerAlias, whose owner is numeric. ExecutableBy.N is refused,
 // by name, as is an imageRecordedFilters name that meets an image with
-// no recorded field. A loaded image past its recorded deprecationTime
+// no recorded field, in the one refusal (imageFilters.refuse). A loaded image past its recorded deprecationTime
 // is left out of a listing (no ImageId.N) unless IncludeDeprecated=true
 // (which data.aws_ami sends as include_deprecated) or the caller owns
 // it: EC2 User Guide, "Deprecate an AMI" (ami-deprecate.html), "the
@@ -3855,59 +3855,73 @@ func (x ec2ImageXML) recorded() repository.EC2AMIRecorded {
 // "AMI owners continue to see deprecated AMIs".
 // IncludeDisabled is read but changes nothing: no image is disabled.
 func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	filters, ok := imageFilters.read(w, req, "ImageId.N", "Owner.N", "IncludeDisabled", "IncludeDeprecated")
-	if !ok {
-		return
-	}
+	filters, params := imageFilters.parse(req, "ImageId.N", "Owner.N", "IncludeDisabled", "IncludeDeprecated")
 	// Lazy-seed canonical AMI fixtures for this region (Codex pass 9
 	// BLOCKING #1) so callers in any valid AWS region see the same
 	// fixture set as the boot-time slice.
 	app.ensureAMIFixturesForRegion(account, region)
 	wanted := queryIDs(req.Params, "ImageId.")
-	var amis []*repository.EC2AMI
-	if len(wanted) == 0 {
-		var err error
-		if amis, err = app.repo.ListAMIs(account, region); err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-			return
-		}
-	} else {
-		for _, id := range wanted {
-			a, err := app.repo.GetAMI(account, region, id)
-			if err != nil {
-				awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-				return
-			}
-			amis = append(amis, a)
-		}
+	owners := queryListValues(req.Params, "Owner.")
+	amis, err := app.describedAMIs(account, region, wanted)
+	if imageFilters.refuse(w, req.Action, filters, params, imageRecordedRefused(amis, filters, owners, account)...) {
+		return
+	}
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
 	}
 	tags, ok := app.tagSets(w, account)
 	if !ok {
 		return
 	}
-	owners := queryListValues(req.Params, "Owner.")
-	var recordedOnly []string
-	for _, f := range filters {
-		if imageRecordedFilters[f.name] != nil {
-			recordedOnly = append(recordedOnly, f.name)
-		}
-	}
 	includeDeprecated, now := len(wanted) > 0 || req.Params.Get("IncludeDeprecated") == "true", time.Now()
 	out := ec2DescribeImagesResult{ImagesSet: []ec2ImageXML{}}
 	for _, a := range amis {
 		x := ec2AMIToXML(a)
-		if !imageOwnedBy(x, owners, account) {
-			continue
-		}
-		if a.EC2AMIRecorded == nil && len(recordedOnly) > 0 {
-			ec2Refuse(w, req.Action, recordedOnly...)
-			return
-		}
-		if (includeDeprecated || a.OwnerID == account || !imageDeprecated(x.recorded(), now)) && imageFilters.matches(x, filters, tags) {
+		if imageOwnedBy(x, owners, account) && (includeDeprecated || a.OwnerID == account || !imageDeprecated(x.recorded(), now)) &&
+			imageFilters.matches(x, filters, tags) {
 			out.ImagesSet = append(out.ImagesSet, x)
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeImages", &out)
+}
+
+// describedAMIs reads the region's images, or those of wanted that are
+// stored with the first failed read's error, so a refusal can be
+// worked out from them before that error is answered.
+func (app *Application) describedAMIs(account, region string, wanted []string) ([]*repository.EC2AMI, error) {
+	if len(wanted) == 0 {
+		return app.repo.ListAMIs(account, region)
+	}
+	var amis []*repository.EC2AMI
+	var first error
+	for _, id := range wanted {
+		a, err := app.repo.GetAMI(account, region, id)
+		if err != nil {
+			first = cmp.Or(first, err)
+			continue
+		}
+		amis = append(amis, a)
+	}
+	return amis, first
+}
+
+// imageRecordedRefused names the imageRecordedFilters among filters
+// when an image owners keep has no recorded field (a fixture, a
+// /mock/images image): it cannot answer them.
+func imageRecordedRefused(amis []*repository.EC2AMI, filters []ec2Filter, owners []string, account string) []string {
+	if !slices.ContainsFunc(amis, func(a *repository.EC2AMI) bool {
+		return a.EC2AMIRecorded == nil && imageOwnedBy(ec2AMIToXML(a), owners, account)
+	}) {
+		return nil
+	}
+	var names []string
+	for _, f := range filters {
+		if imageRecordedFilters[f.name] != nil {
+			names = append(names, f.name)
+		}
+	}
+	return names
 }
 
 // imageOwnedBy reports whether Owner.N's owners keep x: none, x's

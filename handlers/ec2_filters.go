@@ -208,14 +208,22 @@ func (t ec2FilterTable[R]) valuesFor(name string) func(R, map[string][]ec2Resour
 // MaxResults and NextToken: fakeaws answers every Describe in one page.
 // It reports false when it refused.
 func (t ec2FilterTable[R]) read(w http.ResponseWriter, req awsproto.QueryRPCRequest, reads ...string) ([]ec2Filter, bool) {
+	filters, params := t.parse(req, reads...)
+	return filters, !t.refuse(w, req.Action, filters, params)
+}
+
+// parse is read without its refusal: req's Filter.N, and each other
+// param unread finds against reads but MaxResults and NextToken, as raw
+// keys. A caller that refuses more than t's table (DescribeImages'
+// imageRecordedFilters) passes those names to refuse with these.
+func (t ec2FilterTable[R]) parse(req awsproto.QueryRPCRequest, reads ...string) ([]ec2Filter, []string) {
 	var params []string
 	for _, k := range unread(req.Params, slices.Concat(reads, []string{"MaxResults", "NextToken"})) {
 		if !strings.HasPrefix(k, "Filter.") {
 			params = append(params, k)
 		}
 	}
-	filters := parseEC2Filters(req.Params)
-	return filters, !t.refuse(w, req.Action, filters, params)
+	return parseEC2Filters(req.Params), params
 }
 
 // unread returns each key of params whose name (ec2ParamName) is not
@@ -248,15 +256,16 @@ func ec2RefuseUnread(w http.ResponseWriter, req awsproto.QueryRPCRequest, reads 
 }
 
 // refuse answers action through ec2Refuse naming all that t cannot
-// honour in filters and each param the caller did not read (unread
-// holds raw param keys), and reports whether it wrote.
+// honour in filters, each param the caller did not read (unread holds
+// raw param keys) and each of more, names the caller refuses besides,
+// and reports whether it wrote.
 //
 // MUST[ec2-filter-refusal-names-every-name-sorted]: one answer names
 // every filter and param refused, each once, sorted bytewise, after
 // "<action>: not modelled by fakeaws: ", so the same request always
 // reads the same refusal.
-func (t ec2FilterTable[R]) refuse(w http.ResponseWriter, action string, filters []ec2Filter, unread []string) bool {
-	names := t.unmodelled(filters)
+func (t ec2FilterTable[R]) refuse(w http.ResponseWriter, action string, filters []ec2Filter, unread []string, more ...string) bool {
+	names := append(t.unmodelled(filters), more...)
 	for _, k := range unread {
 		names = append(names, ec2ParamName(k))
 	}
