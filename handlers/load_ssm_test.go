@@ -103,7 +103,7 @@ func TestLoadSSM_PublicParameterLoadsByteExact(t *testing.T) {
 	assert.NotContains(t, got.Parameter.ARN, loadAccount, "the ARN holds the loaded account")
 }
 
-func TestContract_mock_load_not_found_loads_nothing(t *testing.T) {
+func TestLoadSSM_NotFoundLoadsNothing(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	status, answer := loadSSM(t, srv, ssmGetParameterExchange(http.StatusBadRequest, `{"__type":"ParameterNotFound","message":"x"}`))
 	require.Equal(t, http.StatusOK, status, answer)

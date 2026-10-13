@@ -3570,9 +3570,9 @@ func refuseInvalidValues(w http.ResponseWriter, p url.Values, values map[string]
 }
 
 // CRITICAL[ec2-volume-removed-on-terminate]: terminating an instance
-// deletes the volumes attached to it with deleteOnTermination true, in
-// the same transaction, and detaches the others; a Multi-Attach volume
-// goes with its last instance.
+// deletes a volume attached to it when that attachment is the volume's
+// only one and has deleteOnTermination true (repository
+// terminateVolumeTx), in the terminate's transaction.
 //
 // ec2TerminateInstances terminates every id in one transaction, where
 // each one's previous state is read: as in AWS, an instance that

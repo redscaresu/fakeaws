@@ -195,13 +195,18 @@ var errLoadTransaction = errors.New("the load's transaction failed and wrote not
 
 // CRITICAL[mock-load-off-by-default]: without Options.LoadMaxBytes the
 // route is not registered, so POST /mock/load answers as any unknown
-// /mock path, and NewApplication refuses LoadMaxBytes without an admin
-// token: a load deletes every row.
+// /mock path.
 //
-// CRITICAL[mock-load-replaces-every-row-atomically]: a load deletes
-// every row, stores the identity and writes the recorded rows in one
-// transaction, so a second load replaces the first whole and a refusal
-// or failure leaves the database as it was.
+// CRITICAL[mock-load-needs-admin-token]: NewApplication refuses
+// Options.LoadMaxBytes without an AdminToken (ErrLoadNeedsAdminToken):
+// a load deletes every row.
+//
+// CRITICAL[mock-load-replaces-every-row-atomically]: a second load
+// replaces the first whole: its rows, its identity and its tables'
+// other rows.
+//
+// CRITICAL[mock-load-refusal-changes-nothing]: a load that is refused
+// or fails changes nothing: rows, identity and snapshot as they were.
 //
 // CRITICAL[mock-load-keeps-snapshot]: a load never touches the
 // snapshot, so /mock/restore after a load returns to the snapshot.
@@ -210,16 +215,16 @@ var errLoadTransaction = errors.New("the load's transaction failed and wrote not
 // that the model cannot hold refuses the load, naming the row and the
 // field's path, whatever the handler's own decoder would drop.
 //
-// CRITICAL[mock-load-never-mints]: a row loads with the id, ARN, owner,
-// default group and name the body held; a load never generates one the
-// body lacks.
+// CRITICAL[mock-load-never-mints]: a VPC's recorded default security
+// group loads under its recorded id, and a VPC whose recording holds
+// none gets none, after the load and after a snapshot and restore.
 //
-// CRITICAL[mock-load-refuses-dangling-reference]: a row referencing a
-// row no exchange loaded is refused, unless the reader never reads that
-// type (loadReference.Unread), which loads as unresolved.
+// CRITICAL[mock-load-refuses-dangling-reference]: a row that names or
+// references a row no exchange loaded is refused, naming both.
 //
 // CRITICAL[mock-load-not-found-loads-nothing]: a non-2xx answering its
-// loader's NotFound code loads no row and counts under absent.
+// loader's NotFound code (an XML Code, or a JSON __type with or without
+// its namespace and suffix) loads no row and counts under absent.
 //
 // handleMockLoad replaces every row with a recorded read of at most
 // loadMaxBytes (413 over it): 200 with a loadAnswer; 400 listing every
