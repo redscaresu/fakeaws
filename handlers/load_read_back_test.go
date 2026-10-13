@@ -1,10 +1,11 @@
 package handlers_test
 
 // load_read_back_test.go — TestLoadReadBack loads each recorded read
-// into an in-process fakeaws and re-sends every exchange's request,
-// diffing each answer against its recorded body. Its report names the
-// read, the exchange, its action and a path, never a body or a value:
-// the read may be a real account's raw read (FAKEAWS_LOAD_READ).
+// into an in-process fakeaws and re-sends the first request of each page
+// chain the load links, diffing each answer against the chain's pages.
+// Its report names the read, the exchange, an action fakeaws has a
+// loader for and a path, and its log only counts; never a body or a
+// value: the read may be a real account's raw read (FAKEAWS_LOAD_READ).
 
 import (
 	"context"
@@ -99,8 +100,8 @@ func readBack(t *testing.T, name string, read []byte) []string {
 		return r.refused(status, []byte(body))
 	}
 	r.logCounts([]byte(body))
-	var report []string
-	for _, entry := range r.entries() {
+	entries, report := r.entries()
+	for _, entry := range entries {
 		report = append(report, r.compare(entry)...)
 	}
 	return report
@@ -122,9 +123,6 @@ func (r *readBacker) logCounts(answer []byte) {
 }
 
 var (
-	// readBackShown is a service or action a line shows: any other is
-	// shown as {name}.
-	readBackShown = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 	// readBackPath is a path load_diff.go's Diff names (diffLabel).
 	readBackPath = regexp.MustCompile(`^[A-Za-z0-9@{}\[\]./]+$`)
 	// readBackRefusal is a load refusal of one exchange.
@@ -143,16 +141,17 @@ func refusedPathRE(format string) *regexp.Regexp {
 	return regexp.MustCompile(": " + regexp.QuoteMeta(before) + `(\S+)` + regexp.QuoteMeta(after) + "$")
 }
 
-// line is a report line about exchange i.
+// line is a report line about exchange i. It names the exchange's
+// service and action only when the load has a loader for them, as
+// {name} {name} otherwise: the read's text is shown only when fakeaws
+// already holds it.
 func (r *readBacker) line(i int, format string, args ...any) string {
-	shown := func(s string) string {
-		if readBackShown.MatchString(s) {
-			return s
-		}
-		return "{name}"
-	}
 	ex := r.exchanges[i]
-	return fmt.Sprintf("%s: exchange %d: %s %s: ", r.name, i, shown(ex.Service), shown(ex.Action)) + fmt.Sprintf(format, args...)
+	key := "{name} {name}"
+	if handlers.LoadKnows(handlers.LoadKey{Service: ex.Service, Action: ex.Action}) {
+		key = ex.Service + " " + ex.Action
+	}
+	return fmt.Sprintf("%s: exchange %d: %s: ", r.name, i, key) + fmt.Sprintf(format, args...)
 }
 
 // refused reports a load that answered status and body, not 200: each
@@ -188,11 +187,11 @@ func (r *readBacker) refusal(refusal string) string {
 	return r.line(i, "the load refused it "+withheld)
 }
 
-// entries are the read's exchanges by the request that made them: each
-// page chain the load linked (handlers.LoadChains), and each other
-// exchange alone, a NotFound or a 2xx page no chain holds, in recorded
-// order.
-func (r *readBacker) entries() [][]int {
+// entries are the read's exchanges by the request that made them, in
+// recorded order: each page chain the load linked (handlers.LoadChains)
+// and each NotFound alone. The load links every 2xx page, so one no
+// chain holds is reported, never re-sent or skipped.
+func (r *readBacker) entries() (out [][]int, report []string) {
 	chains, err := handlers.LoadChains(r.read)
 	require.NoError(r.t, err)
 	byFirst, chained := map[int][]int{}, map[int]bool{}
@@ -202,16 +201,17 @@ func (r *readBacker) entries() [][]int {
 			chained[i] = true
 		}
 	}
-	var out [][]int
-	for i := range r.exchanges {
+	for i, ex := range r.exchanges {
 		switch c, first := byFirst[i]; {
 		case first:
 			out = append(out, c)
-		case !chained[i]:
+		case !readBackOK(ex.Status):
 			out = append(out, []int{i})
+		case !chained[i]:
+			report = append(report, r.line(i, "no page chain the load linked holds it"))
 		}
 	}
-	return out
+	return out, report
 }
 
 func readBackOK(status int) bool {
@@ -307,19 +307,20 @@ func loadReadFixture(t *testing.T, name string) []byte {
 	return read
 }
 
-// readBackMarker is the value TestLoadReadBack_ReportsNoValue plants.
+// readBackMarker is the value the ReportsNoValue and LogsNoValue tests
+// plant.
 const readBackMarker = "SECRET-MARKER-123"
 
 // plantMarker is read with value replaced by readBackMarker in within,
-// which exchange i's body holds once.
-func plantMarker(t *testing.T, read []byte, i int, within, value string) []byte {
+// which exchange i's field (body, action) holds once.
+func plantMarker(t *testing.T, read []byte, i int, field, within, value string) []byte {
 	t.Helper()
 	var env map[string]any
 	require.NoError(t, json.Unmarshal(read, &env))
 	ex := env["exchanges"].([]any)[i].(map[string]any)
-	body := ex["body"].(string)
-	require.Equal(t, 1, strings.Count(body, within), "exchange %d holds %q once", i, within)
-	ex["body"] = strings.Replace(body, within, strings.Replace(within, value, readBackMarker, 1), 1)
+	text := ex[field].(string)
+	require.Equal(t, 1, strings.Count(text, within), "exchange %d's %s holds %q once", i, field, within)
+	ex[field] = strings.Replace(text, within, strings.Replace(within, value, readBackMarker, 1), 1)
 	out, err := json.Marshal(env)
 	require.NoError(t, err)
 	return out
@@ -327,28 +328,32 @@ func plantMarker(t *testing.T, read []byte, i int, within, value string) []byte 
 
 // TestLoadReadBack_ReportsNoValue: a value planted in a copy of the
 // step-0 read fails it, whether the load refuses it by its reference
-// (the refusal quoting it) or by the path where its rendering differs,
-// or the read back differs, and the report names the exchange, its
-// action and a path where it has one, never the value.
+// (the refusal quoting it), by the path where its rendering differs or
+// as an action it has no loader for, or the read back differs. The
+// report names the exchange, its action when fakeaws has a loader for
+// it, and a path where it has one, never the value.
 func TestLoadReadBack_ReportsNoValue(t *testing.T) {
 	read := loadReadFixture(t, "step0-synthetic.json")
 	for _, tc := range []struct {
 		name     string
 		exchange int
+		field    string
 		within   string
 		value    string
 		want     []string
 	}{
-		{"the instance's key pair, which the load refuses naming it", 12, "<keyName>my-key-pair</keyName>", "my-key-pair",
+		{"an action the load has no loader for", 0, "action", "DescribeVpcs", "DescribeVpcs",
+			[]string{"planted: exchange 0: {name} {name}: the load refused it (its text withheld: it can quote the read)"}},
+		{"the instance's key pair, which the load refuses naming it", 12, "body", "<keyName>my-key-pair</keyName>", "my-key-pair",
 			[]string{"planted: exchange 12: ec2 DescribeInstances: the load refused it (its text withheld: it can quote the read)"}},
-		{"the subnet's zone id, which renders from the zone's row", 5, "<availabilityZoneId>usw2-az3</availabilityZoneId>", "usw2-az3",
+		{"the subnet's zone id, which renders from the zone's row", 5, "body", "<availabilityZoneId>usw2-az3</availabilityZoneId>", "usw2-az3",
 			[]string{"planted: exchange 5: ec2 DescribeSubnets: the load refused it: recorded only subnetSet/item[0]/availabilityZoneId",
 				"planted: exchange 5: ec2 DescribeSubnets: the load refused it: rendered only subnetSet/item[0]/availabilityZoneId"}},
-		{"the tag key the VPC is read by", 0, "<key>infrafactory-run-id</key>", "infrafactory-run-id",
+		{"the tag key the VPC is read by", 0, "body", "<key>infrafactory-run-id</key>", "infrafactory-run-id",
 			[]string{"planted: exchange 0: ec2 DescribeVpcs: recorded only vpcSet/item[0]"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			report := readBack(t, "planted", plantMarker(t, read, tc.exchange, tc.within, tc.value))
+			report := readBack(t, "planted", plantMarker(t, read, tc.exchange, tc.field, tc.within, tc.value))
 			assert.Equal(t, tc.want, report)
 			assert.NotContains(t, strings.Join(report, "\n"), readBackMarker)
 		})
@@ -400,6 +405,23 @@ func TestLoadReadBack_PagesAndNotFound(t *testing.T) {
 	}
 }
 
+// runLoadReadBack runs TestLoadReadBack verbose in a child process with
+// FAKEAWS_LOAD_READ set to path, under a deadline that kills its process
+// group, and returns its output and how it exited.
+func runLoadReadBack(t *testing.T, path string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLoadReadBack$", "-test.v", "-test.count=1")
+	cmd.Env = append(os.Environ(), loadReadEnv+"="+path)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 10 * time.Second
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, ctx.Err(), "%s", out)
+	return string(out), err
+}
+
 // TestLoadReadBack_UnreadableReadFails runs TestLoadReadBack with
 // FAKEAWS_LOAD_READ naming a missing file, a directory and nothing:
 // each fails, and none skips.
@@ -410,20 +432,26 @@ func TestLoadReadBack_UnreadableReadFails(t *testing.T) {
 		"empty":       "",
 	} {
 		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLoadReadBack$", "-test.v", "-test.count=1")
-			cmd.Env = append(os.Environ(), loadReadEnv+"="+path)
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-			cmd.WaitDelay = 10 * time.Second
-			out, err := cmd.CombinedOutput()
-
-			require.NoError(t, ctx.Err(), "%s", out)
+			out, err := runLoadReadBack(t, path)
 			var exit *exec.ExitError
 			require.ErrorAs(t, err, &exit, "%s", out)
-			assert.Contains(t, string(out), "--- FAIL: TestLoadReadBack")
-			assert.NotContains(t, string(out), "--- SKIP")
+			assert.Contains(t, out, "--- FAIL: TestLoadReadBack")
+			assert.NotContains(t, out, "--- SKIP")
 		})
 	}
+}
+
+// TestLoadReadBack_LogsNoValue runs TestLoadReadBack verbose on a copy of
+// the step-0 read whose instance profile, which the load lists as
+// unresolved, has a planted name: it passes and logs the unresolved
+// profile, as a count, and its output never holds the name.
+func TestLoadReadBack_LogsNoValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "planted.json")
+	planted := plantMarker(t, loadReadFixture(t, "step0-synthetic.json"), 12, "body", "component_xyz/Webserver</arn>", "Webserver")
+	require.NoError(t, os.WriteFile(path, planted, 0o600))
+	out, err := runLoadReadBack(t, path)
+	require.NoError(t, err, "%s", out)
+	assert.Contains(t, out, "--- PASS: TestLoadReadBack/planted.json")
+	assert.Contains(t, out, "instance-profile:1")
+	assert.NotContains(t, out, readBackMarker)
 }

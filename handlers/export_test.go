@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,9 +26,9 @@ func EC2DeriveAutoIP(eniID string) string { return ec2DerivePublicIP(ec2AutoIPNe
 var InstanceReadAttributes = ec2InstanceReadAttributes
 
 // For load_read_back_test.go, which re-sends each recorded exchange:
-// the page chains a load links, the parse a load gives a body, the error
-// code of a NotFound, and the ends of the refusals naming a path, which
-// it reports.
+// the page chains a load links, the keys it has loaders for, the parse
+// a load gives a body, the error code of a NotFound, and the ends of the
+// refusals naming a path, which it reports.
 
 // LoadChains is read's page chains as a load links them (loadRun.link):
 // each the indexes of its 2xx pages in recorded order, the chains in the
@@ -58,6 +59,11 @@ func LoadChains(read []byte) ([][]int, error) {
 		out = append(out, []int{i})
 	}
 	return out, nil
+}
+
+// LoadKnows reports whether a loader is registered for key.
+func LoadKnows(key LoadKey) bool {
+	return slices.ContainsFunc(loaders, func(l loader) bool { return l.key == key })
 }
 
 var (
