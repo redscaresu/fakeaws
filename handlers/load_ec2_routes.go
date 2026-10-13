@@ -7,6 +7,8 @@ package handlers
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/redscaresu/fakeaws/models"
 	"github.com/redscaresu/fakeaws/repository"
@@ -19,7 +21,7 @@ func init() {
 }
 
 // decodeRouteTables loads each route table with its tags, routes and
-// associations.
+// associations, referencing each route's target.
 func decodeRouteTables(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 	var body ec2DescribeRouteTablesResult
 	if err := decodeEC2(ex, &body); err != nil {
@@ -28,11 +30,37 @@ func decodeRouteTables(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) 
 	items := make([]loadItem, len(body.RouteTableSet))
 	for i, x := range body.RouteTableSet {
 		ref := loadRef{"route-table", x.RouteTableId}
-		items[i] = loadItem{loadRef: ref, Path: "routeTableSet/item", Index: i,
+		items[i] = loadItem{loadRef: ref, Path: "routeTableSet/item", Index: i, Refs: routeTargets(x.Routes),
 			write: ec2Write(env, ec2TagsFromXML(ref, x.TagSet),
 				func(tx *repository.LoadTx) error { return putRouteTable(tx, env, x) })}
 	}
 	return items, nil
+}
+
+// routeTargets are the rows routes target, each once: an internet
+// gateway (not the local route's "local"), which must be loaded, and a
+// NAT gateway, instance or network interface, which no loader loads yet,
+// so the answer names them unresolved.
+//
+// ponytail: a vgw-, vpce- or other gatewayId is not referenced; add its
+// type when a loader loads it.
+func routeTargets(routes []ec2RouteXML) []loadReference {
+	var refs []loadReference
+	add := func(typ, id string, unread bool) {
+		ref := loadReference{loadRef: loadRef{typ, id}, Unread: unread}
+		if id != "" && !slices.Contains(refs, ref) {
+			refs = append(refs, ref)
+		}
+	}
+	for _, r := range routes {
+		if strings.HasPrefix(r.GatewayId, "igw-") {
+			add("internet-gateway", r.GatewayId, false)
+		}
+		add("nat-gateway", r.NatGatewayId, true)
+		add("instance", r.InstanceId, true)
+		add("network-interface", r.NetworkInterfaceId, true)
+	}
+	return refs
 }
 
 // putRouteTable stores x, then its routes and associations, refusing a
@@ -85,25 +113,19 @@ func renderRouteTables(tx *repository.LoadTx, ids []string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		x := ec2RouteTableXML{RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: rt.OwnerID}
 		routes, err := tx.Routes(id)
 		if err != nil {
 			return nil, err
-		}
-		for _, r := range routes {
-			x.Routes = append(x.Routes, ec2RouteToXML(r))
 		}
 		assocs, err := tx.RouteTableAssociations(id)
 		if err != nil {
 			return nil, err
 		}
-		for _, a := range assocs {
-			x.Associations = append(x.Associations, ec2AssociationToXML(a))
-		}
-		if x.TagSet, err = ec2TagSet(tx, id); err != nil {
+		tags, err := ec2TagSet(tx, id)
+		if err != nil {
 			return nil, err
 		}
-		out.RouteTableSet = append(out.RouteTableSet, x)
+		out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableToXML(rt, routes, assocs, tags))
 	}
 	return ec2Body("DescribeRouteTables", &out), nil
 }

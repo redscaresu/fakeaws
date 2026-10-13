@@ -1099,6 +1099,21 @@ func ec2RouteToXML(r *repository.EC2Route) ec2RouteXML {
 	}
 }
 
+// ec2RouteTableToXML is rt as DescribeRouteTables answers it, with its
+// routes, associations and tags: the handler's encoder and the loader's
+// render.
+func ec2RouteTableToXML(rt *repository.EC2RouteTable, routes []*repository.EC2Route,
+	assocs []*repository.EC2RouteTableAssociation, tags []ec2ResourceTagXML) ec2RouteTableXML {
+	x := ec2RouteTableXML{RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: rt.OwnerID, TagSet: tags}
+	for _, r := range routes {
+		x.Routes = append(x.Routes, ec2RouteToXML(r))
+	}
+	for _, a := range assocs {
+		x.Associations = append(x.Associations, ec2AssociationToXML(a))
+	}
+	return x
+}
+
 type ec2AssociateRouteTableResult struct {
 	AssociationId string `xml:"associationId"`
 }
@@ -1204,9 +1219,9 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	routesByRT := make(map[string][]ec2RouteXML, len(allRoutes))
+	routesByRT := make(map[string][]*repository.EC2Route, len(allRoutes))
 	for _, rt := range allRoutes {
-		routesByRT[rt.RouteTableID] = append(routesByRT[rt.RouteTableID], ec2RouteToXML(rt))
+		routesByRT[rt.RouteTableID] = append(routesByRT[rt.RouteTableID], rt)
 	}
 	// Same trick for associations — populate <associationSet> so the
 	// CreateAssociation wait-loop terminates.
@@ -1215,9 +1230,9 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	assocsByRT := make(map[string][]ec2RouteTableAssociationXML, len(allAssocs))
+	assocsByRT := make(map[string][]*repository.EC2RouteTableAssociation, len(allAssocs))
 	for _, a := range allAssocs {
-		assocsByRT[a.RouteTableID] = append(assocsByRT[a.RouteTableID], ec2AssociationToXML(a))
+		assocsByRT[a.RouteTableID] = append(assocsByRT[a.RouteTableID], a)
 	}
 	tags, ok := app.tagSets(w, account)
 	if !ok {
@@ -1231,12 +1246,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 			return
 		}
 		for _, rt := range rts {
-			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableXML{
-				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: rt.OwnerID,
-				Routes:       routesByRT[rt.ID],
-				Associations: assocsByRT[rt.ID],
-				TagSet:       tags[rt.ID],
-			})
+			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableToXML(rt, routesByRT[rt.ID], assocsByRT[rt.ID], tags[rt.ID]))
 		}
 	} else {
 		for _, id := range wanted {
@@ -1254,12 +1264,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 				awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 				return
 			}
-			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableXML{
-				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: rt.OwnerID,
-				Routes:       routesByRT[rt.ID],
-				Associations: assocsByRT[rt.ID],
-				TagSet:       tags[rt.ID],
-			})
+			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableToXML(rt, routesByRT[rt.ID], assocsByRT[rt.ID], tags[rt.ID]))
 		}
 	}
 	out.RouteTableSet = slices.DeleteFunc(out.RouteTableSet, func(rt ec2RouteTableXML) bool {
@@ -1268,8 +1273,19 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeRouteTables", &out)
 }
 
+// ec2DeleteRouteTable refuses a VPC's main route table with 400
+// DependencyViolation, and the table and its main association stay.
+//
+// UNVERIFIED(aws-code): DependencyViolation from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func (app *Application) ec2DeleteRouteTable(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteRouteTable(account, region, req.Params.Get("RouteTableId")); err != nil {
+	id := req.Params.Get("RouteTableId")
+	err := app.repo.DeleteRouteTable(account, region, id)
+	if errors.Is(err, repository.ErrMainRouteTable) {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "DependencyViolation",
+			fmt.Sprintf("The routeTable '%s' has dependencies and cannot be deleted.", id))
+		return
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -4164,6 +4180,8 @@ func (app *Application) gatherEC2StateReal(account string) (map[string]any, erro
 			"nat_gateway_id":         rr.NatGatewayID,
 			"instance_id":            rr.InstanceID,
 			"network_interface_id":   rr.NetworkInterfaceID,
+			"origin":                 rr.Origin,
+			"state":                  rr.State,
 		})
 	}
 	out["routes"] = routeOut
@@ -4177,7 +4195,9 @@ func (app *Application) gatherEC2StateReal(account string) (map[string]any, erro
 		assocOut = append(assocOut, map[string]any{
 			"id":             a.ID,
 			"route_table_id": a.RouteTableID,
-			"subnet_id":      a.SubnetID,
+			"subnet_id":      a.SubnetID, // "" on a main association
+			"main":           a.Main,
+			"state":          a.State, // "" when its recording held none
 		})
 	}
 	out["route_table_associations"] = assocOut

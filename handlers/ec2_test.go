@@ -1950,6 +1950,22 @@ func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "an unmodelled filter is refused, not ignored")
 }
 
+// TestEC2_CreatedRouteAnswersOriginAndState: a route CreateRoute adds
+// answers in its table's routeSet with origin CreateRoute and state
+// active, through the encoder the loader renders with too.
+func TestEC2_CreatedRouteAnswersOriginAndState(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	rt := createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {tagVPC(t, srv)}})
+	createOK(t, srv, "CreateRoute", "return", url.Values{"RouteTableId": {rt}, "DestinationCidrBlock": {"0.0.0.0/0"}, "GatewayId": {"igw-1"}})
+
+	body := mustOK(t)(ec2Call(t, srv, tagRegion, "DescribeRouteTables", url.Values{"RouteTableId.1": {rt}}))
+	route := []byte(extractEC2Tag(body, "routeSet"))
+	assert.Equal(t, "0.0.0.0/0", extractEC2Tag(route, "destinationCidrBlock"), "%s", body)
+	assert.Equal(t, "igw-1", extractEC2Tag(route, "gatewayId"))
+	assert.Equal(t, "CreateRoute", extractEC2Tag(route, "origin"))
+	assert.Equal(t, "active", extractEC2Tag(route, "state"))
+}
+
 // ec2DescribeArms are the Describe names in handleEC2's case arms,
 // ec2DescribeExempt the three among them that take no Filter in the
 // AWS API.

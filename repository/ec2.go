@@ -865,22 +865,33 @@ func (r *Repository) GetRouteTable(account, region, id string) (*EC2RouteTable, 
 	return &rt, nil
 }
 
+// ErrMainRouteTable refuses deleting a VPC's main route table, which
+// would drop its main association with it.
+var ErrMainRouteTable = errors.New("the route table is its VPC's main route table")
+
+// DeleteRouteTable deletes route table id, optionally scoped to a
+// region, answering models.ErrNotFound when there is none and
+// ErrMainRouteTable, deleting nothing, when it holds a main association.
 func (r *Repository) DeleteRouteTable(account, region, id string) error {
+	const notMain = ` AND NOT EXISTS (SELECT 1 FROM ec2_route_table_associations a
+		WHERE a.account_id = ec2_route_tables.account_id AND a.route_table_id = ec2_route_tables.id AND a.main = 1)`
 	var res sql.Result
 	var err error
 	if region == "" {
-		res, err = r.db.Exec(`DELETE FROM ec2_route_tables WHERE account_id = ? AND id = ?`, account, id)
+		res, err = r.db.Exec(`DELETE FROM ec2_route_tables WHERE account_id = ? AND id = ?`+notMain, account, id)
 	} else {
-		res, err = r.db.Exec(`DELETE FROM ec2_route_tables WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
+		res, err = r.db.Exec(`DELETE FROM ec2_route_tables WHERE account_id = ? AND region = ? AND id = ?`+notMain, account, region, id)
 	}
 	if err != nil {
 		return mapDeleteError(err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return models.ErrNotFound
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
 	}
-	return nil
+	if _, err := r.GetRouteTable(account, region, id); err != nil {
+		return err
+	}
+	return ErrMainRouteTable
 }
 
 // AssociateRouteTable links a route table to a subnet. Both must

@@ -91,6 +91,32 @@ func TestLoadEC2Routes_MutateOnce(t *testing.T) {
 	assert.Equal(t, []string{"routeTableSet/item[0]/routeSet/item[3]"}, ren)
 }
 
+// TestLoadEC2Routes_StateNamesMainAndOrigin: /mock/state lists a main
+// association as main, with its state, and each route with its origin
+// and state.
+func TestLoadEC2Routes_StateNamesMainAndOrigin(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	loadNet(t, srv, append(fixtureRecording(t), routeTablesFixture(t))...)
+	var state struct {
+		EC2 struct {
+			Routes       []map[string]any `json:"routes"`
+			Associations []map[string]any `json:"route_table_associations"`
+		} `json:"ec2"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(mockOK(t, srv, http.MethodGet, "/mock/state", "")), &state))
+	assert.Equal(t, []map[string]any{{"id": fixtureRTAssoc, "route_table_id": fixtureRT, "subnet_id": "", "main": true, "state": ""}},
+		state.EC2.Associations)
+	require.Len(t, state.EC2.Routes, 3)
+	for _, r := range state.EC2.Routes {
+		want := "CreateRoute"
+		if r["gateway_id"] == "local" {
+			want = "CreateRouteTable"
+		}
+		assert.Equal(t, want, r["origin"], "%v", r)
+		assert.Equal(t, "active", r["state"], "%v", r)
+	}
+}
+
 // TestLoadEC2Routes_MainAssociationStays: DisassociateRouteTable on a
 // main association is refused, and the association is still answered.
 //
@@ -104,6 +130,25 @@ func TestLoadEC2Routes_MainAssociationStays(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
 	assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"))
 	assert.Contains(t, extractEC2Tag(body, "Message"), fixtureRTAssoc)
+	rec, ren := diffAnswer(t, srv, rts)
+	assert.Empty(t, rec)
+	assert.Empty(t, ren)
+}
+
+// TestLoadEC2Routes_MainRouteTableStays: DeleteRouteTable on a VPC's
+// main route table is refused, and the table and its main association
+// are still answered as recorded.
+//
+// UNVERIFIED(aws-code): DependencyViolation from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func TestLoadEC2Routes_MainRouteTableStays(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	rts := routeTablesFixture(t)
+	loadNet(t, srv, append(fixtureRecording(t), rts)...)
+
+	resp, body := ec2Call(t, srv, netRegion, "DeleteRouteTable", url.Values{"RouteTableId": {fixtureRT}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, "DependencyViolation", extractEC2Tag(body, "Code"))
+	assert.Contains(t, extractEC2Tag(body, "Message"), fixtureRT)
 	rec, ren := diffAnswer(t, srv, rts)
 	assert.Empty(t, rec)
 	assert.Empty(t, ren)
@@ -137,6 +182,28 @@ func TestLoadEC2Routes_SubnetAssociations(t *testing.T) {
 	assert.Contains(t, string(body), "<routeTableAssociationId>rtbassoc-0main</routeTableAssociationId>")
 }
 
+// TestLoadEC2Routes_UnloadedTargetsUnresolved: a route to a network
+// interface, instance or NAT gateway loads, and the answer names its
+// target unresolved, as no loader loads those rows yet.
+func TestLoadEC2Routes_UnloadedTargetsUnresolved(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	const vpc = "vpc-0a"
+	route := func(dest, target string) string {
+		return "<item><destinationCidrBlock>" + dest + "</destinationCidrBlock>" + target + "<state>active</state><origin>CreateRoute</origin></item>"
+	}
+	rts := netRouteTables(strings.Replace(netRouteTable("rtb-0a", vpc, ""), "</routeSet>",
+		route("10.1.0.0/16", "<networkInterfaceId>eni-0a</networkInterfaceId>")+
+			route("10.2.0.0/16", "<instanceId>i-0a</instanceId>")+
+			route("10.3.0.0/16", "<natGatewayId>nat-0a</natGatewayId>")+
+			route("10.4.0.0/16", "<networkInterfaceId>eni-0a</networkInterfaceId>")+"</routeSet>", 1))
+	var answer struct{ Unresolved map[string][]string }
+	body := loadNet(t, srv, append([]netRecorded{netVpcs(netVpc(vpc, "<isDefault>false</isDefault>")), rts}, netDNS(vpc, true)...)...)
+	require.NoError(t, json.Unmarshal([]byte(body), &answer))
+	assert.Equal(t, map[string][]string{
+		"dhcp-options": {"dopt-0abc"}, "network-interface": {"eni-0a"}, "instance": {"i-0a"}, "nat-gateway": {"nat-0a"},
+	}, answer.Unresolved)
+}
+
 func TestLoadEC2Routes_Refusals(t *testing.T) {
 	const vpc = "vpc-0a"
 	base := append([]netRecorded{netVpcs(netVpc(vpc, "<isDefault>false</isDefault>"))}, netDNS(vpc, true)...)
@@ -161,6 +228,11 @@ func TestLoadEC2Routes_Refusals(t *testing.T) {
 			netRouteTables(strings.Replace(netRouteTable("rtb-0a", vpc, ""), "</routeSet>",
 				"<item><destinationIpv6CidrBlock>::/0</destinationIpv6CidrBlock><gatewayId>local</gatewayId><state>active</state><origin>CreateRouteTable</origin></item></routeSet>", 1)),
 			"exchange 3: ec2 DescribeRouteTables: route-table rtb-0a holds a route with no destinationCidrBlock, which fakeaws cannot hold",
+		},
+		"a route to a gateway that was not recorded": {
+			netRouteTables(strings.Replace(netRouteTable("rtb-0a", vpc, ""), "</routeSet>",
+				"<item><destinationCidrBlock>0.0.0.0/0</destinationCidrBlock><gatewayId>igw-0missing</gatewayId><state>active</state><origin>CreateRoute</origin></item></routeSet>", 1)),
+			"exchange 3: ec2 DescribeRouteTables: route-table rtb-0a references internet-gateway igw-0missing, which no exchange loaded",
 		},
 		"a propagating gateway": {
 			netRouteTables(netRouteTable("rtb-0a", vpc, "<propagatingVgwSet><item><gatewayId>vgw-0a</gatewayId></item></propagatingVgwSet>")),
