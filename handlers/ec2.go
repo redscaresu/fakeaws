@@ -3628,7 +3628,7 @@ type ec2DescribeVolumesResult struct {
 // ec2VolumeNotFound is EC2's code for a volume id it does not have.
 const ec2VolumeNotFound = "InvalidVolume.NotFound"
 
-// volumeAttachments is field of each of v's attachments.
+// volumeAttachments reads field off each of v's attachments.
 func volumeAttachments(v ec2VolumeXML, field func(repository.EC2VolumeAttachment) string) []string {
 	var out []string
 	for _, a := range v.Attachments {
@@ -3657,7 +3657,8 @@ var volumeFilters = ec2FilterTable[ec2VolumeXML]{
 // narrowed by VolumeId.N and volumeFilters. An unknown VolumeId.N is
 // 400 InvalidVolume.NotFound, which the provider reads as gone. Only a
 // load stores a volume, so on an unloaded database the answer is
-// always empty and is classed empty-collection.
+// always empty, or that NotFound, and either is classed
+// empty-collection.
 //
 // UNVERIFIED(aws-code): InvalidVolume.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func (app *Application) ec2DescribeVolumes(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -3678,6 +3679,9 @@ func (app *Application) ec2DescribeVolumes(w http.ResponseWriter, account, regio
 	ids := queryListValues(req.Params, "VolumeId.")
 	for _, id := range ids {
 		if !slices.ContainsFunc(vols, func(v *repository.EC2Volume) bool { return v.ID == id }) {
+			if !loaded {
+				markClass(w, classEmptyCollection)
+			}
 			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
 				ec2VolumeNotFound, fmt.Sprintf("The volume '%s' does not exist.", id))
 			return

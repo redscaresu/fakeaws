@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -710,7 +711,8 @@ func TestLoadEC2Volumes_Tags(t *testing.T) {
 // TestLoadEC2Volumes_AttachmentDisagreesWithBlockDeviceMapping: a volume
 // whose attachment differs from its instance's blockDeviceMapping item,
 // or which that blockDeviceMapping does not name, is refused naming
-// both, and the load stores nothing.
+// both; so is an instance whose blockDeviceMapping names a volume not
+// attached to it. The load stores nothing.
 func TestLoadEC2Volumes_AttachmentDisagreesWithBlockDeviceMapping(t *testing.T) {
 	for name, c := range map[string]struct {
 		recording func(t *testing.T) []netRecorded
@@ -727,6 +729,19 @@ func TestLoadEC2Volumes_AttachmentDisagreesWithBlockDeviceMapping(t *testing.T) 
 				return recording
 			},
 			"volume " + fixtureVolume + ": its attachment to instance " + fixtureInstance + " differs from the instance's blockDeviceMapping at deleteOnTermination",
+		},
+		"a blockDeviceMapping volume recorded available, with no attachment": {
+			func(t *testing.T) []netRecorded {
+				recording := volumeRecording(t, "true")
+				detached := regexp.MustCompile(`(?s)<attachmentSet>.*</attachmentSet>`)
+				for i, r := range recording {
+					if r.action == "DescribeVolumes" {
+						recording[i].body = strings.Replace(detached.ReplaceAllString(r.body, "<attachmentSet/>"), "<status>in-use<", "<status>available<", 1)
+					}
+				}
+				return recording
+			},
+			"instance " + fixtureInstance + ": its blockDeviceMapping names volume " + fixtureVolume + ", which is not attached to it",
 		},
 		"an instance with no block device": {
 			func(t *testing.T) []netRecorded {
@@ -746,9 +761,7 @@ func TestLoadEC2Volumes_AttachmentDisagreesWithBlockDeviceMapping(t *testing.T) 
 			}
 			status, body := postLoad(t, srv, loadEnvelope(loadAccount, netRegion, exchanges...))
 			require.Equal(t, http.StatusBadRequest, status, body)
-			assert.True(t, slices.ContainsFunc(loadRefusals(t, body), func(r string) bool {
-				return strings.HasSuffix(r, "ec2 DescribeVolumes: "+c.want)
-			}), body)
+			assert.True(t, slices.ContainsFunc(loadRefusals(t, body), func(r string) bool { return strings.HasSuffix(r, ": "+c.want) }), body)
 			assert.Equal(t, before, loadedState(t, app, srv), "a refused load stored something")
 		})
 	}

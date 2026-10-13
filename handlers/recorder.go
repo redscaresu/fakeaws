@@ -46,7 +46,8 @@ const (
 
 	// CRITICAL[request-log-empty-collection]: only ec2DescribeNone, the
 	// Describe of a resource fakeaws never creates, DescribeVolumes on an
-	// unloaded database (only a load stores a volume), and
+	// unloaded database (only a load stores a volume), its empty answer
+	// and its InvalidVolume.NotFound alike, and
 	// DescribeAvailabilityZones on a loaded database with no zone rows
 	// for the region mark empty-collection. Other always-empty answers,
 	// and an empty answer read from rows (DescribeVolumes on a loaded

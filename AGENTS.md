@@ -74,7 +74,8 @@ fakeaws/
   `UNIMPLEMENTED` log line. Discovery surface for the next caller.
 - **Gap marks**: a gap site the request log must tell apart (a 404
   default arm, a refusal of something fakeaws does not model,
-  `ec2DescribeNone`, `DescribeVolumes` on an unloaded database, a
+  `ec2DescribeNone`, `DescribeVolumes` on an unloaded database (an
+  empty answer or a NotFound), a
   loaded database's region with no AZ rows)
   calls `markClass`; concepts.md item 7 has the
   classes and the gaps never marked, which record `answered-from-rows`.

@@ -168,6 +168,9 @@ func ec2InstanceRefs(x ec2InstanceXML, nics int) []loadReference {
 	return refs
 }
 
+// renderInstances reads each instance back as DescribeInstances answers
+// it, refusing one whose blockDeviceMapping names a loaded volume that
+// is not attached to it (checkBlockDeviceVolumes).
 func renderInstances(tx *repository.LoadTx, ids []string) ([]byte, error) {
 	account, err := tx.Account()
 	if err != nil {
@@ -191,12 +194,41 @@ func renderInstances(tx *repository.LoadTx, ids []string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := checkBlockDeviceVolumes(tx, id, x.BlockDeviceMapping); err != nil {
+			return nil, err
+		}
 		if x.TagSet, err = ec2TagSet(tx, id); err != nil {
 			return nil, err
 		}
 		out.ReservationSet = ec2Reserve(out.ReservationSet, account, inst.ReservationID, x)
 	}
 	return ec2Body("DescribeInstances", &out), nil
+}
+
+// checkBlockDeviceVolumes refuses instance id when a volume its
+// blockDeviceMapping names is loaded but not attached to it: terminate
+// acts on the volume's attachments, so a volume recorded available or
+// attached elsewhere would outlive an instance that says
+// deleteOnTermination. It runs at the render, after every loader wrote,
+// since volumes load after instances; checkVolumeAttachment checks the
+// other way, and resolve refuses a volume no exchange loaded.
+func checkBlockDeviceVolumes(tx *repository.LoadTx, id string, bdm []ec2InstanceBlockDeviceXML) error {
+	for _, b := range bdm {
+		if b.Ebs == nil {
+			continue
+		}
+		vol, err := tx.Volume(b.Ebs.VolumeId)
+		if errors.Is(err, models.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !slices.ContainsFunc(vol.Attachments, func(a repository.EC2VolumeAttachment) bool { return a.InstanceID == id }) {
+			return loadRefusal(fmt.Sprintf("instance %s: its blockDeviceMapping names volume %s, which is not attached to it", id, vol.ID))
+		}
+	}
+	return nil
 }
 
 // ec2LoadedInstanceNet reads back what an instance on eni answers

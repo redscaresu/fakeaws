@@ -470,16 +470,23 @@ func TestContract_request_log_empty_collection(t *testing.T) {
 		assert.Equal(t, "empty-collection", lastClass(t, srv), action)
 	}
 
-	resp, body := ec2Call(t, srv, region, "DescribeVpcs", nil)
+	// No volume can exist on an unloaded database, so its NotFound is a
+	// gap too.
+	resp, body := ec2Call(t, srv, region, "DescribeVolumes", url.Values{"VolumeId.1": {fixtureVolume}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, "InvalidVolume.NotFound", extractEC2Tag(body, "Code"))
+	assert.Equal(t, "empty-collection", lastClass(t, srv), "unloaded DescribeVolumes VolumeId.1")
+
+	resp, body = ec2Call(t, srv, region, "DescribeVpcs", nil)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
 	require.Empty(t, extractEC2Tag(body, "vpcId"), "an empty account: %s", body)
 	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "DescribeVpcs on an empty account")
 
 	// On a loaded database DescribeVolumes answers from rows, a read
-	// that finds none included.
+	// that finds none and an unknown id included.
 	loadNet(t, srv, volumeRecording(t, "true")...)
-	for _, params := range []url.Values{{"VolumeId.1": {fixtureVolume}}, ec2FilterParams("status", "available")} {
-		mustOK(t)(ec2Call(t, srv, netRegion, "DescribeVolumes", params))
+	for _, params := range []url.Values{{"VolumeId.1": {fixtureVolume}}, ec2FilterParams("status", "available"), {"VolumeId.1": {"vol-0missing"}}} {
+		ec2Call(t, srv, netRegion, "DescribeVolumes", params)
 		assert.Equal(t, "answered-from-rows", lastClass(t, srv), "loaded DescribeVolumes %v", params)
 	}
 }
