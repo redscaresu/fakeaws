@@ -917,6 +917,8 @@ type sgRuleSetXML struct {
 		ID       string `xml:"securityGroupRuleId"`
 		GroupID  string `xml:"groupId"`
 		IsEgress bool   `xml:"isEgress"`
+		FromPort int    `xml:"fromPort"`
+		ToPort   int    `xml:"toPort"`
 		CidrIpv4 string `xml:"cidrIpv4"`
 	} `xml:"securityGroupRuleSet>item"`
 }
@@ -977,6 +979,7 @@ func TestEC2_AuthorizeSecurityGroupRulesAnswerRuleIds(t *testing.T) {
 	egress := decodeRuleSet(t, body)
 	require.Len(t, egress.Rules, 1, "%s", body)
 	assert.True(t, egress.Rules[0].IsEgress, "an egress authorize answers egress rules")
+	assert.Equal(t, [2]int{-1, -1}, [2]int{egress.Rules[0].FromPort, egress.Rules[0].ToPort}, "an all-traffic rule answers ports -1")
 	assert.Regexp(t, `^sgr-`, egress.Rules[0].ID)
 
 	// The fixture's own request: AWS EC2 API reference Example 3.
@@ -1091,26 +1094,244 @@ func TestEC2_SecurityGroupRuleSourceRefusals(t *testing.T) {
 	}
 }
 
-// TestEC2_RevokeByRuleIdRefused: a revoke naming SecurityGroupRuleId.N,
-// which the provider's aws_vpc_security_group_*_rule delete sends, is
-// refused through ec2Refuse, and the rule stays.
-func TestEC2_RevokeByRuleIdRefused(t *testing.T) {
-	const region = "us-east-1"
-	srv, sgID, _ := newSGPair(t, region)
-	params := sgPerm("tcp", "22", "22", "10.0.0.0/8")
-	params.Set("GroupId", sgID)
-	rules := decodeRuleSet(t, mustOK(t)(ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", params))).Rules
-	require.Len(t, rules, 1)
+// sgRuleXML is one DescribeSecurityGroupRules item.
+type sgRuleXML struct {
+	ID       string `xml:"securityGroupRuleId"`
+	GroupID  string `xml:"groupId"`
+	IsEgress bool   `xml:"isEgress"`
+	FromPort int    `xml:"fromPort"`
+	ToPort   int    `xml:"toPort"`
+	CidrIpv4 string `xml:"cidrIpv4"`
+	Tags     []struct {
+		Key   string `xml:"key"`
+		Value string `xml:"value"`
+	} `xml:"tagSet>item"`
+}
 
-	resp, body := ec2Call(t, srv, region, "RevokeSecurityGroupIngress", url.Values{
-		"GroupId": {sgID}, "SecurityGroupRuleId.1": {rules[0].ID},
+// describeRules answers DescribeSecurityGroupRules with params, which
+// must be 200, and returns the body and its rules.
+func describeRules(t *testing.T, srv *httptest.Server, region string, params url.Values) ([]byte, []sgRuleXML) {
+	t.Helper()
+	resp, body := ec2Call(t, srv, region, "DescribeSecurityGroupRules", params)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeSecurityGroupRules %v: %s", params, body)
+	var out struct {
+		Rules []sgRuleXML `xml:"securityGroupRuleSet>item"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "decode %s", body)
+	return body, out.Rules
+}
+
+// ruleFilter is Filter.1 name=value.
+func ruleFilter(name, value string) url.Values {
+	return url.Values{"Filter.1.Name": {name}, "Filter.1.Value.1": {value}}
+}
+
+// newRuleGroup is a group with an ingress tcp 22 permission of two
+// IPv4 CIDRs and an all-traffic egress rule, and a peer group with a
+// rule of its own. It returns the server, the group, and the group's
+// rules in the order Authorize answered them: the two ingress, then
+// the egress.
+func newRuleGroup(t *testing.T, region string) (*httptest.Server, string, []string) {
+	t.Helper()
+	srv, sgID, peerID := newSGPair(t, region)
+	authorize := func(action, group string, params url.Values) []string {
+		params.Set("GroupId", group)
+		var ids []string
+		for _, r := range decodeRuleSet(t, mustOK(t)(ec2Call(t, srv, region, action, params))).Rules {
+			ids = append(ids, r.ID)
+		}
+		return ids
+	}
+	ingress := sgPerm("tcp", "22", "22", "203.0.113.0/24")
+	ingress.Set("IpPermissions.1.IpRanges.2.CidrIp", "198.51.100.0/24")
+	ids := authorize("AuthorizeSecurityGroupIngress", sgID, ingress)
+	ids = append(ids, authorize("AuthorizeSecurityGroupEgress", sgID, sgPerm("-1", "", "", "0.0.0.0/0"))...)
+	require.Len(t, ids, 3)
+	authorize("AuthorizeSecurityGroupIngress", peerID, sgPerm("tcp", "80", "80", "10.0.0.0/8"))
+	return srv, sgID, ids
+}
+
+// TestEC2_DescribeSecurityGroupRules: group-id answers each rule of
+// the group, a two-CIDR permission as two ingress rules and the egress
+// rule with isEgress true, with exactly the element paths of
+// testdata/ec2/DescribeSecurityGroupRules.xml; security-group-rule-id
+// and SecurityGroupRuleId.N each select one rule.
+func TestEC2_DescribeSecurityGroupRules(t *testing.T) {
+	const region = "us-east-1"
+	srv, sgID, ids := newRuleGroup(t, region)
+
+	body, rules := describeRules(t, srv, region, ruleFilter("group-id", sgID))
+	require.Len(t, rules, 3, "%s", body)
+	for i, want := range []struct {
+		cidr     string
+		egress   bool
+		from, to int
+	}{{"203.0.113.0/24", false, 22, 22}, {"198.51.100.0/24", false, 22, 22}, {"0.0.0.0/0", true, -1, -1}} {
+		assert.Equal(t, ids[i], rules[i].ID)
+		assert.Equal(t, [2]int{want.from, want.to}, [2]int{rules[i].FromPort, rules[i].ToPort}, "rule %d ports", i)
+		assert.Equal(t, sgID, rules[i].GroupID)
+		assert.Equal(t, want.cidr, rules[i].CidrIpv4)
+		assert.Equal(t, want.egress, rules[i].IsEgress, "rule %d isEgress", i)
+	}
+	fixture, err := handlers.ParseXML(blankLeaves([]byte(ec2Fixture(t, "DescribeSecurityGroupRules"))))
+	require.NoError(t, err)
+	answer, err := handlers.ParseXML(blankLeaves(body))
+	require.NoError(t, err)
+	fixtureOnly, answerOnly := handlers.Diff(handlers.LoadKey{Service: "ec2", Action: "DescribeSecurityGroupRules"}, fixture, answer)
+	assert.Empty(t, fixtureOnly, "paths only the fixture has: %s", body)
+	assert.Empty(t, answerOnly, "paths only the answer has: %s", body)
+
+	_, all := describeRules(t, srv, region, url.Values{})
+	assert.Len(t, all, 4, "no filter answers every rule in the region, the peer's too")
+	for _, params := range []url.Values{ruleFilter("security-group-rule-id", ids[1]), {"SecurityGroupRuleId.1": {ids[1]}}} {
+		_, one := describeRules(t, srv, region, params)
+		require.Len(t, one, 1, "%v", params)
+		assert.Equal(t, ids[1], one[0].ID, "%v", params)
+	}
+
+	// ESP (50) as the legacy aws_security_group_rule sends it, with
+	// ports 0/0, answers 0/0 from Authorize and Describe: the provider
+	// matches its rule on those ports. Only protocol -1 answers -1/-1.
+	esp := sgPerm("50", "0", "0", "10.9.0.0/16")
+	esp.Set("GroupId", sgID)
+	added := decodeRuleSet(t, mustOK(t)(ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", esp))).Rules
+	require.Len(t, added, 1)
+	assert.Equal(t, [2]int{0, 0}, [2]int{added[0].FromPort, added[0].ToPort}, "Authorize: protocol 50 ports")
+	_, one := describeRules(t, srv, region, url.Values{"SecurityGroupRuleId.1": {added[0].ID}})
+	require.Len(t, one, 1)
+	assert.Equal(t, [2]int{0, 0}, [2]int{one[0].FromPort, one[0].ToPort}, "Describe: protocol 50 ports")
+}
+
+// TestEC2_SecurityGroupRuleTags: CreateTags takes an sgr- id, the
+// rule's tagSet answers the tag, and tag:Name, tag-key and tag-value
+// each select only that rule; DeleteTags removes it.
+func TestEC2_SecurityGroupRuleTags(t *testing.T) {
+	const region = "us-east-1"
+	srv, _, ids := newRuleGroup(t, region)
+	mustOK(t)(ec2Call(t, srv, region, "CreateTags", url.Values{
+		"ResourceId.1": {ids[0]}, "Tag.1.Key": {"Name"}, "Tag.1.Value": {"web"},
+	}))
+	for _, params := range []url.Values{ruleFilter("tag:Name", "web"), ruleFilter("tag-key", "Name"), ruleFilter("tag-value", "web")} {
+		body, rules := describeRules(t, srv, region, params)
+		require.Len(t, rules, 1, "%v: %s", params, body)
+		assert.Equal(t, ids[0], rules[0].ID, "%v", params)
+		require.Len(t, rules[0].Tags, 1, "%s", body)
+		assert.Equal(t, "Name", rules[0].Tags[0].Key)
+		assert.Equal(t, "web", rules[0].Tags[0].Value)
+	}
+
+	mustOK(t)(ec2Call(t, srv, region, "DeleteTags", url.Values{"ResourceId.1": {ids[0]}, "Tag.1.Key": {"Name"}}))
+	_, rules := describeRules(t, srv, region, ruleFilter("tag-key", "Name"))
+	assert.Empty(t, rules, "the tag is gone")
+
+	resp, body := ec2Call(t, srv, region, "CreateTags", url.Values{
+		"ResourceId.1": {"sgr-0000000000000000"}, "Tag.1.Key": {"Name"}, "Tag.1.Value": {"web"},
 	})
-	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
-	code, msg := ec2Error(t, body)
-	assert.Equal(t, "NotImplemented", code)
-	assert.Equal(t, "RevokeSecurityGroupIngress: not modelled by fakeaws: SecurityGroupRuleId.N", msg)
-	ingress, _ := describeSGRules(t, srv, region, sgID)
-	assert.Equal(t, []sgRuleSourceXML{{CidrIp: "10.0.0.0/8"}}, sgPermByPort(ingress, 22).IpRanges, "the rule stays")
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	code, _ := ec2Error(t, body)
+	assert.Equal(t, "InvalidSecurityGroupRuleId.NotFound", code)
+}
+
+// TestEC2_RevokeByRuleId: a revoke naming SecurityGroupRuleId.N, which
+// the provider's aws_vpc_security_group_*_rule delete sends, deletes
+// that rule and leaves the other rule of its permission, which
+// DescribeSecurityGroups answers with one source.
+func TestEC2_RevokeByRuleId(t *testing.T) {
+	const region = "us-east-1"
+	srv, sgID, ids := newRuleGroup(t, region)
+	mustOK(t)(ec2Call(t, srv, region, "RevokeSecurityGroupIngress", url.Values{
+		"GroupId": {sgID}, "SecurityGroupRuleId.1": {ids[0]},
+	}))
+	_, rules := describeRules(t, srv, region, ruleFilter("group-id", sgID))
+	require.Len(t, rules, 2)
+	assert.Equal(t, []string{ids[1], ids[2]}, []string{rules[0].ID, rules[1].ID}, "only the named rule is gone")
+	ingress, egress := describeSGRules(t, srv, region, sgID)
+	assert.Equal(t, []sgPermXML{{IpProtocol: "tcp", FromPort: 22, ToPort: 22, IpRanges: []sgRuleSourceXML{{CidrIp: "198.51.100.0/24"}}}}, ingress)
+	assert.Len(t, egress, 1, "egress as it was")
+
+	mustOK(t)(ec2Call(t, srv, region, "RevokeSecurityGroupEgress", url.Values{
+		"GroupId": {sgID}, "SecurityGroupRuleId.1": {ids[2]},
+	}))
+	_, egress = describeSGRules(t, srv, region, sgID)
+	assert.Empty(t, egress, "an egress revoke takes an egress rule id")
+}
+
+// TestEC2_SecurityGroupRuleIdNotFound: an unknown SecurityGroupRuleId
+// answers 400 InvalidSecurityGroupRuleId.NotFound from Describe and
+// from Revoke, as does a rule id of the other direction, and a revoke
+// that fails deletes nothing, the permission it also names included.
+func TestEC2_SecurityGroupRuleIdNotFound(t *testing.T) {
+	const region = "us-east-1"
+	const unknown = "sgr-0000000000000000"
+	srv, sgID, ids := newRuleGroup(t, region)
+	notFound := func(action string, params url.Values, id string) {
+		t.Helper()
+		resp, body := ec2Call(t, srv, region, action, params)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s: %s", action, body)
+		code, msg := ec2Error(t, body)
+		assert.Equal(t, "InvalidSecurityGroupRuleId.NotFound", code, "%s", action)
+		assert.Contains(t, msg, id, "%s", action)
+	}
+	notFound("DescribeSecurityGroupRules", url.Values{"SecurityGroupRuleId.1": {ids[0]}, "SecurityGroupRuleId.2": {unknown}}, unknown)
+	withPerm := sgPerm("tcp", "22", "22", "198.51.100.0/24")
+	withPerm.Set("GroupId", sgID)
+	withPerm.Set("SecurityGroupRuleId.1", ids[0])
+	withPerm.Set("SecurityGroupRuleId.2", unknown)
+	notFound("RevokeSecurityGroupIngress", withPerm, unknown)
+	notFound("RevokeSecurityGroupIngress", url.Values{"GroupId": {sgID}, "SecurityGroupRuleId.1": {ids[2]}}, ids[2])
+	notFound("RevokeSecurityGroupIngress", url.Values{"GroupId": {sgID}, "SecurityGroupRuleId.1": {""}}, "''")
+	notFound("DescribeSecurityGroupRules", url.Values{"SecurityGroupRuleId.1": {""}}, "''")
+
+	_, rules := describeRules(t, srv, region, ruleFilter("group-id", sgID))
+	assert.Len(t, rules, 3, "no rule revoked")
+}
+
+// withRuleKey is a revoke of sgID's tcp 22 198.51.100.0/24 source
+// carrying the param key=value.
+func withRuleKey(sgID, key, value string) url.Values {
+	p := sgPerm("tcp", "22", "22", "198.51.100.0/24")
+	p.Set("GroupId", sgID)
+	p.Set(key, value)
+	return p
+}
+
+// TestEC2_SecurityGroupRuleRefusals: ModifySecurityGroupRules answers
+// 501 naming it; a Describe filter fakeaws does not model and a revoke
+// by rule id with a param it does not read are refused, deleting
+// nothing.
+func TestEC2_SecurityGroupRuleRefusals(t *testing.T) {
+	const region = "us-east-1"
+	srv, sgID, ids := newRuleGroup(t, region)
+	cases := []struct {
+		action string
+		params url.Values
+		msg    string
+	}{
+		{"ModifySecurityGroupRules", url.Values{
+			"GroupId": {sgID}, "SecurityGroupRule.1.SecurityGroupRuleId": {ids[0]}, "SecurityGroupRule.1.SecurityGroupRule.IpProtocol": {"udp"},
+		}, "ModifySecurityGroupRules: not modelled by fakeaws: SecurityGroupRule.N"},
+		{"DescribeSecurityGroupRules", ruleFilter("ip-protocol", "tcp"), "DescribeSecurityGroupRules: not modelled by fakeaws: ip-protocol"},
+		{"RevokeSecurityGroupIngress", url.Values{"GroupId": {sgID}, "SecurityGroupRuleId.1": {ids[0]}, "CidrIp": {"203.0.113.0/24"}},
+			"RevokeSecurityGroupIngress: not modelled by fakeaws: CidrIp"},
+		{"RevokeSecurityGroupIngress", url.Values{
+			"GroupId": {sgID}, "SecurityGroupRuleId.1": {ids[0]}, "CidrIp": {"203.0.113.0/24"},
+			"IpPermissions.1.IpProtocol": {"tcp"}, "IpPermissions.1.FromPort": {"22"}, "IpPermissions.1.ToPort": {"22"},
+			"IpPermissions.1.IpRanges.1.CidrIp": {"198.51.100.0/24"},
+		}, "RevokeSecurityGroupIngress: not modelled by fakeaws: CidrIp"},
+		{"RevokeSecurityGroupIngress", withRuleKey(sgID, "SecurityGroupRuleId.N", ids[0]),
+			"RevokeSecurityGroupIngress: not modelled by fakeaws: SecurityGroupRuleId.N"},
+		{"RevokeSecurityGroupIngress", withRuleKey(sgID, "SecurityGroupRuleId.1.Foo", "x"),
+			"RevokeSecurityGroupIngress: not modelled by fakeaws: SecurityGroupRuleId.N.Foo"},
+	}
+	for _, c := range cases {
+		resp, body := ec2Call(t, srv, region, c.action, c.params)
+		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s: %s", c.action, body)
+		code, msg := ec2Error(t, body)
+		assert.Equal(t, "NotImplemented", code, "%s", c.action)
+		assert.Equal(t, c.msg, msg)
+	}
+	_, rules := describeRules(t, srv, region, ruleFilter("group-id", sgID))
+	assert.Len(t, rules, 3, "no rule revoked or modified")
 }
 
 // TestEC2_AuthorizeTagSpecificationRefused: AWS tags the new rules but
@@ -2453,7 +2674,7 @@ var (
 		"DescribeInternetGateways", "DescribeRouteTables", "DescribeAddresses", "DescribeAddressesAttribute",
 		"DescribeInstances", "DescribeKeyPairs", "DescribeImages", "DescribeVolumes", "DescribeNatGateways",
 		"DescribeSnapshots", "DescribeLaunchTemplates", "DescribeInstanceTypes", "DescribeTags",
-		"DescribeInstanceAttribute", "DescribeSecurityGroups", "DescribeAvailabilityZones",
+		"DescribeInstanceAttribute", "DescribeSecurityGroups", "DescribeSecurityGroupRules", "DescribeAvailabilityZones",
 	}
 	ec2DescribeExempt = []string{"DescribeVpcAttribute", "DescribeInstanceAttribute", "DescribeAddressesAttribute"}
 )

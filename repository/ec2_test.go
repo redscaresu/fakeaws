@@ -232,6 +232,56 @@ func TestSecurityGroupRules(t *testing.T) {
 	}
 }
 
+// TestRevokeSecurityGroupRulesByID: a rule with an ID revokes the rule
+// of that id, group and direction; one the group lacks there is
+// RuleNotFoundError and the whole revoke deletes nothing. Get and the
+// region list answer rules by id and region.
+func TestRevokeSecurityGroupRulesByID(t *testing.T) {
+	r := setupRepo(t)
+	require.NoError(t, createVPC(r, &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
+	for _, id := range []string{"sg-1", "sg-2"} {
+		require.NoError(t, r.CreateSecurityGroup(testAccount, &EC2SecurityGroup{ID: id, VPCID: "vpc-1", GroupName: id, Description: "d", Region: testRegion, ARN: "arn", CreatedAt: "t"}))
+	}
+	egress := tcpRule("sgr-e", 443, "0.0.0.0/0")
+	egress.IsEgress = true
+	_, err := r.AuthorizeSecurityGroupRules(testAccount, testRegion, "sg-1", []EC2SecurityGroupRule{
+		tcpRule("sgr-a", 22, "10.0.0.0/8"), tcpRule("sgr-b", 22, "10.1.0.0/16"), egress,
+	})
+	require.NoError(t, err)
+	_, err = r.AuthorizeSecurityGroupRules(testAccount, testRegion, "sg-2", []EC2SecurityGroupRule{tcpRule("sgr-z", 80, "10.0.0.0/8")})
+	require.NoError(t, err)
+
+	got, err := r.GetSecurityGroupRule(testAccount, testRegion, "sgr-b")
+	require.NoError(t, err)
+	assert.Equal(t, "10.1.0.0/16", got.CidrIPv4)
+	_, err = r.GetSecurityGroupRule(testAccount, "eu-west-1", "sgr-b")
+	assert.ErrorIs(t, err, models.ErrNotFound, "another region's rule")
+	_, err = r.GetSecurityGroupRule(testAccount, testRegion, "sgr-missing")
+	assert.Equal(t, RuleNotFoundError{ID: "sgr-missing"}, err)
+	all, err := r.ListRegionSecurityGroupRules(testAccount, testRegion)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sgr-a 0/0", "sgr-b 0/1", "sgr-e 0/0", "sgr-z 0/0"}, ruleSlots(all))
+	none, err := r.ListRegionSecurityGroupRules(testAccount, "eu-west-1")
+	require.NoError(t, err)
+	assert.Empty(t, none)
+
+	byID := func(id string, egress bool) EC2SecurityGroupRule {
+		return EC2SecurityGroupRule{ID: id, IsEgress: egress}
+	}
+	for _, bad := range []EC2SecurityGroupRule{byID("sgr-missing", false), byID("sgr-e", false), byID("sgr-z", false)} {
+		err = r.RevokeSecurityGroupRules(testAccount, testRegion, "sg-1", []EC2SecurityGroupRule{byID("sgr-a", false), tcpRule("", 22, "10.1.0.0/16"), bad})
+		assert.Equal(t, RuleNotFoundError{ID: bad.ID}, err, "revoke %s", bad.ID)
+	}
+	rules, err := r.ListSecurityGroupRules(testAccount, testRegion, "sg-1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sgr-a 0/0", "sgr-b 0/1", "sgr-e 0/0"}, ruleSlots(rules), "a failed revoke deletes nothing")
+
+	require.NoError(t, r.RevokeSecurityGroupRules(testAccount, testRegion, "sg-1", []EC2SecurityGroupRule{byID("sgr-a", false), byID("sgr-e", true)}))
+	rules, err = r.ListSecurityGroupRules(testAccount, testRegion, "sg-1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sgr-b 0/1"}, ruleSlots(rules), "the permission keeps its other source")
+}
+
 func TestEIPCreateGetDelete(t *testing.T) {
 	r := setupRepo(t)
 	eip := &EC2EIP{

@@ -221,7 +221,7 @@ entries:
     misconfigured_exempt: true
     misconfigured_exempt_reason: "Rules ride the parent SG's existence gate (TestEC2_SecurityGroupCRUDPlusRules covers missing-SG)."
     updates_dir_name: update_security_group_rules
-    integration_test_func_name: "^TestEC2_SecurityGroupCRUDPlusRules$"
+    integration_test_func_name: "^(TestEC2_SecurityGroupCRUDPlusRules|TestEC2_DescribeSecurityGroupRules)$"
   - aws_service: ec2
     aws_resource_type: aws_instance
     scenario_resource_type: compute

@@ -32,7 +32,6 @@ var knownRed = map[string]knownRedEntry{
 
 	"updates/update_iam_role_description": {stage: "apply v2", fragment: "UpdateRoleDescription", owner: "none: follow-up"},
 	"updates/update_s3_bucket_versioning": {stage: "apply v1", fragment: "GetBucketPolicy", owner: "none: follow-up"},
-	"updates/update_security_group_rules": {stage: "plan v1", fragment: "DescribeSecurityGroupRules", owner: "none: follow-up"},
 }
 
 // checkKnownRed judges one example's outcome (failure == nil means it
