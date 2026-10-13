@@ -85,7 +85,7 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "ModifySubnetAttribute":
 		app.ec2ModifySubnetAttribute(w, account, region, req)
 
-	// ----- NetworkInterface (instance primary ENIs) -----
+	// ----- NetworkInterface (instance primary ENIs, loaded ENIs) -----
 	case "DescribeNetworkInterfaces":
 		app.ec2DescribeNetworkInterfaces(w, account, region, req)
 	case "ModifyNetworkInterfaceAttribute":
@@ -1369,14 +1369,33 @@ func (app *Application) ec2DeleteRoute(w http.ResponseWriter, account, region st
 // ----- EIP handlers -----
 
 type ec2AddressXML struct {
-	AllocationId       string              `xml:"allocationId"`
-	PublicIp           string              `xml:"publicIp"`
-	Domain             string              `xml:"domain"`
-	AssociationId      string              `xml:"associationId,omitempty"`
-	InstanceId         string              `xml:"instanceId,omitempty"`
-	NetworkInterfaceId string              `xml:"networkInterfaceId,omitempty"`
-	PrivateIpAddress   string              `xml:"privateIpAddress,omitempty"`
-	TagSet             []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
+	AllocationId            string              `xml:"allocationId"`
+	PublicIp                string              `xml:"publicIp"`
+	Domain                  string              `xml:"domain"`
+	AssociationId           string              `xml:"associationId,omitempty"`
+	InstanceId              string              `xml:"instanceId,omitempty"`
+	NetworkInterfaceId      string              `xml:"networkInterfaceId,omitempty"`
+	NetworkInterfaceOwnerId string              `xml:"networkInterfaceOwnerId,omitempty"`
+	PrivateIpAddress        string              `xml:"privateIpAddress,omitempty"`
+	PublicIpv4Pool          string              `xml:"publicIpv4Pool,omitempty"`
+	NetworkBorderGroup      string              `xml:"networkBorderGroup,omitempty"`
+	TagSet                  []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
+}
+
+// ec2AddressToXML renders eip with its tags. The network interface it
+// is associated with is account's: fakeaws holds no other account's.
+func ec2AddressToXML(account string, eip *repository.EC2EIP, tags []ec2ResourceTagXML) ec2AddressXML {
+	x := ec2AddressXML{
+		AllocationId: eip.AllocationID, PublicIp: eip.PublicIP, Domain: eip.Domain,
+		AssociationId: eip.AssociationID, InstanceId: eip.InstanceID,
+		NetworkInterfaceId: eip.NetworkInterfaceID, PrivateIpAddress: eip.PrivateIP,
+		PublicIpv4Pool: eip.PublicIPv4Pool, NetworkBorderGroup: eip.NetworkBorderGroup,
+		TagSet: tags,
+	}
+	if eip.NetworkInterfaceID != "" {
+		x.NetworkInterfaceOwnerId = account
+	}
+	return x
 }
 
 type ec2AllocateAddressResult struct {
@@ -1534,12 +1553,7 @@ func (app *Application) ec2DescribeAddresses(w http.ResponseWriter, account, reg
 		if !addressFilters.matches(eip, filters, tags) {
 			continue
 		}
-		out.AddressSet = append(out.AddressSet, ec2AddressXML{
-			AllocationId: eip.AllocationID, PublicIp: eip.PublicIP, Domain: eip.Domain,
-			AssociationId: eip.AssociationID, InstanceId: eip.InstanceID,
-			NetworkInterfaceId: eip.NetworkInterfaceID, PrivateIpAddress: eip.PrivateIP,
-			TagSet: tags[eip.AllocationID],
-		})
+		out.AddressSet = append(out.AddressSet, ec2AddressToXML(account, eip, tags[eip.AllocationID]))
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeAddresses", &out)
 }
@@ -2239,7 +2253,16 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, r
 			fmt.Sprintf("the specified group: %q name: %q cannot be deleted by a user", id, repository.DefaultGroupName))
 		return
 	}
-	if err := app.repo.DeleteSecurityGroup(account, region, id); err != nil {
+	err = app.repo.DeleteSecurityGroup(account, region, id)
+	if errors.Is(err, repository.ErrGroupHeld) {
+		// EC2's code, which aws_security_group's delete retries until its
+		// timeout; it fails at once on any other.
+		// UNVERIFIED(aws-code): DependencyViolation from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "DependencyViolation",
+			fmt.Sprintf("resource %s has a dependent object", id))
+		return
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -2586,17 +2609,30 @@ type ec2InstanceXML struct {
 // item and a DescribeNetworkInterfaces item; the SDK ignores the
 // fields one shape has and the other lacks.
 type ec2NetworkInterfaceXML struct {
-	NetworkInterfaceId string                `xml:"networkInterfaceId"`
-	SubnetId           string                `xml:"subnetId"`
-	VpcId              string                `xml:"vpcId"`
-	OwnerId            string                `xml:"ownerId"`
-	Status             string                `xml:"status"`
-	InterfaceType      string                `xml:"interfaceType"`
-	PrivateIpAddress   string                `xml:"privateIpAddress"`
-	SourceDestCheck    bool                  `xml:"sourceDestCheck"`
-	GroupSet           []ec2InstanceSGXML    `xml:"groupSet>item"`
-	Attachment         ec2ENIAttachmentXML   `xml:"attachment"`
-	Association        *ec2ENIAssociationXML `xml:"association,omitempty"`
+	NetworkInterfaceId    string                `xml:"networkInterfaceId"`
+	SubnetId              string                `xml:"subnetId"`
+	VpcId                 string                `xml:"vpcId"`
+	AvailabilityZone      string                `xml:"availabilityZone,omitempty"`
+	Description           string                `xml:"description,omitempty"`
+	OwnerId               string                `xml:"ownerId"`
+	RequesterManaged      bool                  `xml:"requesterManaged"`
+	Status                string                `xml:"status"`
+	InterfaceType         string                `xml:"interfaceType"`
+	MacAddress            string                `xml:"macAddress,omitempty"`
+	PrivateIpAddress      string                `xml:"privateIpAddress"`
+	PrivateDnsName        string                `xml:"privateDnsName,omitempty"`
+	SourceDestCheck       bool                  `xml:"sourceDestCheck"`
+	GroupSet              []ec2InstanceSGXML    `xml:"groupSet>item"`
+	Attachment            *ec2ENIAttachmentXML  `xml:"attachment,omitempty"`
+	Association           *ec2ENIAssociationXML `xml:"association,omitempty"`
+	PrivateIpAddressesSet []ec2ENIPrivateIPXML  `xml:"privateIpAddressesSet>item,omitempty"`
+	TagSet                []ec2ResourceTagXML   `xml:"tagSet>item,omitempty"`
+}
+
+type ec2ENIPrivateIPXML struct {
+	PrivateIpAddress string `xml:"privateIpAddress"`
+	PrivateDnsName   string `xml:"privateDnsName,omitempty"`
+	Primary          bool   `xml:"primary"`
 }
 
 type ec2ENIAttachmentXML struct {
@@ -2610,8 +2646,10 @@ type ec2ENIAttachmentXML struct {
 }
 
 type ec2ENIAssociationXML struct {
-	PublicIp  string `xml:"publicIp"`
-	IpOwnerId string `xml:"ipOwnerId"`
+	PublicIp      string `xml:"publicIp"`
+	IpOwnerId     string `xml:"ipOwnerId"`
+	AllocationId  string `xml:"allocationId,omitempty"`
+	AssociationId string `xml:"associationId,omitempty"`
 }
 
 type ec2DescribeNetworkInterfacesResult struct {
@@ -2695,7 +2733,7 @@ func ec2InstanceToXML(account string, inst *repository.EC2Instance, eni *reposit
 	if eni == nil {
 		return x
 	}
-	eniXML := ec2ENIToXML(account, eni)
+	eniXML := ec2ENIToXML(account, eni, nil)
 	x.SubnetId = eni.SubnetID
 	x.PrivateIpAddress = eni.PrivateIP
 	x.IpAddress = eni.PublicIP
@@ -2705,30 +2743,50 @@ func ec2InstanceToXML(account string, inst *repository.EC2Instance, eni *reposit
 	return x
 }
 
-func ec2ENIToXML(account string, eni *repository.EC2NetworkInterface) ec2NetworkInterfaceXML {
+// ec2ENIToXML renders eni; eip is the address associated with it, nil
+// for none or when the caller does not read it (an instance's
+// networkInterfaceSet). An ENI with no instance has no attachment. A
+// launched ENI, which stores no owner, status or type, answers account,
+// in-use and interface.
+func ec2ENIToXML(account string, eni *repository.EC2NetworkInterface, eip *repository.EC2EIP) ec2NetworkInterfaceXML {
 	x := ec2NetworkInterfaceXML{
 		NetworkInterfaceId: eni.ID,
 		SubnetId:           eni.SubnetID,
 		VpcId:              eni.VPCID,
-		OwnerId:            account,
-		Status:             "in-use",
-		InterfaceType:      "interface",
+		AvailabilityZone:   eni.AvailabilityZone,
+		Description:        eni.Description,
+		OwnerId:            cmp.Or(eni.OwnerID, account),
+		RequesterManaged:   eni.RequesterManaged,
+		Status:             cmp.Or(eni.Status, "in-use"),
+		InterfaceType:      cmp.Or(eni.InterfaceType, "interface"),
+		MacAddress:         eni.MacAddress,
 		PrivateIpAddress:   eni.PrivateIP,
+		PrivateDnsName:     eni.PrivateDNSName,
 		SourceDestCheck:    eni.SourceDestCheck,
 		GroupSet:           []ec2InstanceSGXML{},
-		Attachment: ec2ENIAttachmentXML{
+	}
+	if eni.InstanceID != "" {
+		x.Attachment = &ec2ENIAttachmentXML{
 			AttachmentId:        eni.AttachmentID,
 			InstanceId:          eni.InstanceID,
 			InstanceOwnerId:     account,
 			Status:              "attached",
 			DeleteOnTermination: true,
-		},
+		}
 	}
 	for _, sgID := range eni.SecurityGroupIDs {
 		x.GroupSet = append(x.GroupSet, ec2InstanceSGXML{GroupId: sgID})
 	}
-	if eni.PublicIP != "" {
+	switch {
+	case eip != nil:
+		x.Association = &ec2ENIAssociationXML{PublicIp: eip.PublicIP, IpOwnerId: account,
+			AllocationId: eip.AllocationID, AssociationId: eip.AssociationID}
+	case eni.PublicIP != "":
 		x.Association = &ec2ENIAssociationXML{PublicIp: eni.PublicIP, IpOwnerId: "amazon"}
+	}
+	for _, ip := range eni.PrivateIPAddresses {
+		x.PrivateIpAddressesSet = append(x.PrivateIpAddressesSet,
+			ec2ENIPrivateIPXML{PrivateIpAddress: ip.Address, PrivateDnsName: ip.PrivateDNSName, Primary: ip.Primary})
 	}
 	return x
 }
@@ -3047,7 +3105,8 @@ func (app *Application) instanceENIs(account string) (map[string]*repository.EC2
 	return enisByInstance(enis), nil
 }
 
-// enisByInstance maps instance id → ENI.
+// enisByInstance maps instance id → ENI. ENIs with no instance share
+// the entry "", which no instance's id looks up.
 func enisByInstance(enis []*repository.EC2NetworkInterface) map[string]*repository.EC2NetworkInterface {
 	out := make(map[string]*repository.EC2NetworkInterface, len(enis))
 	for _, eni := range enis {
@@ -3063,13 +3122,17 @@ func enisByInstance(enis []*repository.EC2NetworkInterface) map[string]*reposito
 // provider's aws_subnet and aws_security_group deletes list lingering
 // ENIs by subnet-id and group-id.
 var eniFilterValues = map[string]func(ec2NetworkInterfaceXML) []string{
-	"network-interface-id":     func(e ec2NetworkInterfaceXML) []string { return []string{e.NetworkInterfaceId} },
-	"attachment.instance-id":   func(e ec2NetworkInterfaceXML) []string { return []string{e.Attachment.InstanceId} },
-	"attachment.attachment-id": func(e ec2NetworkInterfaceXML) []string { return []string{e.Attachment.AttachmentId} },
-	"subnet-id":                func(e ec2NetworkInterfaceXML) []string { return []string{e.SubnetId} },
-	"vpc-id":                   func(e ec2NetworkInterfaceXML) []string { return []string{e.VpcId} },
-	"private-ip-address":       func(e ec2NetworkInterfaceXML) []string { return []string{e.PrivateIpAddress} },
-	"owner-id":                 func(e ec2NetworkInterfaceXML) []string { return []string{e.OwnerId} },
+	"network-interface-id": func(e ec2NetworkInterfaceXML) []string { return []string{e.NetworkInterfaceId} },
+	"attachment.instance-id": func(e ec2NetworkInterfaceXML) []string {
+		return eniAttachment(e, func(a *ec2ENIAttachmentXML) string { return a.InstanceId })
+	},
+	"attachment.attachment-id": func(e ec2NetworkInterfaceXML) []string {
+		return eniAttachment(e, func(a *ec2ENIAttachmentXML) string { return a.AttachmentId })
+	},
+	"subnet-id":          func(e ec2NetworkInterfaceXML) []string { return []string{e.SubnetId} },
+	"vpc-id":             func(e ec2NetworkInterfaceXML) []string { return []string{e.VpcId} },
+	"private-ip-address": func(e ec2NetworkInterfaceXML) []string { return []string{e.PrivateIpAddress} },
+	"owner-id":           func(e ec2NetworkInterfaceXML) []string { return []string{e.OwnerId} },
 	"group-id": func(e ec2NetworkInterfaceXML) []string {
 		var out []string
 		for _, g := range e.GroupSet {
@@ -3077,6 +3140,15 @@ var eniFilterValues = map[string]func(ec2NetworkInterfaceXML) []string{
 		}
 		return out
 	},
+}
+
+// eniAttachment is field of e's attachment, none when e has none: an
+// attachment filter matches no standalone ENI.
+func eniAttachment(e ec2NetworkInterfaceXML, field func(*ec2ENIAttachmentXML) string) []string {
+	if e.Attachment == nil {
+		return nil
+	}
+	return []string{field(e.Attachment)}
 }
 
 var eniFilters = ec2FilterTable[ec2NetworkInterfaceXML]{
@@ -3102,7 +3174,8 @@ func writeENINotFound(w http.ResponseWriter, id string) {
 		fmt.Sprintf("The networkInterface ID '%s' does not exist", id))
 }
 
-// ec2DescribeNetworkInterfaces lists instance ENIs. An unknown
+// ec2DescribeNetworkInterfaces lists ENIs, each with its tags and the
+// association of the address associated with it. An unknown
 // NetworkInterfaceId.N is InvalidNetworkInterfaceID.NotFound, which
 // the provider reads as "gone"; an unsupported filter is refused
 // rather than ignored.
@@ -3123,6 +3196,11 @@ func (app *Application) ec2DescribeNetworkInterfaces(w http.ResponseWriter, acco
 			return
 		}
 	}
+	eips, err := app.repo.ListEIPs(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
 	tags, ok := app.tagSets(w, account)
 	if !ok {
 		return
@@ -3132,21 +3210,40 @@ func (app *Application) ec2DescribeNetworkInterfaces(w http.ResponseWriter, acco
 		if len(ids) > 0 && !slices.Contains(ids, eni.ID) {
 			continue
 		}
-		if x := ec2ENIToXML(account, eni); eniFilters.matches(x, filters, tags) {
+		var eip *repository.EC2EIP
+		if i := slices.IndexFunc(eips, func(e *repository.EC2EIP) bool { return e.NetworkInterfaceID == eni.ID }); i >= 0 {
+			eip = eips[i]
+		}
+		x := ec2ENIToXML(account, eni, eip)
+		x.TagSet = tags[eni.ID]
+		if eniFilters.matches(x, filters, tags) {
 			out.NetworkInterfaceSet = append(out.NetworkInterfaceSet, x)
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeNetworkInterfaces", &out)
 }
 
-// ec2ModifyNetworkInterfaceAttribute models the Groups attribute only:
-// the provider sends vpc_security_group_ids changes here, to the
-// instance's primary ENI, so they show up in the instance's groupSet.
+// ec2ModifyNetworkInterfaceAttribute models the Groups and Description
+// attributes: the provider sends vpc_security_group_ids changes here,
+// to the instance's primary ENI, so they show up in the instance's
+// groupSet, and aws_network_interface's description as Description.Value.
+// One call modifies one attribute, as on EC2: both at once is refused,
+// and so is any other param (SourceDestCheck.Value, Attachment.*, ...).
 func (app *Application) ec2ModifyNetworkInterfaceAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	if ec2RefuseUnread(w, req, "NetworkInterfaceId", "SecurityGroupId.N", "Description.Value") {
+		return
+	}
 	id := req.Params.Get("NetworkInterfaceId")
 	groups := queryListValues(req.Params, "SecurityGroupId.")
-	if id == "" || len(groups) == 0 {
-		ec2Refuse(w, req.Action, "no NetworkInterfaceId or SecurityGroupId.N (only the Groups attribute is modelled)")
+	description, hasDescription := req.Params.Get("Description.Value"), req.Params.Has("Description.Value")
+	if id == "" || (len(groups) == 0 && !hasDescription) {
+		ec2Refuse(w, req.Action, "no NetworkInterfaceId, or neither SecurityGroupId.N nor Description.Value (only the Groups and Description attributes are modelled)")
+		return
+	}
+	if len(groups) > 0 && hasDescription {
+		// EC2 modifies one attribute per call; the API reference names no
+		// error code for two, so fakeaws refuses rather than guess one.
+		ec2Refuse(w, req.Action, "SecurityGroupId.N", "Description.Value")
 		return
 	}
 	eni, err := app.repo.GetNetworkInterface(account, region, id)
@@ -3154,12 +3251,16 @@ func (app *Application) ec2ModifyNetworkInterfaceAttribute(w http.ResponseWriter
 		writeENINotFound(w, id)
 		return
 	}
-	if err == nil {
+	if err == nil && len(groups) > 0 {
 		_, err = app.checkSubnetGroups(account, region, eni.SubnetID, groups)
 	}
 	if err == nil {
 		err = app.repo.UpdateNetworkInterface(account, region, id, func(e *repository.EC2NetworkInterface) {
-			e.SecurityGroupIDs = groups
+			if hasDescription {
+				e.Description = description
+			} else {
+				e.SecurityGroupIDs = groups
+			}
 		})
 	}
 	if err != nil {
@@ -3326,15 +3427,20 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, re
 type ec2KeyPairXML struct {
 	KeyPairId      string              `xml:"keyPairId,omitempty"`
 	KeyName        string              `xml:"keyName"`
+	KeyType        string              `xml:"keyType,omitempty"`
 	KeyFingerprint string              `xml:"keyFingerprint"`
 	PublicKey      string              `xml:"publicKey,omitempty"`
+	CreateTime     string              `xml:"createTime,omitempty"`
 	TagSet         []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
 }
 
 type ec2ImportKeyPairResult = ec2KeyPairXML
 
+// ec2KeyPairToXML renders kp: its createTime is its created_at, a
+// loaded key's as recorded.
 func ec2KeyPairToXML(kp *repository.EC2KeyPair, tags map[string][]ec2ResourceTagXML) ec2KeyPairXML {
-	return ec2KeyPairXML{KeyPairId: kp.ID, KeyName: kp.Name, KeyFingerprint: kp.Fingerprint, TagSet: tags[kp.ID]}
+	return ec2KeyPairXML{KeyPairId: kp.ID, KeyName: kp.Name, KeyType: kp.KeyType, KeyFingerprint: kp.Fingerprint,
+		CreateTime: kp.CreatedAt, TagSet: tags[kp.ID]}
 }
 
 type ec2DescribeKeyPairsResult struct {
@@ -3395,6 +3501,7 @@ func (app *Application) ec2ImportKeyPair(w http.ResponseWriter, account, region 
 		return
 	}
 	out := ec2KeyPairToXML(kp, nil)
+	out.CreateTime = "" // ImportKeyPair answers none
 	for _, t := range tags {
 		out.TagSet = append(out.TagSet, ec2ResourceTagXML{Key: t.Key, Value: t.Value})
 	}

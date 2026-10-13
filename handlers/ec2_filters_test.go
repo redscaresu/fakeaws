@@ -37,7 +37,7 @@ func matchingENIs(t *testing.T, query string, tags map[string][]ec2ResourceTagXM
 	require.Empty(t, eniTable.unmodelled(filters), query)
 	ids := []string{}
 	for _, e := range testENIs {
-		if eniTable.matches(ec2ENIToXML("", e), filters, tags) {
+		if eniTable.matches(ec2ENIToXML("", e, nil), filters, tags) {
 			ids = append(ids, e.ID)
 		}
 	}

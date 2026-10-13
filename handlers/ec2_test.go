@@ -1722,6 +1722,22 @@ func TestEC2_ModifyInstanceAttributeSourceDestCheck(t *testing.T) {
 	assert.False(t, inst.ENIs[0].SourceDestCheck, "ENI sourceDestCheck: %s", raw)
 }
 
+// TestEC2_DeleteSecurityGroupHeldByAnInstanceENI: a group an instance's
+// ENI holds is 400 DependencyViolation naming it, as on EC2, and
+// deletes once the instance is terminated (its ENI goes with it).
+func TestEC2_DeleteSecurityGroupHeldByAnInstanceENI(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	n := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+	id := runInstance(t, srv, region, nicParams(n.subnet, n.sgs, false))
+	resp, body := ec2Call(t, srv, region, "DeleteSecurityGroup", url.Values{"GroupId": {n.sgs[0]}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, "DependencyViolation", extractEC2Tag(body, "Code"))
+	assert.Equal(t, "resource "+n.sgs[0]+" has a dependent object", extractEC2Tag(body, "Message"))
+	mustOK(t)(ec2Call(t, srv, region, "TerminateInstances", url.Values{"InstanceId.1": {id}}))
+	mustOK(t)(ec2Call(t, srv, region, "DeleteSecurityGroup", url.Values{"GroupId": {n.sgs[0]}}))
+}
+
 func TestEC2_ModifyNetworkInterfaceAttributeGroups(t *testing.T) {
 	const region = "us-east-1"
 	srv := newTestServer(t, ":memory:")

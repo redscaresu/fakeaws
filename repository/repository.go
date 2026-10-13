@@ -81,8 +81,10 @@ type Cache interface {
 // would answer false. 5 lets a route table association be main or a
 // gateway's, with no subnet, and gives routes their origin and state. 6
 // moves security group rules from the groups' ingress and egress JSON
-// columns to ec2_security_group_rules rows.
-const dbSchemaVersion = 6
+// columns to ec2_security_group_rules rows. 7 lets a network interface
+// have no instance (ec2_network_interfaces.instance_id is nullable) and
+// gives it its own subnet foreign key.
+const dbSchemaVersion = 7
 
 // New opens the SQLite database at dbPath, refuses it with
 // models.ErrConflict unless it is new or at dbSchemaVersion, applies

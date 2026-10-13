@@ -364,6 +364,8 @@ type EC2EIP struct {
 	InstanceID         string `json:"instance_id,omitempty"`
 	AssociationID      string `json:"association_id,omitempty"`
 	PrivateIP          string `json:"private_ip,omitempty"`
+	PublicIPv4Pool     string `json:"public_ipv4_pool,omitempty"`     // a loaded address's; AllocateAddress sets none
+	NetworkBorderGroup string `json:"network_border_group,omitempty"` // likewise
 	Region             string `json:"region"`
 	CreatedAt          string `json:"created_at"`
 }
@@ -521,32 +523,29 @@ func (r *Repository) ListVPCs(account, region string) ([]*EC2VPC, error) {
 }
 
 // DeleteVPC removes a VPC, optionally scoped to a region. Empty
-// region acts as account-wide (matches the Get* contract).
+// region acts as account-wide (matches the Get* contract). The detach
+// and the delete share one transaction, so a refused delete (a subnet
+// an interface or instance is in) leaves the gateways attached.
 func (r *Repository) DeleteVPC(account, region, id string) error {
-	// Detach any attached internet gateways manually — composite FK
-	// SET NULL would NULL account_id too. Real EC2's contract is
-	// detach-on-vpc-delete (the IGW survives, just unattached).
-	if _, err := r.db.Exec(
-		`UPDATE ec2_internet_gateways SET `+igwDetach+` WHERE account_id = ? AND vpc_id = ?`,
-		account, id,
-	); err != nil {
-		return fmt.Errorf("detach igws before vpc delete: %w", err)
-	}
-	var res sql.Result
-	var err error
-	if region == "" {
-		res, err = r.db.Exec(`DELETE FROM ec2_vpcs WHERE account_id = ? AND id = ?`, account, id)
-	} else {
-		res, err = r.db.Exec(`DELETE FROM ec2_vpcs WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
-	}
-	if err != nil {
-		return mapDeleteError(err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return models.ErrNotFound
-	}
-	return nil
+	return r.inTx(func(tx *sql.Tx) error {
+		// Detach any attached internet gateways manually — composite FK
+		// SET NULL would NULL account_id too. Real EC2's contract is
+		// detach-on-vpc-delete (the IGW survives, just unattached).
+		if _, err := tx.Exec(
+			`UPDATE ec2_internet_gateways SET `+igwDetach+` WHERE account_id = ? AND vpc_id = ?`,
+			account, id,
+		); err != nil {
+			return fmt.Errorf("detach igws before vpc delete: %w", err)
+		}
+		res, err := tx.Exec(`DELETE FROM ec2_vpcs WHERE account_id = ? AND (? = '' OR region = ?) AND id = ?`, account, region, region, id)
+		if err != nil {
+			return mapDeleteError(err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return models.ErrNotFound
+		}
+		return nil
+	})
 }
 
 // ----- Subnet -----
@@ -1314,22 +1313,28 @@ func revokeRuleByID(ex execer, account string, rule EC2SecurityGroupRule) error 
 	return err
 }
 
+// ErrGroupHeld refuses deleting a security group a network interface
+// holds.
+var ErrGroupHeld = fmt.Errorf("%w: a network interface holds the security group", models.ErrInUse)
+
+// DeleteSecurityGroup deletes group id, optionally scoped to a region.
+// A group a network interface holds (an instance's or a loaded one) is
+// ErrGroupHeld: the group ids live in the interface's data, which no
+// foreign key sees, so the DELETE itself refuses it.
 func (r *Repository) DeleteSecurityGroup(account, region, id string) error {
-	var res sql.Result
-	var err error
-	if region == "" {
-		res, err = r.db.Exec(`DELETE FROM ec2_security_groups WHERE account_id = ? AND id = ?`, account, id)
-	} else {
-		res, err = r.db.Exec(`DELETE FROM ec2_security_groups WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
-	}
+	res, err := r.db.Exec(`DELETE FROM ec2_security_groups WHERE account_id = ? AND (? = '' OR region = ?) AND id = ?
+		AND NOT EXISTS (SELECT 1 FROM ec2_network_interfaces eni, json_each(eni.data, '$.security_group_ids') g
+			WHERE eni.account_id = ? AND g.value = ?)`, account, region, region, id, account, id)
 	if err != nil {
 		return mapDeleteError(err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return models.ErrNotFound
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
 	}
-	return nil
+	if _, err := r.GetSecurityGroup(account, region, id); err != nil {
+		return err
+	}
+	return ErrGroupHeld
 }
 
 // ----- EIP -----
@@ -1355,14 +1360,22 @@ func (r *Repository) CreateEIP(account string, eip *EC2EIP) error {
 	if eip.PublicIP, err = freeIP(eip.PublicIP, held); err != nil {
 		return err
 	}
-	body, _ := json.Marshal(eip)
-	if _, err := tx.Exec(
-		`INSERT INTO ec2_eips (account_id, region, allocation_id, domain, public_ip, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		account, eip.Region, eip.AllocationID, eip.Domain, eip.PublicIP, string(body), eip.CreatedAt,
-	); err != nil {
-		return mapInsertError(err)
+	if err := insertEIP(tx, account, eip); err != nil {
+		return err
 	}
 	return tx.Commit()
+}
+
+// insertEIP stores eip under account with its association, if any.
+func insertEIP(ex execer, account string, eip *EC2EIP) error {
+	body, _ := json.Marshal(eip)
+	_, err := ex.Exec(
+		`INSERT INTO ec2_eips (account_id, region, allocation_id, domain, public_ip, network_interface_id, instance_id, association_id, data, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		account, eip.Region, eip.AllocationID, eip.Domain, eip.PublicIP, nullIfEmpty(eip.NetworkInterfaceID),
+		nullIfEmpty(eip.InstanceID), nullIfEmpty(eip.AssociationID), string(body), eip.CreatedAt,
+	)
+	return mapInsertError(err)
 }
 
 // freeIP returns the first IPv4 address from want up, wrapping within
@@ -1420,7 +1433,7 @@ func (r *Repository) AssociateEIP(account string, eip *EC2EIP, eni *EC2NetworkIn
 		`UPDATE ec2_eips SET network_interface_id = ?, instance_id = ?, association_id = ?, data = ?
 		   WHERE account_id = ? AND allocation_id = ? AND association_id IS NULL
 		     AND NOT EXISTS (SELECT 1 FROM ec2_eips WHERE account_id = ? AND network_interface_id = ?)`,
-		eip.NetworkInterfaceID, eip.InstanceID, eip.AssociationID, string(body), account, eip.AllocationID,
+		eip.NetworkInterfaceID, nullIfEmpty(eip.InstanceID), eip.AssociationID, string(body), account, eip.AllocationID,
 		account, eip.NetworkInterfaceID,
 	)
 	if err != nil {

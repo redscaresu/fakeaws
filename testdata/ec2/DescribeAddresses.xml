@@ -1,0 +1,17 @@
+<!-- Source: AWS EC2 API reference, DescribeAddresses, Example (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeAddresses.html), request AllocationId.1, with edits so the address is associated with DescribeNetworkInterfaces.xml's standalone eni-0f62d866: instanceId is dropped, networkInterfaceId eni-ef229886 is eni-0f62d866, networkInterfaceOwnerId 053230519467 is 111122223333 and privateIpAddress 10.0.0.228 is that interface's 10.0.2.146. publicIpv4Pool and networkBorderGroup are added, as the Address data type's members of those names (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_Address.html), which the example lacks: Amazon's pool, and the fixtures' region us-west-2. -->
+<DescribeAddressesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+   <requestId>f7de5e98-491a-4c19-a92d-908d6EXAMPLE</requestId>
+   <addressesSet>
+     <item>
+       <publicIp>203.0.113.41</publicIp>
+       <allocationId>eipalloc-08229861</allocationId>
+       <domain>vpc</domain>
+       <associationId>eipassoc-f0229899</associationId>
+       <networkInterfaceId>eni-0f62d866</networkInterfaceId>
+       <networkInterfaceOwnerId>111122223333</networkInterfaceOwnerId>
+       <privateIpAddress>10.0.2.146</privateIpAddress>
+       <publicIpv4Pool>amazon</publicIpv4Pool>
+       <networkBorderGroup>us-west-2</networkBorderGroup>
+     </item>
+   </addressesSet>
+</DescribeAddressesResponse>

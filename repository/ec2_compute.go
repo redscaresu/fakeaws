@@ -9,15 +9,19 @@
 //	ec2_instances.iam_instance_profile_name
 //	                               → iam_instance_profiles.name (cross-service FK, nullable)
 //	ec2_network_interfaces.instance_id
-//	                               → ec2_instances.id   (FK, CASCADE)
+//	                               → ec2_instances.id   (FK, CASCADE, nullable)
+//	ec2_network_interfaces.subnet_id
+//	                               → ec2_subnets.id     (FK, RESTRICT)
 //
 // Each instance has one primary ENI, which owns its private and public
 // IPs and its security groups (the instance's groupSet is read from
-// it). UNIQUE (subnet_id, private_ip) keeps private IPs distinct.
+// it). A loaded ENI may have no instance (instance_id NULL). UNIQUE
+// (subnet_id, private_ip) keeps private IPs distinct.
 //
 // ON DELETE RESTRICT on subnet_id is the load-bearing bit: a subnet
-// that still has running instances cannot be deleted; real EC2's
-// DeleteSubnet returns DependencyViolation in that case.
+// that still has running instances, or a loaded ENI with no instance,
+// cannot be deleted; real EC2's DeleteSubnet returns DependencyViolation
+// in that case.
 //
 // AMIs are read-only at v1 — handlers/ec2.go ships a fixture set
 // (ami-0abcd1234 etc.) and the repository just stores the set so
@@ -55,13 +59,14 @@ var ec2ComputeMigrations = []string{
 		account_id  TEXT NOT NULL,
 		region      TEXT NOT NULL,
 		id          TEXT NOT NULL,
-		instance_id TEXT NOT NULL,
+		instance_id TEXT,
 		subnet_id   TEXT NOT NULL,
 		private_ip  TEXT NOT NULL,
 		data        TEXT NOT NULL,
 		PRIMARY KEY (account_id, id),
 		UNIQUE (account_id, subnet_id, private_ip),
-		FOREIGN KEY (account_id, instance_id) REFERENCES ec2_instances(account_id, id) ON DELETE CASCADE
+		FOREIGN KEY (account_id, instance_id) REFERENCES ec2_instances(account_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (account_id, subnet_id) REFERENCES ec2_subnets(account_id, id) ON DELETE RESTRICT
 	)`,
 	// ec2_key_pairs is keyed by name (the AWS contract — names are
 	// per-account-per-region unique).
@@ -128,12 +133,16 @@ type EC2InstanceAttributes struct {
 }
 
 // EC2NetworkInterface is an instance's primary ENI (device index 0),
-// deleted when the instance terminates. PublicIP is empty unless the
-// launch asked for one (AutoPublicIP) or an Elastic IP is associated.
+// deleted when the instance terminates, or a loaded ENI, which may have
+// no instance (InstanceID and AttachmentID empty). PublicIP is empty
+// unless the launch asked for one (AutoPublicIP) or an Elastic IP is
+// associated. The fields from Description on are a loaded ENI's, as
+// recorded; a launched ENI leaves them empty and answers the defaults
+// handlers/ec2.go's ec2ENIToXML gives.
 type EC2NetworkInterface struct {
 	ID               string   `json:"network_interface_id"`
-	AttachmentID     string   `json:"attachment_id"`
-	InstanceID       string   `json:"instance_id"`
+	AttachmentID     string   `json:"attachment_id,omitempty"`
+	InstanceID       string   `json:"instance_id,omitempty"`
 	SubnetID         string   `json:"subnet_id"`
 	VPCID            string   `json:"vpc_id"`
 	PrivateIP        string   `json:"private_ip"`
@@ -142,11 +151,29 @@ type EC2NetworkInterface struct {
 	SecurityGroupIDs []string `json:"security_group_ids"`
 	SourceDestCheck  bool     `json:"source_dest_check"`
 	Region           string   `json:"region"`
+
+	Description        string                `json:"description,omitempty"`
+	MacAddress         string                `json:"mac_address,omitempty"`
+	PrivateDNSName     string                `json:"private_dns_name,omitempty"`
+	AvailabilityZone   string                `json:"availability_zone,omitempty"`
+	RequesterManaged   bool                  `json:"requester_managed,omitempty"`
+	InterfaceType      string                `json:"interface_type,omitempty"`
+	OwnerID            string                `json:"owner_id,omitempty"`
+	Status             string                `json:"status,omitempty"`
+	PrivateIPAddresses []EC2PrivateIPAddress `json:"private_ip_addresses,omitempty"`
+}
+
+// EC2PrivateIPAddress is one of a loaded ENI's private IPv4 addresses.
+type EC2PrivateIPAddress struct {
+	Address        string `json:"address"`
+	Primary        bool   `json:"primary,omitempty"`
+	PrivateDNSName string `json:"private_dns_name,omitempty"`
 }
 
 type EC2KeyPair struct {
 	ID          string `json:"key_pair_id,omitempty"`
 	Name        string `json:"name"`
+	KeyType     string `json:"key_type,omitempty"` // a loaded key's; ImportKeyPair sets none
 	PublicKey   string `json:"public_key"`
 	Fingerprint string `json:"fingerprint"`
 	Region      string `json:"region"`
@@ -218,7 +245,7 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance, eni *EC2N
 	); err != nil {
 		return mapInsertError(err)
 	}
-	used, err := stringSet(tx, `SELECT private_ip FROM ec2_network_interfaces WHERE account_id = ? AND subnet_id = ?`, account, subnet.ID)
+	used, err := stringSet(tx, subnetPrivateIPs, account, subnet.ID, account, subnet.ID)
 	if err != nil {
 		return err
 	}
@@ -228,15 +255,29 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance, eni *EC2N
 	if err := claimPublicIP(tx, account, eni); err != nil {
 		return err
 	}
-	eniBody, _ := json.Marshal(eni)
-	if _, err := tx.Exec(
-		`INSERT INTO ec2_network_interfaces (account_id, region, id, instance_id, subnet_id, private_ip, data) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		account, eni.Region, eni.ID, eni.InstanceID, eni.SubnetID, eni.PrivateIP, string(eniBody),
-	); err != nil {
-		return mapInsertError(err)
+	if err := insertENI(tx, account, eni); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
+
+// insertENI stores eni under account, with no instance_id when it has
+// no instance.
+func insertENI(ex execer, account string, eni *EC2NetworkInterface) error {
+	body, _ := json.Marshal(eni)
+	_, err := ex.Exec(
+		`INSERT INTO ec2_network_interfaces (account_id, region, id, instance_id, subnet_id, private_ip, data) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		account, eni.Region, eni.ID, nullIfEmpty(eni.InstanceID), eni.SubnetID, eni.PrivateIP, string(body),
+	)
+	return mapInsertError(err)
+}
+
+// subnetPrivateIPs selects every private IP the ENIs of a subnet hold:
+// each primary one, and each a loaded ENI's private_ip_addresses names.
+// Its args are the account and subnet, twice.
+const subnetPrivateIPs = `SELECT private_ip FROM ec2_network_interfaces WHERE account_id = ? AND subnet_id = ?
+	UNION SELECT json_extract(ip.value, '$.address') FROM ec2_network_interfaces eni, json_each(eni.data, '$.private_ip_addresses') ip
+	WHERE eni.account_id = ? AND eni.subnet_id = ?`
 
 // stringSet returns the set of the one text column query selects.
 func stringSet(tx *sql.Tx, query string, args ...any) (map[string]bool, error) {
@@ -569,8 +610,12 @@ func (r *Repository) UpdateNetworkInterface(account, region, id string, change f
 // ----- KeyPair CRUD -----
 
 func (r *Repository) CreateKeyPair(account string, kp *EC2KeyPair) error {
+	return insertKeyPair(r.db, account, kp)
+}
+
+func insertKeyPair(ex execer, account string, kp *EC2KeyPair) error {
 	body, _ := json.Marshal(kp)
-	_, err := r.db.Exec(
+	_, err := ex.Exec(
 		`INSERT INTO ec2_key_pairs (account_id, region, name, public_key, fingerprint, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		account, kp.Region, kp.Name, kp.PublicKey, kp.Fingerprint, string(body), kp.CreatedAt,
 	)

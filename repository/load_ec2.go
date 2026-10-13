@@ -113,6 +113,36 @@ func (lt *LoadTx) PutSecurityGroupRule(account, region string, rule EC2SecurityG
 	return insertRule(lt, account, region, rule)
 }
 
+// ErrNoSubnet refuses a network interface whose subnet is not stored.
+var ErrNoSubnet = fmt.Errorf("%w: the network interface's subnet is not stored", models.ErrNotFound)
+
+// PutNetworkInterface stores eni under account. It answers ErrNoSubnet
+// when its subnet is not stored, and models.ErrNotFound when it is
+// attached to an instance that is not stored, which its foreign keys
+// would refuse.
+func (lt *LoadTx) PutNetworkInterface(account string, eni *EC2NetworkInterface) error {
+	if err := lt.exists(`SELECT 1 FROM ec2_subnets WHERE account_id = ? AND id = ?`, account, eni.SubnetID); err != nil {
+		if errors.Is(err, models.ErrNotFound) {
+			return ErrNoSubnet
+		}
+		return err
+	}
+	if eni.InstanceID != "" {
+		if err := lt.exists(`SELECT 1 FROM ec2_instances WHERE account_id = ? AND id = ?`, account, eni.InstanceID); err != nil {
+			return err
+		}
+	}
+	return insertENI(lt, account, eni)
+}
+
+// PutEIP stores eip under account with its association, if any.
+func (lt *LoadTx) PutEIP(account string, eip *EC2EIP) error { return insertEIP(lt, account, eip) }
+
+// PutKeyPair stores kp under account.
+func (lt *LoadTx) PutKeyPair(account string, kp *EC2KeyPair) error {
+	return insertKeyPair(lt, account, kp)
+}
+
 // PutAvailabilityZone stores z under account.
 func (lt *LoadTx) PutAvailabilityZone(account string, z AvailabilityZone) error {
 	return putAvailabilityZone(lt, account, z)
@@ -250,6 +280,47 @@ func (lt *LoadTx) SecurityGroupRule(id string) (EC2SecurityGroupRule, error) {
 		return rule, models.ErrNotFound
 	}
 	return rule, err
+}
+
+// NetworkInterface reads the stored network interface id.
+func (lt *LoadTx) NetworkInterface(id string) (*EC2NetworkInterface, error) {
+	var eni EC2NetworkInterface
+	if err := lt.data(&eni, `SELECT data FROM ec2_network_interfaces WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	return &eni, nil
+}
+
+// EIP reads the stored address allocationID.
+func (lt *LoadTx) EIP(allocationID string) (*EC2EIP, error) {
+	var eip EC2EIP
+	if err := lt.data(&eip, `SELECT data FROM ec2_eips WHERE allocation_id = ?`, allocationID); err != nil {
+		return nil, err
+	}
+	return &eip, nil
+}
+
+// EIPOfNetworkInterface reads the stored address associated with
+// network interface id, nil when there is none.
+func (lt *LoadTx) EIPOfNetworkInterface(id string) (*EC2EIP, error) {
+	var eip EC2EIP
+	err := lt.data(&eip, `SELECT data FROM ec2_eips WHERE network_interface_id = ?`, id)
+	if errors.Is(err, models.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &eip, nil
+}
+
+// KeyPair reads the stored key pair named name.
+func (lt *LoadTx) KeyPair(name string) (*EC2KeyPair, error) {
+	var kp EC2KeyPair
+	if err := lt.data(&kp, `SELECT data FROM ec2_key_pairs WHERE name = ?`, name); err != nil {
+		return nil, err
+	}
+	return &kp, nil
 }
 
 // AvailabilityZone reads the stored zone named name.
