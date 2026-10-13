@@ -137,6 +137,7 @@ var stateBreaks = []stateBreak{
 	{read: "ListVPCs", service: "ec2", breakSQL: `DROP TABLE ec2_vpcs`},
 	{read: "ListSubnets", service: "ec2", breakSQL: `DROP TABLE ec2_subnets`},
 	{read: "ListNetworkInterfaces", service: "ec2", breakSQL: `DROP TABLE ec2_network_interfaces`},
+	{read: "ListVolumes", service: "ec2", breakSQL: `DROP TABLE ec2_volumes`},
 	{read: "ListInstances", service: "ec2", breakSQL: `DROP TABLE ec2_instances`},
 	{read: "ListSecurityGroups", service: "ec2", breakSQL: `DROP TABLE ec2_security_groups`},
 	{read: "ListSecurityGroupRules", service: "ec2", breakSQL: `DROP TABLE ec2_security_group_rules`,

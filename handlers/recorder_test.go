@@ -462,7 +462,7 @@ func TestContract_request_log_filter_refused(t *testing.T) {
 }
 
 func TestContract_request_log_empty_collection(t *testing.T) {
-	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
+	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:", LoadMaxBytes: loadLimit})
 	const region = "us-east-1"
 	for _, action := range []string{"DescribeVolumes", "DescribeNatGateways", "DescribeSnapshots", "DescribeLaunchTemplates"} {
 		resp, body := ec2Call(t, srv, region, action, nil)
@@ -474,6 +474,14 @@ func TestContract_request_log_empty_collection(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
 	require.Empty(t, extractEC2Tag(body, "vpcId"), "an empty account: %s", body)
 	assert.Equal(t, "answered-from-rows", lastClass(t, srv), "DescribeVpcs on an empty account")
+
+	// On a loaded database DescribeVolumes answers from rows, a read
+	// that finds none included.
+	loadNet(t, srv, volumeRecording(t, "true")...)
+	for _, params := range []url.Values{{"VolumeId.1": {fixtureVolume}}, ec2FilterParams("status", "available")} {
+		mustOK(t)(ec2Call(t, srv, netRegion, "DescribeVolumes", params))
+		assert.Equal(t, "answered-from-rows", lastClass(t, srv), "loaded DescribeVolumes %v", params)
+	}
 }
 
 func TestContract_request_log_read_set_entry(t *testing.T) {

@@ -22,6 +22,7 @@ var ec2TaggedTables = []string{
 	"ec2_security_group_rules",
 	"ec2_instances",
 	"ec2_network_interfaces",
+	"ec2_volumes",
 }
 
 func init() {

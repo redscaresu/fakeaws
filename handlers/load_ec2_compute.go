@@ -1,7 +1,7 @@
 package handlers
 
 // load_ec2_compute.go — the loaders of instances and their attributes,
-// network interfaces, Elastic IPs and key pairs. A network interface may
+// network interfaces, Elastic IPs, key pairs and volumes. A network interface may
 // have no instance; one attached to an instance no exchange loaded is
 // refused. An interface's association with an address is the address's
 // (ec2ENIToXML), so the rendering diff refuses an interface whose
@@ -49,6 +49,10 @@ func init() {
 		decode: decodeAddresses, render: renderAddresses})
 	registerLoader(loader{key: LoadKey{"ec2", "DescribeKeyPairs"}, table: "ec2_key_pairs",
 		decode: decodeKeyPairs, render: renderKeyPairs})
+	registerLoader(loader{key: LoadKey{"ec2", "DescribeVolumes"}, table: "ec2_volumes",
+		typ: "volume", notFound: []string{ec2VolumeNotFound},
+		requestToken: "NextToken", responseToken: "nextToken",
+		decode: decodeVolumes, render: renderVolumes})
 	// A group's name beside its id: the interface resource and data
 	// source read security_groups through flattenGroupIdentifiers, which
 	// reads GroupId only.
@@ -457,4 +461,60 @@ func renderKeyPairs(tx *repository.LoadTx, names []string) ([]byte, error) {
 		out.KeySet = append(out.KeySet, x)
 	}
 	return ec2Body("DescribeKeyPairs", &out), nil
+}
+
+// decodeVolumes loads each volume with its tags and its attachments,
+// as recorded. Its snapshot and KMS key are references the reader never
+// reads: snapshots are not modelled, and KMS keys live in kmsStore, not
+// rows. One attached to an instance no exchange loaded is refused
+// naming both: instances load first (ec2_volumes ranks after
+// ec2_instances).
+func decodeVolumes(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
+	var body ec2DescribeVolumesResult
+	if err := decodeEC2(ex, &body); err != nil {
+		return nil, err
+	}
+	items := make([]loadItem, len(body.VolumeSet))
+	for i, x := range body.VolumeSet {
+		vol := x.EC2Volume
+		vol.Region = env.Region
+		var refs []loadReference
+		if vol.SnapshotID != "" {
+			refs = append(refs, loadReference{loadRef: loadRef{"snapshot", vol.SnapshotID}, Unread: true})
+		}
+		if vol.KMSKeyID != "" {
+			refs = append(refs, loadReference{loadRef: loadRef{"kms-key", vol.KMSKeyID}, Unread: true})
+		}
+		ref := loadRef{"volume", vol.ID}
+		items[i] = loadItem{loadRef: ref, Path: "volumeSet/item", Index: i, Refs: refs,
+			write: ec2Write(env, ec2TagsFromXML(ref, x.TagSet), func(tx *repository.LoadTx) error {
+				for _, a := range vol.Attachments {
+					_, err := tx.Instance(a.InstanceID)
+					if errors.Is(err, models.ErrNotFound) {
+						return loadRefusal(fmt.Sprintf("volume %s is attached to instance %s, which no exchange loaded", vol.ID, a.InstanceID))
+					}
+					if err != nil {
+						return err
+					}
+				}
+				return tx.PutVolume(env.Account, &vol)
+			})}
+	}
+	return items, nil
+}
+
+func renderVolumes(tx *repository.LoadTx, ids []string) ([]byte, error) {
+	out := ec2DescribeVolumesResult{VolumeSet: []ec2VolumeXML{}}
+	for _, id := range ids {
+		vol, err := tx.Volume(id)
+		if err != nil {
+			return nil, err
+		}
+		x := ec2VolumeXML{EC2Volume: *vol}
+		if x.TagSet, err = ec2TagSet(tx, id); err != nil {
+			return nil, err
+		}
+		out.VolumeSet = append(out.VolumeSet, x)
+	}
+	return ec2Body("DescribeVolumes", &out), nil
 }

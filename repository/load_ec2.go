@@ -152,6 +152,10 @@ func (lt *LoadTx) PutKeyPair(account string, kp *EC2KeyPair) error {
 	return insertKeyPair(lt, account, kp)
 }
 
+// PutVolume stores v under account; the instances it is attached to
+// must be stored (handlers/load_ec2_compute.go checks each).
+func (lt *LoadTx) PutVolume(account string, v *EC2Volume) error { return insertVolume(lt, account, v) }
+
 // PutAMI stores ami under account.
 func (lt *LoadTx) PutAMI(account string, ami *EC2AMI) error {
 	return insertAMI(lt, "INSERT", account, ami)
@@ -371,6 +375,15 @@ func (lt *LoadTx) KeyPair(name string) (*EC2KeyPair, error) {
 		return nil, err
 	}
 	return &kp, nil
+}
+
+// Volume reads the stored volume id.
+func (lt *LoadTx) Volume(id string) (*EC2Volume, error) {
+	var v EC2Volume
+	if err := lt.data(&v, `SELECT data FROM ec2_volumes WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	return &v, nil
 }
 
 // AMI reads the stored image id.
