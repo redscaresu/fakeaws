@@ -220,7 +220,9 @@ var errLoadTransaction = errors.New("the load's transaction failed and wrote not
 // none gets none, after the load and after a snapshot and restore.
 //
 // CRITICAL[mock-load-refuses-dangling-reference]: a row that names or
-// references a row no exchange loaded is refused, naming both.
+// references a row of a type the reader reads, which no exchange
+// loaded, is refused, naming both. (References the reader never reads
+// load as unresolved: TestMockLoad_UnreadReferenceIsUnresolved.)
 //
 // CRITICAL[mock-load-not-found-loads-nothing]: a non-2xx answering its
 // loader's NotFound code (an XML Code, or a JSON __type with or without
