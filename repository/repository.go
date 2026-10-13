@@ -76,7 +76,7 @@ type Cache interface {
 // regenerates testdata/schema.golden, which TestSchemaGolden checks:
 // migrate only creates what is missing, so an older db would keep the
 // old shape. An added table needs no bump; it is appended to the golden.
-const dbSchemaVersion = 2
+const dbSchemaVersion = 3
 
 // New opens the SQLite database at dbPath, refuses it with
 // models.ErrConflict unless it is new or at dbSchemaVersion, applies
