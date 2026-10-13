@@ -32,9 +32,9 @@ func init() {
 }
 
 // decodeNetworkInterfaces loads each interface with its tags. It
-// references its subnet, VPC and groups, and the address its
-// association names; an amazon-owned public IP is held as the
-// interface's own. One attached to an instance no exchange loaded is
+// references its VPC and groups, and the address its association
+// names; an amazon-owned public IP is held as the interface's own. One
+// whose subnet, or the instance it is attached to, no exchange loaded is
 // refused naming both.
 func decodeNetworkInterfaces(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 	var body ec2DescribeNetworkInterfacesResult
@@ -44,7 +44,7 @@ func decodeNetworkInterfaces(env *loadEnvelope, ex *loadExchange) ([]loadItem, e
 	items := make([]loadItem, len(body.NetworkInterfaceSet))
 	for i, x := range body.NetworkInterfaceSet {
 		eni := ec2ENIFromXML(x, env.Region)
-		refs := []loadReference{{loadRef: loadRef{"subnet", x.SubnetId}}, {loadRef: loadRef{"vpc", x.VpcId}}}
+		refs := []loadReference{{loadRef: loadRef{"vpc", x.VpcId}}}
 		for _, g := range x.GroupSet {
 			refs = append(refs, loadReference{loadRef: loadRef{"security-group", g.GroupId}})
 		}
@@ -55,7 +55,10 @@ func decodeNetworkInterfaces(env *loadEnvelope, ex *loadExchange) ([]loadItem, e
 		items[i] = loadItem{loadRef: ref, Path: "networkInterfaceSet/item", Index: i, Refs: refs,
 			write: ec2Write(env, ec2TagsFromXML(ref, x.TagSet), func(tx *repository.LoadTx) error {
 				err := tx.PutNetworkInterface(env.Account, eni)
-				if errors.Is(err, models.ErrNotFound) {
+				switch {
+				case errors.Is(err, repository.ErrNoSubnet):
+					return loadRefusal(fmt.Sprintf("network-interface %s names subnet %s, which no exchange loaded", eni.ID, eni.SubnetID))
+				case errors.Is(err, models.ErrNotFound):
 					return loadRefusal(fmt.Sprintf("network-interface %s is attached to instance %s, which no exchange loaded", eni.ID, eni.InstanceID))
 				}
 				return err

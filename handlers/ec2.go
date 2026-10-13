@@ -3218,7 +3218,8 @@ func (app *Application) ec2DescribeNetworkInterfaces(w http.ResponseWriter, acco
 // attributes: the provider sends vpc_security_group_ids changes here,
 // to the instance's primary ENI, so they show up in the instance's
 // groupSet, and aws_network_interface's description as Description.Value.
-// Any other param (SourceDestCheck.Value, Attachment.*, ...) is refused.
+// One call modifies one attribute, as on EC2: both at once is refused,
+// and so is any other param (SourceDestCheck.Value, Attachment.*, ...).
 func (app *Application) ec2ModifyNetworkInterfaceAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	if ec2RefuseUnread(w, req, "NetworkInterfaceId", "SecurityGroupId.N", "Description.Value") {
 		return
@@ -3228,6 +3229,12 @@ func (app *Application) ec2ModifyNetworkInterfaceAttribute(w http.ResponseWriter
 	description, hasDescription := req.Params.Get("Description.Value"), req.Params.Has("Description.Value")
 	if id == "" || (len(groups) == 0 && !hasDescription) {
 		ec2Refuse(w, req.Action, "no NetworkInterfaceId, or neither SecurityGroupId.N nor Description.Value (only the Groups and Description attributes are modelled)")
+		return
+	}
+	if len(groups) > 0 && hasDescription {
+		// EC2 modifies one attribute per call; the API reference names no
+		// error code for two, so fakeaws refuses rather than guess one.
+		ec2Refuse(w, req.Action, "SecurityGroupId.N", "Description.Value")
 		return
 	}
 	eni, err := app.repo.GetNetworkInterface(account, region, id)
@@ -3240,11 +3247,10 @@ func (app *Application) ec2ModifyNetworkInterfaceAttribute(w http.ResponseWriter
 	}
 	if err == nil {
 		err = app.repo.UpdateNetworkInterface(account, region, id, func(e *repository.EC2NetworkInterface) {
-			if len(groups) > 0 {
-				e.SecurityGroupIDs = groups
-			}
 			if hasDescription {
 				e.Description = description
+			} else {
+				e.SecurityGroupIDs = groups
 			}
 		})
 	}

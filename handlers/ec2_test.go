@@ -1722,6 +1722,21 @@ func TestEC2_ModifyInstanceAttributeSourceDestCheck(t *testing.T) {
 	assert.False(t, inst.ENIs[0].SourceDestCheck, "ENI sourceDestCheck: %s", raw)
 }
 
+// TestEC2_DeleteSecurityGroupHeldByAnInstanceENI: a group an instance's
+// ENI holds is ResourceInUseException, as the instance's subnet is, and
+// deletes once the instance is terminated (its ENI goes with it).
+func TestEC2_DeleteSecurityGroupHeldByAnInstanceENI(t *testing.T) {
+	const region = "us-east-1"
+	srv := newTestServer(t, ":memory:")
+	n := newInstanceNet(t, srv, region, "10.0.0.0/16", "10.0.1.0/24")
+	id := runInstance(t, srv, region, nicParams(n.subnet, n.sgs, false))
+	resp, body := ec2Call(t, srv, region, "DeleteSecurityGroup", url.Values{"GroupId": {n.sgs[0]}})
+	assert.Equal(t, http.StatusConflict, resp.StatusCode, "%s", body)
+	assert.Equal(t, "ResourceInUseException", extractEC2Tag(body, "Code"))
+	mustOK(t)(ec2Call(t, srv, region, "TerminateInstances", url.Values{"InstanceId.1": {id}}))
+	mustOK(t)(ec2Call(t, srv, region, "DeleteSecurityGroup", url.Values{"GroupId": {n.sgs[0]}}))
+}
+
 func TestEC2_ModifyNetworkInterfaceAttributeGroups(t *testing.T) {
 	const region = "us-east-1"
 	srv := newTestServer(t, ":memory:")

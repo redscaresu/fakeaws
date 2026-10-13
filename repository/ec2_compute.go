@@ -10,6 +10,8 @@
 //	                               → iam_instance_profiles.name (cross-service FK, nullable)
 //	ec2_network_interfaces.instance_id
 //	                               → ec2_instances.id   (FK, CASCADE, nullable)
+//	ec2_network_interfaces.subnet_id
+//	                               → ec2_subnets.id     (FK, RESTRICT)
 //
 // Each instance has one primary ENI, which owns its private and public
 // IPs and its security groups (the instance's groupSet is read from
@@ -17,8 +19,9 @@
 // (subnet_id, private_ip) keeps private IPs distinct.
 //
 // ON DELETE RESTRICT on subnet_id is the load-bearing bit: a subnet
-// that still has running instances cannot be deleted; real EC2's
-// DeleteSubnet returns DependencyViolation in that case.
+// that still has running instances, or a loaded ENI with no instance,
+// cannot be deleted; real EC2's DeleteSubnet returns DependencyViolation
+// in that case.
 //
 // AMIs are read-only at v1 — handlers/ec2.go ships a fixture set
 // (ami-0abcd1234 etc.) and the repository just stores the set so
@@ -62,7 +65,8 @@ var ec2ComputeMigrations = []string{
 		data        TEXT NOT NULL,
 		PRIMARY KEY (account_id, id),
 		UNIQUE (account_id, subnet_id, private_ip),
-		FOREIGN KEY (account_id, instance_id) REFERENCES ec2_instances(account_id, id) ON DELETE CASCADE
+		FOREIGN KEY (account_id, instance_id) REFERENCES ec2_instances(account_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (account_id, subnet_id) REFERENCES ec2_subnets(account_id, id) ON DELETE RESTRICT
 	)`,
 	// ec2_key_pairs is keyed by name (the AWS contract — names are
 	// per-account-per-region unique).
@@ -241,7 +245,7 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance, eni *EC2N
 	); err != nil {
 		return mapInsertError(err)
 	}
-	used, err := stringSet(tx, `SELECT private_ip FROM ec2_network_interfaces WHERE account_id = ? AND subnet_id = ?`, account, subnet.ID)
+	used, err := stringSet(tx, subnetPrivateIPs, account, subnet.ID, account, subnet.ID)
 	if err != nil {
 		return err
 	}
@@ -267,6 +271,13 @@ func insertENI(ex execer, account string, eni *EC2NetworkInterface) error {
 	)
 	return mapInsertError(err)
 }
+
+// subnetPrivateIPs selects every private IP the ENIs of a subnet hold:
+// each primary one, and each a loaded ENI's private_ip_addresses names.
+// Its args are the account and subnet, twice.
+const subnetPrivateIPs = `SELECT private_ip FROM ec2_network_interfaces WHERE account_id = ? AND subnet_id = ?
+	UNION SELECT json_extract(ip.value, '$.address') FROM ec2_network_interfaces eni, json_each(eni.data, '$.private_ip_addresses') ip
+	WHERE eni.account_id = ? AND eni.subnet_id = ?`
 
 // stringSet returns the set of the one text column query selects.
 func stringSet(tx *sql.Tx, query string, args ...any) (map[string]bool, error) {

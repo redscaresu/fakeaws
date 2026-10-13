@@ -523,32 +523,29 @@ func (r *Repository) ListVPCs(account, region string) ([]*EC2VPC, error) {
 }
 
 // DeleteVPC removes a VPC, optionally scoped to a region. Empty
-// region acts as account-wide (matches the Get* contract).
+// region acts as account-wide (matches the Get* contract). The detach
+// and the delete share one transaction, so a refused delete (a subnet
+// an interface or instance is in) leaves the gateways attached.
 func (r *Repository) DeleteVPC(account, region, id string) error {
-	// Detach any attached internet gateways manually — composite FK
-	// SET NULL would NULL account_id too. Real EC2's contract is
-	// detach-on-vpc-delete (the IGW survives, just unattached).
-	if _, err := r.db.Exec(
-		`UPDATE ec2_internet_gateways SET `+igwDetach+` WHERE account_id = ? AND vpc_id = ?`,
-		account, id,
-	); err != nil {
-		return fmt.Errorf("detach igws before vpc delete: %w", err)
-	}
-	var res sql.Result
-	var err error
-	if region == "" {
-		res, err = r.db.Exec(`DELETE FROM ec2_vpcs WHERE account_id = ? AND id = ?`, account, id)
-	} else {
-		res, err = r.db.Exec(`DELETE FROM ec2_vpcs WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
-	}
-	if err != nil {
-		return mapDeleteError(err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return models.ErrNotFound
-	}
-	return nil
+	return r.inTx(func(tx *sql.Tx) error {
+		// Detach any attached internet gateways manually — composite FK
+		// SET NULL would NULL account_id too. Real EC2's contract is
+		// detach-on-vpc-delete (the IGW survives, just unattached).
+		if _, err := tx.Exec(
+			`UPDATE ec2_internet_gateways SET `+igwDetach+` WHERE account_id = ? AND vpc_id = ?`,
+			account, id,
+		); err != nil {
+			return fmt.Errorf("detach igws before vpc delete: %w", err)
+		}
+		res, err := tx.Exec(`DELETE FROM ec2_vpcs WHERE account_id = ? AND (? = '' OR region = ?) AND id = ?`, account, region, region, id)
+		if err != nil {
+			return mapDeleteError(err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return models.ErrNotFound
+		}
+		return nil
+	})
 }
 
 // ----- Subnet -----
@@ -1316,22 +1313,25 @@ func revokeRuleByID(ex execer, account string, rule EC2SecurityGroupRule) error 
 	return err
 }
 
+// DeleteSecurityGroup deletes group id, optionally scoped to a region.
+// A group a network interface holds (an instance's or a loaded one) is
+// ErrInUse, as a subnet an interface is in is (mapDeleteError): the
+// group ids live in the interface's data, which no foreign key sees, so
+// the DELETE itself refuses it.
 func (r *Repository) DeleteSecurityGroup(account, region, id string) error {
-	var res sql.Result
-	var err error
-	if region == "" {
-		res, err = r.db.Exec(`DELETE FROM ec2_security_groups WHERE account_id = ? AND id = ?`, account, id)
-	} else {
-		res, err = r.db.Exec(`DELETE FROM ec2_security_groups WHERE account_id = ? AND region = ? AND id = ?`, account, region, id)
-	}
+	res, err := r.db.Exec(`DELETE FROM ec2_security_groups WHERE account_id = ? AND (? = '' OR region = ?) AND id = ?
+		AND NOT EXISTS (SELECT 1 FROM ec2_network_interfaces eni, json_each(eni.data, '$.security_group_ids') g
+			WHERE eni.account_id = ? AND g.value = ?)`, account, region, region, id, account, id)
 	if err != nil {
 		return mapDeleteError(err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return models.ErrNotFound
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
 	}
-	return nil
+	if _, err := r.GetSecurityGroup(account, region, id); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: security group %s is held by a network interface", models.ErrInUse, id)
 }
 
 // ----- EIP -----

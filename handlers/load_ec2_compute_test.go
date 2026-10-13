@@ -106,20 +106,80 @@ func TestLoadEC2Compute_MutateOnce(t *testing.T) {
 	assert.Equal(t, []string{"keySet/item[0]/tagSet/item[0]"}, ren)
 }
 
-// TestLoadEC2Compute_ModifyENIRefusesAnUnmodelledAttribute: an
-// attribute fakeaws does not model beside Description.Value is refused
-// 501 naming it, and the description stays as recorded.
-func TestLoadEC2Compute_ModifyENIRefusesAnUnmodelledAttribute(t *testing.T) {
+// TestLoadEC2Compute_ModifyENIOneAttributePerCall: an attribute fakeaws
+// does not model beside Description.Value, or Groups and Description in
+// one call, which EC2 refuses, is refused 501 naming each, and the
+// interface stays as recorded.
+func TestLoadEC2Compute_ModifyENIOneAttributePerCall(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	enis, eips, _ := computeFixtures(t)
 	loadNet(t, srv, sgRecording(t, enis, eips)...)
-	resp, body := ec2Call(t, srv, netRegion, "ModifyNetworkInterfaceAttribute", url.Values{
-		"NetworkInterfaceId": {fixtureENI2}, "Description.Value": {"changed"}, "SourceDestCheck.Value": {"false"}})
-	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode)
-	assert.Contains(t, string(body), "SourceDestCheck.Value")
-	rec, ren := diffAnswer(t, srv, enis)
-	assert.Empty(t, rec)
-	assert.Empty(t, ren)
+	for name, c := range map[string]struct {
+		param, value string
+		named        []string
+	}{
+		"an unmodelled attribute": {"SourceDestCheck.Value", "false", []string{"SourceDestCheck.Value"}},
+		"groups and description":  {"SecurityGroupId.1", fixtureSG, []string{"SecurityGroupId.N", "Description.Value"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, body := ec2Call(t, srv, netRegion, "ModifyNetworkInterfaceAttribute", url.Values{
+				"NetworkInterfaceId": {fixtureENI2}, "Description.Value": {"changed"}, c.param: {c.value}})
+			assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
+			for _, n := range c.named {
+				assert.Contains(t, string(body), n)
+			}
+			rec, ren := diffAnswer(t, srv, enis)
+			assert.Empty(t, rec)
+			assert.Empty(t, ren)
+		})
+	}
+}
+
+// TestLoadEC2Compute_SecondaryPrivateIPsHeld: a private IP a loaded
+// interface holds beside its primary one is refused to RunInstances as
+// the primary's would be, and a free one beside them launches.
+func TestLoadEC2Compute_SecondaryPrivateIPsHeld(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	enis, eips, _ := computeFixtures(t)
+	loadNet(t, srv, sgRecording(t, enis, eips)...)
+	const ami = "ami-0123456789abcdef0"
+	mockOK(t, srv, http.MethodPost, "/mock/images", `{"ami_id":"`+ami+`","name":"al2023","region":"`+netRegion+`","root_device_name":"/dev/xvda","account_id":"`+loadAccount+`"}`)
+	run := func(ip string) (*http.Response, []byte) {
+		return ec2Call(t, srv, netRegion, "RunInstances", url.Values{"ImageId": {ami}, "InstanceType": {"t3.micro"},
+			"SubnetId": {"subnet-0bb1c79de301436ee"}, "SecurityGroupId.1": {fixtureSG}, "PrivateIpAddress": {ip}})
+	}
+	for _, ip := range []string{"10.0.2.146", "10.0.2.148", "10.0.2.150"} {
+		resp, body := run(ip)
+		assert.Equal(t, http.StatusConflict, resp.StatusCode, "%s: %s", ip, body)
+		assert.Equal(t, "ConflictException", extractEC2Tag(body, "Code"), ip)
+	}
+	resp, body := run("10.0.2.149")
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "a free address: %s", body)
+}
+
+// TestLoadEC2Compute_StandaloneENIHoldsItsNetwork: a loaded interface
+// with no instance keeps its subnet, VPC and group from deletion, as an
+// instance's interface does, and still answers; the refused DeleteVpc
+// leaves the VPC's internet gateway attached.
+func TestLoadEC2Compute_StandaloneENIHoldsItsNetwork(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	enis, eips, _ := computeFixtures(t)
+	loadNet(t, srv, sgRecording(t, enis, eips)...)
+	for _, c := range []struct{ action, param, id string }{
+		{"DeleteSubnet", "SubnetId", "subnet-0bb1c79de301436ee"},
+		{"DeleteVpc", "VpcId", fixtureSGVpc},
+		{"DeleteSecurityGroup", "GroupId", fixtureSG},
+	} {
+		resp, body := ec2Call(t, srv, netRegion, c.action, url.Values{c.param: {c.id}})
+		assert.Equal(t, http.StatusConflict, resp.StatusCode, "%s: %s", c.action, body)
+		assert.Equal(t, "ResourceInUseException", extractEC2Tag(body, "Code"), c.action)
+	}
+	igws := fixtureRecording(t)[3]
+	for _, r := range []netRecorded{enis, igws} {
+		rec, ren := diffAnswer(t, srv, r)
+		assert.Empty(t, rec, "%s recorded only", r.action)
+		assert.Empty(t, ren, "%s answered only", r.action)
+	}
 }
 
 func TestLoadEC2Compute_Refusals(t *testing.T) {
@@ -146,7 +206,7 @@ func TestLoadEC2Compute_Refusals(t *testing.T) {
 		},
 		"an interface in a subnet not recorded": {
 			[]netRecorded{{enis.action, enis.params, strings.Replace(enis.body, "<subnetId>subnet-02bf4c428bf44ebce<", "<subnetId>subnet-0missing<", 1)}, eips},
-			at(0, "DescribeNetworkInterfaces") + "network-interface " + fixtureENI2 + " references subnet subnet-0missing, which no exchange loaded",
+			at(0, "DescribeNetworkInterfaces") + "network-interface " + fixtureENI2 + " names subnet subnet-0missing, which no exchange loaded",
 		},
 	}
 	for name, c := range cases {

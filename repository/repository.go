@@ -82,7 +82,8 @@ type Cache interface {
 // gateway's, with no subnet, and gives routes their origin and state. 6
 // moves security group rules from the groups' ingress and egress JSON
 // columns to ec2_security_group_rules rows. 7 lets a network interface
-// have no instance (ec2_network_interfaces.instance_id is nullable).
+// have no instance (ec2_network_interfaces.instance_id is nullable) and
+// gives it its own subnet foreign key.
 const dbSchemaVersion = 7
 
 // New opens the SQLite database at dbPath, refuses it with

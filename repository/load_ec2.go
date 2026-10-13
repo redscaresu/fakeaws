@@ -113,10 +113,20 @@ func (lt *LoadTx) PutSecurityGroupRule(account, region string, rule EC2SecurityG
 	return insertRule(lt, account, region, rule)
 }
 
-// PutNetworkInterface stores eni under account, or answers
-// models.ErrNotFound when it is attached to an instance that is not
-// stored, which its foreign key would refuse.
+// ErrNoSubnet refuses a network interface whose subnet is not stored.
+var ErrNoSubnet = fmt.Errorf("%w: the network interface's subnet is not stored", models.ErrNotFound)
+
+// PutNetworkInterface stores eni under account. It answers ErrNoSubnet
+// when its subnet is not stored, and models.ErrNotFound when it is
+// attached to an instance that is not stored, which its foreign keys
+// would refuse.
 func (lt *LoadTx) PutNetworkInterface(account string, eni *EC2NetworkInterface) error {
+	if err := lt.exists(`SELECT 1 FROM ec2_subnets WHERE account_id = ? AND id = ?`, account, eni.SubnetID); err != nil {
+		if errors.Is(err, models.ErrNotFound) {
+			return ErrNoSubnet
+		}
+		return err
+	}
 	if eni.InstanceID != "" {
 		if err := lt.exists(`SELECT 1 FROM ec2_instances WHERE account_id = ? AND id = ?`, account, eni.InstanceID); err != nil {
 			return err
