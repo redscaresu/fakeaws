@@ -1927,6 +1927,38 @@ func queryListItems(params url.Values, prefix string) []string {
 	return items
 }
 
+// readIpPermissions parses req's IpPermissions.N and, when they name no
+// source, refuses through ec2Refuse and reports false: none sent (AWS
+// also takes the legacy top-level IpProtocol, CidrIp, ...), a source
+// item without its key (e.g. a Groups.N GroupName, which AWS resolves in
+// the default VPC), or a permission with none, which AWS refuses.
+func readIpPermissions(w http.ResponseWriter, req awsproto.QueryRPCRequest) ([]ec2IpPermission, bool) {
+	perms, keyless := parseIpPermissions(req)
+	switch {
+	case len(perms) == 0:
+		ec2Refuse(w, req.Action, "no IpPermissions.N")
+	case len(keyless) > 0:
+		ec2Refuse(w, req.Action, keyless...)
+	case slices.ContainsFunc(perms, func(p ec2IpPermission) bool {
+		return len(p.IpRanges)+len(p.Ipv6Ranges)+len(p.UserIdGroupPairs)+len(p.PrefixListIds) == 0
+	}):
+		ec2Refuse(w, req.Action, "IpPermissions.N with no source")
+	default:
+		return perms, true
+	}
+	return nil, false
+}
+
+// hasParamUnder reports whether p holds a param named under prefix.
+func hasParamUnder(p url.Values, prefix string) bool {
+	for k := range p {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // parseIpPermissions reads the flattened IpPermissions.<n>.* params
 // out of the Query-RPC body. keyless names each field of a source item
 // that lacks its key, which is no source (parseIpPermission).
@@ -1945,36 +1977,36 @@ func parseIpPermission(p url.Values, base string) (perm ec2IpPermission, keyless
 	perm = ec2IpPermission{IpProtocol: p.Get(base + "IpProtocol")}
 	perm.FromPort, _ = strconv.Atoi(p.Get(base + "FromPort"))
 	perm.ToPort, _ = strconv.Atoi(p.Get(base + "ToPort"))
-	for _, it := range keyedItems(p, base, "IpRanges.", "CidrIp", &keyless) {
+	for _, it := range keyedItems(p, base+"IpRanges.", "CidrIp", &keyless) {
 		perm.IpRanges = append(perm.IpRanges, ec2IpRange{CidrIp: p.Get(it + "CidrIp"), Description: p.Get(it + "Description")})
 	}
-	for _, it := range keyedItems(p, base, "Ipv6Ranges.", "CidrIpv6", &keyless) {
+	for _, it := range keyedItems(p, base+"Ipv6Ranges.", "CidrIpv6", &keyless) {
 		perm.Ipv6Ranges = append(perm.Ipv6Ranges, ec2Ipv6Range{CidrIpv6: p.Get(it + "CidrIpv6"), Description: p.Get(it + "Description")})
 	}
-	for _, it := range keyedItems(p, base, "Groups.", "GroupId", &keyless) {
+	for _, it := range keyedItems(p, base+"Groups.", "GroupId", &keyless) {
 		perm.UserIdGroupPairs = append(perm.UserIdGroupPairs, ec2UserIdGroupPair{
 			GroupId: p.Get(it + "GroupId"), UserId: p.Get(it + "UserId"), Description: p.Get(it + "Description"),
 		})
 	}
-	for _, it := range keyedItems(p, base, "PrefixListIds.", "PrefixListId", &keyless) {
+	for _, it := range keyedItems(p, base+"PrefixListIds.", "PrefixListId", &keyless) {
 		perm.PrefixListIds = append(perm.PrefixListIds, ec2PrefixListId{PrefixListId: p.Get(it + "PrefixListId"), Description: p.Get(it + "Description")})
 	}
 	return perm, keyless
 }
 
-// keyedItems returns the items of base's list that hold key, and adds
-// to keyless each field of an item that does not, named as ec2Refuse
-// names a param: IpPermissions.N.Groups.N.GroupName.
-func keyedItems(p url.Values, base, list, key string, keyless *[]string) []string {
+// keyedItems returns the items of list that hold key, and adds to
+// keyless each param of an item that does not, by its ec2ParamName
+// (IpPermissions.N.Groups.N.GroupName).
+func keyedItems(p url.Values, list, key string, keyless *[]string) []string {
 	var out []string
-	for _, it := range queryListItems(p, base+list) {
+	for _, it := range queryListItems(p, list) {
 		if p.Get(it+key) != "" {
 			out = append(out, it)
 			continue
 		}
 		for k := range p {
-			if field, ok := strings.CutPrefix(k, it); ok {
-				*keyless = append(*keyless, "IpPermissions.N."+list+"N."+field)
+			if strings.HasPrefix(k, it) {
+				*keyless = append(*keyless, ec2ParamName(k))
 			}
 		}
 	}
@@ -2166,27 +2198,13 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 		ec2Refuse(w, req.Action, "no GroupId") // AWS also takes GroupName for ingress
 		return
 	}
-	// fakeaws tags no rule on create, so any TagSpecification.N is refused.
-	if _, refused := refuseTagSpecifications(w, req.Params); refused {
+	// AWS tags the new rules; fakeaws tags no rule on create.
+	if hasParamUnder(req.Params, "TagSpecification.") {
+		ec2Refuse(w, req.Action, "TagSpecification.N")
 		return
 	}
-	add, keyless := parseIpPermissions(req)
-	if len(add) == 0 {
-		ec2Refuse(w, req.Action, "no IpPermissions.N") // AWS also takes the legacy top-level IpProtocol, CidrIp, ...
-		return
-	}
-	if len(keyless) > 0 {
-		ec2Refuse(w, req.Action, keyless...) // e.g. a Groups.N GroupName, which AWS resolves in the default VPC
-		return
-	}
-	if app.refuseIpPermissions(w, account, region, add) {
-		return
-	}
-	if slices.ContainsFunc(add, func(p ec2IpPermission) bool {
-		return len(p.IpRanges)+len(p.Ipv6Ranges)+len(p.UserIdGroupPairs)+len(p.PrefixListIds) == 0
-	}) {
-		// AWS requires a source; fakeaws has no recording of its refusal.
-		ec2Refuse(w, req.Action, "IpPermissions.N with no source")
+	add, ok := readIpPermissions(w, req)
+	if !ok || app.refuseIpPermissions(w, account, region, add) {
 		return
 	}
 	rules := sgRules(add, direction == "egress")
@@ -2211,13 +2229,11 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 
 // ec2RevokeSecurityGroupRules deletes the rule of each parsed source
 // (RevokeSecurityGroupRules); a permission left with no source is gone.
-// A revoke by SecurityGroupRuleId.N, which the provider's
-// aws_vpc_security_group_*_rule delete sends, is refused: it would
-// otherwise name no source and delete nothing.
+// A request that names no source, by SecurityGroupRuleId.N (what the
+// provider's aws_vpc_security_group_*_rule delete sends) or through
+// readIpPermissions, is refused rather than deleting nothing.
 func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
-	if slices.ContainsFunc(slices.Collect(maps.Keys(req.Params)), func(k string) bool {
-		return strings.HasPrefix(k, "SecurityGroupRuleId.")
-	}) {
+	if hasParamUnder(req.Params, "SecurityGroupRuleId.") {
 		ec2Refuse(w, req.Action, "SecurityGroupRuleId.N")
 		return
 	}
@@ -2226,9 +2242,8 @@ func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, accou
 		ec2Refuse(w, req.Action, "no GroupId") // AWS also takes GroupName for ingress
 		return
 	}
-	perms, keyless := parseIpPermissions(req)
-	if len(keyless) > 0 {
-		ec2Refuse(w, req.Action, keyless...)
+	perms, ok := readIpPermissions(w, req)
+	if !ok {
 		return
 	}
 	rm := sgRules(perms, direction == "egress")

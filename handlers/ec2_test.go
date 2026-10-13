@@ -1020,29 +1020,53 @@ func TestEC2_ReauthorizeAddsNoRule(t *testing.T) {
 	assert.Equal(t, 1, countRows(t, app, "ec2_security_group_rules"), "no row added")
 }
 
-// TestEC2_SecurityGroupRuleSourceRefusals: a permission with no source,
-// or a source item without its key (a Groups.N GroupName, UserId or
-// Description with no GroupId), is refused through ec2Refuse naming
-// what was sent, and the group's rules stay as they were: the request's
-// first permission would otherwise add (Authorize) or remove (Revoke)
-// a rule.
+// withPerm2 is a request of tcp 22 from cidr and a tcp 80 permission
+// carrying extra.
+func withPerm2(extra url.Values) func(cidr string) url.Values {
+	return func(cidr string) url.Values {
+		p := sgPerm("tcp", "22", "22", cidr)
+		p.Set("IpPermissions.2.IpProtocol", "tcp")
+		p.Set("IpPermissions.2.FromPort", "80")
+		p.Set("IpPermissions.2.ToPort", "80")
+		for k, v := range extra {
+			p[k] = v
+		}
+		return p
+	}
+}
+
+// legacyParams is a request in the legacy top-level form, with no
+// IpPermissions.N.
+func legacyParams(cidr string) url.Values {
+	return url.Values{"IpProtocol": {"tcp"}, "FromPort": {"22"}, "ToPort": {"22"}, "CidrIp": {cidr}}
+}
+
+// TestEC2_SecurityGroupRuleSourceRefusals: an Authorize or Revoke that
+// names no source (no IpPermissions.N, a permission with none, or a
+// source item without its key such as a Groups.N GroupName with no
+// GroupId) is refused through ec2Refuse naming what was sent, and the
+// group's rules stay as they were: the request's tcp 22 permission would
+// otherwise add (Authorize) or remove (Revoke) a rule.
 func TestEC2_SecurityGroupRuleSourceRefusals(t *testing.T) {
 	const region = "us-east-1"
 	cases := []struct {
 		name, action string
-		perm2        url.Values
+		params       func(cidr string) url.Values
 		names        string
 	}{
-		{"no source", "AuthorizeSecurityGroupIngress", url.Values{}, "IpPermissions.N with no source"},
+		{"no source", "AuthorizeSecurityGroupIngress", withPerm2(nil), "IpPermissions.N with no source"},
 		{"group name, no group id", "AuthorizeSecurityGroupIngress",
-			url.Values{"IpPermissions.2.Groups.1.GroupName": {"web"}}, "IpPermissions.N.Groups.N.GroupName"},
+			withPerm2(url.Values{"IpPermissions.2.Groups.1.GroupName": {"web"}}), "IpPermissions.N.Groups.N.GroupName"},
 		{"user id and description, no group id", "AuthorizeSecurityGroupEgress",
-			url.Values{"IpPermissions.2.Groups.1.UserId": {"111122223333"}, "IpPermissions.2.Groups.1.Description": {"d"}},
+			withPerm2(url.Values{"IpPermissions.2.Groups.1.UserId": {"111122223333"}, "IpPermissions.2.Groups.1.Description": {"d"}}),
 			"IpPermissions.N.Groups.N.Description, IpPermissions.N.Groups.N.UserId"},
 		{"ip range description, no cidr", "AuthorizeSecurityGroupIngress",
-			url.Values{"IpPermissions.2.IpRanges.1.Description": {"d"}}, "IpPermissions.N.IpRanges.N.Description"},
-		{"revoke by group name", "RevokeSecurityGroupIngress",
-			url.Values{"IpPermissions.2.Groups.1.GroupName": {"web"}}, "IpPermissions.N.Groups.N.GroupName"},
+			withPerm2(url.Values{"IpPermissions.2.IpRanges.1.Description": {"d"}}), "IpPermissions.N.IpRanges.N.Description"},
+		{"no IpPermissions.N", "AuthorizeSecurityGroupIngress", legacyParams, "no IpPermissions.N"},
+		{"revoke, no source", "RevokeSecurityGroupIngress", withPerm2(nil), "IpPermissions.N with no source"},
+		{"revoke, group name", "RevokeSecurityGroupIngress",
+			withPerm2(url.Values{"IpPermissions.2.Groups.1.GroupName": {"web"}}), "IpPermissions.N.Groups.N.GroupName"},
+		{"revoke, no IpPermissions.N", "RevokeSecurityGroupIngress", legacyParams, "no IpPermissions.N"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1053,14 +1077,8 @@ func TestEC2_SecurityGroupRuleSourceRefusals(t *testing.T) {
 			if strings.HasPrefix(c.action, "Revoke") {
 				cidr = held
 			}
-			params := sgPerm("tcp", "22", "22", cidr)
+			params := c.params(cidr)
 			params.Set("GroupId", sgID)
-			params.Set("IpPermissions.2.IpProtocol", "tcp")
-			params.Set("IpPermissions.2.FromPort", "80")
-			params.Set("IpPermissions.2.ToPort", "80")
-			for k, v := range c.perm2 {
-				params[k] = v
-			}
 			resp, body := ec2Call(t, srv, region, c.action, params)
 			assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
 			code, msg := ec2Error(t, body)
@@ -1095,9 +1113,9 @@ func TestEC2_RevokeByRuleIdRefused(t *testing.T) {
 	assert.Equal(t, []sgRuleSourceXML{{CidrIp: "10.0.0.0/8"}}, sgPermByPort(ingress, 22).IpRanges, "the rule stays")
 }
 
-// TestEC2_AuthorizeTagSpecificationRefused: fakeaws tags no rule on
-// create, so Authorize* refuses any TagSpecification.N as other
-// operations refuse a type they cannot tag, and adds no row.
+// TestEC2_AuthorizeTagSpecificationRefused: AWS tags the new rules but
+// fakeaws tags none on create, so Authorize* refuses any
+// TagSpecification.N through ec2Refuse, and adds no row.
 func TestEC2_AuthorizeTagSpecificationRefused(t *testing.T) {
 	const region = "us-east-1"
 	app, srv := newTestApp(t, ":memory:")
@@ -1111,10 +1129,10 @@ func TestEC2_AuthorizeTagSpecificationRefused(t *testing.T) {
 	params.Set("TagSpecification.1.Tag.1.Key", "Name")
 	params.Set("TagSpecification.1.Tag.1.Value", "ssh")
 	resp, body := ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", params)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
 	code, msg := ec2Error(t, body)
-	assert.Equal(t, "InvalidParameterValue", code)
-	assert.Equal(t, "'security-group-rule' is not a valid taggable resource type for this operation.", msg)
+	assert.Equal(t, "NotImplemented", code)
+	assert.Equal(t, "AuthorizeSecurityGroupIngress: not modelled by fakeaws: TagSpecification.N", msg)
 	assert.Zero(t, countRows(t, app, "ec2_security_group_rules"), "no row added")
 }
 
