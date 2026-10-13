@@ -159,20 +159,25 @@ func TestLoadEC2Compute_SecondaryPrivateIPsHeld(t *testing.T) {
 
 // TestLoadEC2Compute_StandaloneENIHoldsItsNetwork: a loaded interface
 // with no instance keeps its subnet, VPC and group from deletion, as an
-// instance's interface does, and still answers; the refused DeleteVpc
-// leaves the VPC's internet gateway attached.
+// instance's interface does (the subnet and VPC 409 ResourceInUseException,
+// the group 400 DependencyViolation), and still answers; the refused
+// DeleteVpc leaves the VPC's internet gateway attached.
 func TestLoadEC2Compute_StandaloneENIHoldsItsNetwork(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	enis, eips, _ := computeFixtures(t)
 	loadNet(t, srv, sgRecording(t, enis, eips)...)
-	for _, c := range []struct{ action, param, id string }{
-		{"DeleteSubnet", "SubnetId", "subnet-0bb1c79de301436ee"},
-		{"DeleteVpc", "VpcId", fixtureSGVpc},
-		{"DeleteSecurityGroup", "GroupId", fixtureSG},
+	for _, c := range []struct {
+		action, param, id string
+		status            int
+		code              string
+	}{
+		{"DeleteSubnet", "SubnetId", "subnet-0bb1c79de301436ee", http.StatusConflict, "ResourceInUseException"},
+		{"DeleteVpc", "VpcId", fixtureSGVpc, http.StatusConflict, "ResourceInUseException"},
+		{"DeleteSecurityGroup", "GroupId", fixtureSG, http.StatusBadRequest, "DependencyViolation"},
 	} {
 		resp, body := ec2Call(t, srv, netRegion, c.action, url.Values{c.param: {c.id}})
-		assert.Equal(t, http.StatusConflict, resp.StatusCode, "%s: %s", c.action, body)
-		assert.Equal(t, "ResourceInUseException", extractEC2Tag(body, "Code"), c.action)
+		assert.Equal(t, c.status, resp.StatusCode, "%s: %s", c.action, body)
+		assert.Equal(t, c.code, extractEC2Tag(body, "Code"), c.action)
 	}
 	igws := fixtureRecording(t)[3]
 	for _, r := range []netRecorded{enis, igws} {

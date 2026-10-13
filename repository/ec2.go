@@ -1313,11 +1313,14 @@ func revokeRuleByID(ex execer, account string, rule EC2SecurityGroupRule) error 
 	return err
 }
 
+// ErrGroupHeld refuses deleting a security group a network interface
+// holds.
+var ErrGroupHeld = fmt.Errorf("%w: a network interface holds the security group", models.ErrInUse)
+
 // DeleteSecurityGroup deletes group id, optionally scoped to a region.
 // A group a network interface holds (an instance's or a loaded one) is
-// ErrInUse, as a subnet an interface is in is (mapDeleteError): the
-// group ids live in the interface's data, which no foreign key sees, so
-// the DELETE itself refuses it.
+// ErrGroupHeld: the group ids live in the interface's data, which no
+// foreign key sees, so the DELETE itself refuses it.
 func (r *Repository) DeleteSecurityGroup(account, region, id string) error {
 	res, err := r.db.Exec(`DELETE FROM ec2_security_groups WHERE account_id = ? AND (? = '' OR region = ?) AND id = ?
 		AND NOT EXISTS (SELECT 1 FROM ec2_network_interfaces eni, json_each(eni.data, '$.security_group_ids') g
@@ -1331,7 +1334,7 @@ func (r *Repository) DeleteSecurityGroup(account, region, id string) error {
 	if _, err := r.GetSecurityGroup(account, region, id); err != nil {
 		return err
 	}
-	return fmt.Errorf("%w: security group %s is held by a network interface", models.ErrInUse, id)
+	return ErrGroupHeld
 }
 
 // ----- EIP -----

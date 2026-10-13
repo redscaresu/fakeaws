@@ -2253,7 +2253,16 @@ func (app *Application) ec2DeleteSecurityGroup(w http.ResponseWriter, account, r
 			fmt.Sprintf("the specified group: %q name: %q cannot be deleted by a user", id, repository.DefaultGroupName))
 		return
 	}
-	if err := app.repo.DeleteSecurityGroup(account, region, id); err != nil {
+	err = app.repo.DeleteSecurityGroup(account, region, id)
+	if errors.Is(err, repository.ErrGroupHeld) {
+		// EC2's code, which aws_security_group's delete retries until its
+		// timeout; it fails at once on any other.
+		// UNVERIFIED(aws-code): DependencyViolation from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "DependencyViolation",
+			fmt.Sprintf("resource %s has a dependent object", id))
+		return
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
