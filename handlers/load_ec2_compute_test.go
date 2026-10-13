@@ -265,22 +265,34 @@ func TestLoadEC2Compute_Refusals(t *testing.T) {
 }
 
 // TestLoadEC2Instances_InterfaceKeptOnTermination: an instance whose
-// primary interface was attached with deleteOnTermination false (a
-// network_interface block naming an existing interface) loads, and
-// both the instance and the interface answer false.
+// primary interface, holding an Elastic IP, was attached with
+// deleteOnTermination false (a network_interface block naming an
+// existing interface) loads, and both the instance and the interface
+// answer false. Terminating the instance detaches the interface, which
+// stays available with its address, as on EC2.
 func TestLoadEC2Instances_InterfaceKeptOnTermination(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	_, _, keys := computeFixtures(t)
-	byID, _, attrs, eni := instanceFixtures(t)
+	_, _, attrs, _ := instanceFixtures(t)
+	byID, eni, eips := instanceWithEIP(t)
 	keep := strings.NewReplacer("<deleteOnTermination>true</deleteOnTermination>", "<deleteOnTermination>false</deleteOnTermination>")
 	byID.body, eni.body = keep.Replace(byID.body), keep.Replace(eni.body)
-	loadNet(t, srv, sgRecording(t, append([]netRecorded{keys, byID, eni}, attrs...)...)...)
+	loadNet(t, srv, sgRecording(t, append([]netRecorded{keys, byID, eni, eips}, attrs...)...)...)
 	for _, r := range []netRecorded{byID, eni} {
 		rec, ren := diffAnswer(t, srv, r)
 		assert.Empty(t, rec, "%s: recorded only", r.action)
 		assert.Empty(t, ren, "%s: answered only", r.action)
 		assert.Equal(t, "false", extractEC2Tag([]byte(resend(t, srv, r)), "deleteOnTermination"), r.action)
 	}
+
+	mustOK(t)(ec2Call(t, srv, netRegion, "TerminateInstances", url.Values{"InstanceId.1": {fixtureInstance}}))
+	kept := []byte(resend(t, srv, eni))
+	assert.Equal(t, "available", extractEC2Tag(kept, "status"))
+	assert.NotContains(t, string(kept), "<attachment>")
+	assert.Equal(t, fixtureEIP, extractEC2Tag(kept, "allocationId"), "the address stays associated with the interface")
+	address := []byte(resend(t, srv, eips))
+	assert.Equal(t, fixtureInstanceENI, extractEC2Tag(address, "networkInterfaceId"))
+	assert.Empty(t, extractEC2Tag(address, "instanceId"))
 }
 
 // DescribeInstances.xml's instance, its interface, image and profile.
@@ -393,8 +405,25 @@ func TestLoadEC2Instances_MutateOnce(t *testing.T) {
 // interface's own item answers.
 func TestLoadEC2Instances_ElasticIPAnswersItsOwner(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
-	_, eips, keys := computeFixtures(t)
-	byID, _, attrs, eni := instanceFixtures(t)
+	_, _, keys := computeFixtures(t)
+	_, _, attrs, _ := instanceFixtures(t)
+	byID, eni, eips := instanceWithEIP(t)
+	recording := sgRecording(t, append([]netRecorded{keys, byID, eni, eips}, attrs...)...)
+	loadNet(t, srv, recording...)
+	for _, r := range []netRecorded{byID, eni, eips} {
+		rec, ren := diffAnswer(t, srv, r)
+		assert.Empty(t, rec, "%s: recorded only", r.action)
+		assert.Empty(t, ren, "%s: answered only", r.action)
+	}
+}
+
+// instanceWithEIP is DescribeInstances.xml read by id, its interface
+// and DescribeAddresses.xml, edited so the address is associated with
+// the instance's interface.
+func instanceWithEIP(t *testing.T) (byID, eni, eips netRecorded) {
+	t.Helper()
+	_, eips, _ = computeFixtures(t)
+	byID, _, _, eni = instanceFixtures(t)
 	association := "<association><publicIp>203.0.113.41</publicIp><ipOwnerId>" + loadAccount + "</ipOwnerId>"
 	byID.body = strings.NewReplacer(
 		"<privateIpAddress>10.0.2.88</privateIpAddress>\n                    <sourceDestCheck>",
@@ -404,13 +433,7 @@ func TestLoadEC2Instances_ElasticIPAnswersItsOwner(t *testing.T) {
 		"<allocationId>"+fixtureEIP+"</allocationId><associationId>"+fixtureEIPAssoc+"</associationId></association>", 1)
 	eips.body = strings.NewReplacer(fixtureENI, fixtureInstanceENI, "10.0.2.146", "10.0.2.88",
 		"<domain>vpc</domain>", "<domain>vpc</domain><instanceId>"+fixtureInstance+"</instanceId>").Replace(eips.body)
-	recording := sgRecording(t, append([]netRecorded{keys, byID, eni, eips}, attrs...)...)
-	loadNet(t, srv, recording...)
-	for _, r := range []netRecorded{byID, eni, eips} {
-		rec, ren := diffAnswer(t, srv, r)
-		assert.Empty(t, rec, "%s: recorded only", r.action)
-		assert.Empty(t, ren, "%s: answered only", r.action)
-	}
+	return byID, eni, eips
 }
 
 // TestLoadEC2Instances_RunInstancesAnswersStoredProfileARN: an instance
