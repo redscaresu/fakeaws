@@ -2314,6 +2314,10 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 	awsproto.WriteEC2QueryRPCResponse(w, req.Action, &out)
 }
 
+// CRITICAL[ec2-sg-rule-ids-stable]: a security group rule keeps its
+// sgr- id for its life, so revoking one rule leaves the others under
+// their ids.
+//
 // ec2RevokeSecurityGroupRules deletes the rule of each
 // SecurityGroupRuleId.N (what the provider's
 // aws_vpc_security_group_*_rule delete sends) and of each parsed source
@@ -3565,6 +3569,11 @@ func refuseInvalidValues(w http.ResponseWriter, p url.Values, values map[string]
 	return false
 }
 
+// CRITICAL[ec2-volume-removed-on-terminate]: terminating an instance
+// deletes a volume attached to it when that attachment is the volume's
+// only one and has deleteOnTermination true (repository
+// terminateVolumeTx), in the terminate's transaction.
+//
 // ec2TerminateInstances terminates every id in one transaction, where
 // each one's previous state is read: as in AWS, an instance that
 // cannot be terminated (unknown, or with disableApiTermination set)

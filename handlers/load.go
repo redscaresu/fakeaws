@@ -193,6 +193,41 @@ func (a *loadAbort) Error() string {
 // logged or answered either.
 var errLoadTransaction = errors.New("the load's transaction failed and wrote nothing")
 
+// CRITICAL[mock-load-off-by-default]: without Options.LoadMaxBytes the
+// route is not registered, so POST /mock/load answers as any unknown
+// /mock path.
+//
+// CRITICAL[mock-load-needs-admin-token]: NewApplication refuses
+// Options.LoadMaxBytes without an AdminToken (ErrLoadNeedsAdminToken):
+// a load deletes every row.
+//
+// CRITICAL[mock-load-replaces-every-row-atomically]: a second load
+// replaces the first whole: its rows, its identity and its tables'
+// other rows.
+//
+// CRITICAL[mock-load-refusal-changes-nothing]: a load that is refused
+// or fails changes nothing: rows, identity and snapshot as they were.
+//
+// CRITICAL[mock-load-keeps-snapshot]: a load never touches the
+// snapshot, so /mock/restore after a load returns to the snapshot.
+//
+// CRITICAL[mock-load-refuses-unheld-field]: a field of a recorded body
+// that the model cannot hold refuses the load, naming the row and the
+// field's path, whatever the handler's own decoder would drop.
+//
+// CRITICAL[mock-load-never-mints]: a VPC's recorded default security
+// group loads under its recorded id, and a VPC whose recording holds
+// none gets none, after the load and after a snapshot and restore.
+//
+// CRITICAL[mock-load-refuses-dangling-reference]: a row that names or
+// references a row of a type the reader reads, which no exchange
+// loaded, is refused, naming both. (References the reader never reads
+// load as unresolved: TestMockLoad_UnreadReferenceIsUnresolved.)
+//
+// CRITICAL[mock-load-not-found-loads-nothing]: a non-2xx answering its
+// loader's NotFound code (an XML Code, or a JSON __type with or without
+// its namespace and suffix) loads no row and counts under absent.
+//
 // handleMockLoad replaces every row with a recorded read of at most
 // loadMaxBytes (413 over it): 200 with a loadAnswer; 400 listing every
 // refusal, and where the load stopped when a loader failed after them;

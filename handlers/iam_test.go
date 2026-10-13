@@ -421,13 +421,13 @@ func listRolePolicies(t *testing.T, srv *httptest.Server, role string) []string 
 	return out.Names
 }
 
-// TestIAM_RoleInlinePolicyLifecycle pins aws_iam_role_policy's calls:
+// TestContract_iam_role_inline_policies_stored pins aws_iam_role_policy's calls:
 // Put then Get answers the document byte-exact once URL-decoded and
 // RFC 3986 encoded on the wire, List names it, a second Put replaces
 // it, Delete removes it, and Put or List on a missing role or Get or
 // Delete of an absent name is NoSuchEntity, naming the missing one. A role holding an inline
 // policy refuses DeleteRole with DeleteConflict and keeps both.
-func TestIAM_RoleInlinePolicyLifecycle(t *testing.T) {
+func TestContract_iam_role_inline_policies_stored(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, body := iamCall(t, srv, "PutRolePolicy", url.Values{
 		"RoleName": {"app"}, "PolicyName": {"s3"}, "PolicyDocument": {"{}"},

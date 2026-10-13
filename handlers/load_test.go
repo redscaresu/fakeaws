@@ -199,7 +199,7 @@ func seedLoadRows(t *testing.T, srv *httptest.Server) string {
 	return vpcID
 }
 
-func TestMockLoad_UnroutedWithoutTheFlag(t *testing.T) {
+func TestContract_mock_load_off_by_default(t *testing.T) {
 	_, srv := newTestApp(t, ":memory:")
 	unknown, unknownBody := doPost(t, srv, "/mock/no-such-path")
 	status, body := mockRequest(t, srv, http.MethodPost, "/mock/load", nil, loadEnvelope(loadAccount, loadRegion))
@@ -207,7 +207,7 @@ func TestMockLoad_UnroutedWithoutTheFlag(t *testing.T) {
 	assert.Equal(t, string(unknownBody), body)
 }
 
-func TestNewApplication_LoadNeedsAnAdminToken(t *testing.T) {
+func TestContract_mock_load_needs_admin_token(t *testing.T) {
 	_, err := handlers.NewApplication(handlers.Options{DBPath: ":memory:", LoadMaxBytes: loadLimit})
 	require.ErrorIs(t, err, handlers.ErrLoadNeedsAdminToken)
 	assert.ErrorContains(t, err, "Options.LoadMaxBytes")
@@ -242,7 +242,7 @@ func TestMockLoad_GuardedAndCapped(t *testing.T) {
 	assert.Equal(t, http.StatusOK, status, "a body at the limit loads: %s", body)
 }
 
-func TestMockLoad_EmptyLoadReplacesEveryRowAndKeepsTheSnapshot(t *testing.T) {
+func TestContract_mock_load_keeps_snapshot(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "load.db")
 	app, srv := newLoadApp(t, handlers.Options{DBPath: dbPath})
 	vpcID := seedLoadRows(t, srv)
@@ -288,7 +288,7 @@ func TestMockLoad_EmptyLoadReplacesEveryRowAndKeepsTheSnapshot(t *testing.T) {
 	assert.Equal(t, awsproto.FakeAccountID, accountID(t, app), "restore brings back the identity it replaced")
 }
 
-func TestMockLoad_RefusalsChangeNothing(t *testing.T) {
+func TestContract_mock_load_refusal_changes_nothing(t *testing.T) {
 	app, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	mockOK(t, srv, http.MethodPost, "/mock/identity", `{"account_id":"`+otherAccount+`","region":"us-east-1"}`)
 	seedLoadRows(t, srv)
@@ -496,7 +496,7 @@ func TestMockLoad_FailureLogsOnlyTheExchange(t *testing.T) {
 	assert.NotContains(t, body, "no such table")
 }
 
-func TestMockLoad_SecondLoadReplacesTheFirst(t *testing.T) {
+func TestContract_mock_load_replaces_every_row_atomically(t *testing.T) {
 	app, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	status, body := postLoad(t, srv, loadEnvelope(loadAccount, loadRegion,
 		putVpc("vpc-0first"), putSubnet("subnet-0first", "vpc-0first")))
@@ -527,10 +527,10 @@ func TestMockLoad_RunsParentTablesFirst(t *testing.T) {
 	assert.JSONEq(t, `{"loaded":{"vpc":1,"subnet":1},"absent":{},"unresolved":{}}`, body)
 }
 
-// TestMockLoad_NotFoundIsAbsent: a non-2xx answering one of its
+// TestContract_mock_load_not_found_loads_nothing: a non-2xx answering one of its
 // loader's NotFound codes loads nothing and counts under absent: an XML
 // Code, or a JSON __type with or without its namespace and suffix.
-func TestMockLoad_NotFoundIsAbsent(t *testing.T) {
+func TestContract_mock_load_not_found_loads_nothing(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	status, body := postLoad(t, srv, loadEnvelope(loadAccount, loadRegion, putVpc("vpc-0found"),
 		loadPage("fakeaws-test", "PutVpc", map[string]string{"VpcId.1": "vpc-0gone"}, http.StatusBadRequest,

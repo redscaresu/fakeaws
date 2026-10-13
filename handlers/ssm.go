@@ -22,6 +22,13 @@ import (
 // models what aws_ssm_parameter (resource and data source) calls at
 // hashicorp/aws 5.100.0; every other operation answers 501.
 
+// CRITICAL[ssm-public-parameter-one-predicate]: a name is a public
+// parameter by the one prefix, repository's publicSSMParameterPrefix,
+// which repository.IsPublicSSMParameter and the SQL clause
+// ssmAccountOwned both read; every operation treats it alike:
+// GetParameter reads one, and Put, Describe, Delete and the tag
+// operations refuse it or skip it.
+
 // al2023ParameterName is the AWS public parameter naming the latest
 // Amazon Linux 2023 AMI. Unless the database is loaded it resolves to
 // AL2023AMIID in every region, with no row. On a loaded database

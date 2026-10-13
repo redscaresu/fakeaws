@@ -1236,11 +1236,11 @@ func TestEC2_SecurityGroupRuleTags(t *testing.T) {
 	assert.Equal(t, "InvalidSecurityGroupRuleId.NotFound", code)
 }
 
-// TestEC2_RevokeByRuleId: a revoke naming SecurityGroupRuleId.N, which
+// TestContract_ec2_sg_rule_ids_stable: a revoke naming SecurityGroupRuleId.N, which
 // the provider's aws_vpc_security_group_*_rule delete sends, deletes
 // that rule and leaves the other rule of its permission, which
 // DescribeSecurityGroups answers with one source.
-func TestEC2_RevokeByRuleId(t *testing.T) {
+func TestContract_ec2_sg_rule_ids_stable(t *testing.T) {
 	const region = "us-east-1"
 	srv, sgID, ids := newRuleGroup(t, region)
 	mustOK(t)(ec2Call(t, srv, region, "RevokeSecurityGroupIngress", url.Values{

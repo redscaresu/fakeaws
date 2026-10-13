@@ -409,7 +409,7 @@ func TestAdminMockRestore_MemoryConflict(t *testing.T) {
 
 // A snapshot at another db schema version is refused 409 naming the
 // stored and wanted versions, and the live state is as it was.
-func TestAdminMockRestore_AnotherSchemaVersionIs409(t *testing.T) {
+func TestContract_restore_refuses_other_schema_version(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	app, srv := newTestApp(t, dbPath)
 	resp, body := sqsCall(t, srv, "CreateQueue", `{"QueueName":"in-snapshot"}`)

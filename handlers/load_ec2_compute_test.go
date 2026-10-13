@@ -615,11 +615,11 @@ func ec2VolumesState(t *testing.T, srv *httptest.Server) []string {
 	return ids
 }
 
-// TestLoadEC2Volumes_TerminateDeletesRootVolume: /mock/state lists the
+// TestContract_ec2_volume_removed_on_terminate: /mock/state lists the
 // loaded volume; terminating its instance deletes it, as its
 // deleteOnTermination says, so VolumeId.1 answers InvalidVolume.NotFound
 // and /mock/state lists none.
-func TestLoadEC2Volumes_TerminateDeletesRootVolume(t *testing.T) {
+func TestContract_ec2_volume_removed_on_terminate(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	loadNet(t, srv, volumeRecording(t, "true")...)
 	assert.Equal(t, []string{fixtureVolume}, ec2VolumesState(t, srv))

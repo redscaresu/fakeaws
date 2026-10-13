@@ -434,7 +434,7 @@ func TestSSM_PrivateParameterTagOpsByARN(t *testing.T) {
 // answers exactly as a public parameter must: its pinned status and
 // error code, or body. And renamed to its private twin's, the answer
 // must not equal the twin's.
-func TestSSM_EveryOperationTreatsPublicParameterAsPublic(t *testing.T) {
+func TestContract_ssm_public_parameter_one_predicate(t *testing.T) {
 	refused := func(code string) string { return `{"__type":"` + code + `"}` }
 	type call struct {
 		body, want string // want: the public answer's body, message aside

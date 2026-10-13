@@ -22,7 +22,7 @@ fakegcp (GCP).
 
 ```
 fakeaws/
-├── cmd/fakeaws/main.go        # entrypoint, --port, --bind, --db, --echo, --admin-token (or FAKEAWS_ADMIN_TOKEN), --account, --region, --record-requests (needs the token)
+├── cmd/fakeaws/main.go        # entrypoint, --port, --bind, --db, --echo, --admin-token (or FAKEAWS_ADMIN_TOKEN), --account, --region, --record-requests and --load-max-bytes (each needs the token)
 ├── handlers/
 │   ├── handlers.go            # Application struct, RegisterRoutes, auth
 │   ├── admin.go               # /mock/reset, /snapshot, /restore, /state (S43-T4), /images, /identity; admin-token guard
@@ -73,12 +73,20 @@ fakeaws/
 - **No silent 200**: every endpoint we don't model returns 501 with an
   `UNIMPLEMENTED` log line. Discovery surface for the next caller.
 - **Gap marks**: a gap site the request log must tell apart (a 404
-  default arm, a refusal of something fakeaws does not model,
-  `ec2DescribeNone`, `DescribeVolumes` on an unloaded database (an
-  empty answer or a NotFound), a
-  loaded database's region with no AZ rows)
-  calls `markClass`; concepts.md item 7 has the
-  classes and the gaps never marked, which record `answered-from-rows`.
+  default arm, a refusal of something fakeaws does not model) calls
+  `markClass`. `empty-collection` is marked only by `ec2DescribeNone`,
+  by `DescribeVolumes` on an unloaded database (an empty answer or a
+  NotFound; a loaded one answers its rows) and by
+  `DescribeAvailabilityZones` on a loaded database's region with no zone
+  rows. concepts.md item 7 has the classes and the gaps never marked,
+  which record `answered-from-rows`.
+- **`POST /mock/load`** (`-load-max-bytes`, needs the admin token; off
+  and unrouted without the flag) replaces every row with an ADR-0041
+  recorded read in one transaction, through the loaders in
+  `handlers/load*.go` and `repository/load*.go`. Every field the model
+  cannot hold refuses the load by name; ids, ARNs and owners are what
+  the body held, never minted. The `mock-load-*` contracts below pin it,
+  README.md has the request and answer.
 - **Examples are auto-discovered**: dropping a directory under
   `examples/{working,misconfigured,updates}/` registers it for the
   smoke gate (S43-T12). No per-service smoke ticket. Detail in
@@ -159,7 +167,7 @@ fakeaws is **reactive**: declined Smithy codegen (see `concepts.md` § "Why no S
 
 ## Contract-coverage convention (canonical across all 4 sibling fakes)
 
-`handlers/contract_audit_test.go` enforces the `CRITICAL[<id>]:` / `MUST[<id>]:` docstring → `TestContract_<id>` test pairing across `handlers/*.go`. A wire-shape invariant the consuming `terraform-provider-aws` depends on must NOT live as a comment alone — drift becomes a failed `go test`, not a missed code review. Current contracts (`TestAgentsMDListsEveryContract` keeps this list equal to the source): `ami-fixtures-not-seeded-when-loaded`, `ec2-az-loaded-never-fixed-set`, `ec2-describe-filter-never-ignored`, `ec2-filter-and-across-or-within`, `ec2-filter-refusal-names-every-name-sorted`, `ec2-filter-wildcard-crosses-slash`, `ec2-instance-attributes-from-rows`, `ec2-instance-public-ip-from-primary-eni`, `ec2-sg-group-name-default-vpc-only`, `ec2-sg-rule-source-descriptions-round-trip`, `ec2-subnet-overlap-refused`, `ec2-tags-round-trip-in-tagset`, `ec2-vpc-default-security-group`, `file-backed-db-owner-only`, `identity-change-refused-on-non-empty-db`, `identity-stored-in-database`, `kms-soft-delete-state-pending-deletion`, `listen-addr-default-all-interfaces`, `mock-admin-origin-loopback-only`, `mock-admin-token-required`, `rds-dbi-resource-id-distinct-from-identifier`, `request-log-empty-collection`, `request-log-filter-refused`, `request-log-needs-admin-token`, `request-log-not-modelled-404`, `request-log-off-by-default`, `request-log-panic-recorded`, `request-log-read-set-entry`, `request-log-unimplemented-501`, `responses-carry-the-stored-account`, `route53-records-sorted-lexicographically`, `secretsmanager-soft-delete-state-pending-deletion`, `ssm-put-parameter-no-overwrite-cas`, `state-audit-no-values`, `sts-caller-identity-fake-account`. Same convention live across mockway/fakegcp/fakegenesys.
+`handlers/contract_audit_test.go` enforces the `CRITICAL[<id>]:` / `MUST[<id>]:` docstring → `TestContract_<id>` test pairing across `handlers/*.go`. A wire-shape invariant the consuming `terraform-provider-aws` depends on must NOT live as a comment alone — drift becomes a failed `go test`, not a missed code review. Current contracts (`TestAgentsMDListsEveryContract` keeps this list equal to the source): `ami-fixtures-not-seeded-when-loaded`, `ec2-az-loaded-never-fixed-set`, `ec2-describe-filter-never-ignored`, `ec2-filter-and-across-or-within`, `ec2-filter-refusal-names-every-name-sorted`, `ec2-filter-wildcard-crosses-slash`, `ec2-instance-attributes-from-rows`, `ec2-instance-public-ip-from-primary-eni`, `ec2-sg-group-name-default-vpc-only`, `ec2-sg-rule-ids-stable`, `ec2-sg-rule-source-descriptions-round-trip`, `ec2-subnet-overlap-refused`, `ec2-tags-round-trip-in-tagset`, `ec2-volume-removed-on-terminate`, `ec2-vpc-default-security-group`, `file-backed-db-owner-only`, `iam-role-inline-policies-stored`, `identity-change-refused-on-non-empty-db`, `identity-stored-in-database`, `kms-soft-delete-state-pending-deletion`, `listen-addr-default-all-interfaces`, `mock-admin-origin-loopback-only`, `mock-admin-token-required`, `mock-load-keeps-snapshot`, `mock-load-needs-admin-token`, `mock-load-never-mints`, `mock-load-not-found-loads-nothing`, `mock-load-off-by-default`, `mock-load-refusal-changes-nothing`, `mock-load-refuses-dangling-reference`, `mock-load-refuses-unheld-field`, `mock-load-replaces-every-row-atomically`, `rds-dbi-resource-id-distinct-from-identifier`, `request-log-empty-collection`, `request-log-filter-refused`, `request-log-needs-admin-token`, `request-log-not-modelled-404`, `request-log-off-by-default`, `request-log-panic-recorded`, `request-log-read-set-entry`, `request-log-unimplemented-501`, `responses-carry-the-stored-account`, `restore-refuses-other-schema-version`, `route53-records-sorted-lexicographically`, `secretsmanager-soft-delete-state-pending-deletion`, `ssm-public-parameter-one-predicate`, `ssm-put-parameter-no-overwrite-cas`, `state-audit-no-values`, `sts-caller-identity-fake-account`. Same convention live across mockway/fakegcp/fakegenesys.
 
 ## Where to find AWS resource shapes
 

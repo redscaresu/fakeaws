@@ -181,7 +181,7 @@ func TestLoadSSM_PutParameterOnTheLoadedParameterIsRefused(t *testing.T) {
 	ssmGetEqual(t, srv, al2023Parameter, fixture)
 }
 
-func TestLoadSSM_UnmodelledFieldRefusesTheLoad(t *testing.T) {
+func TestContract_mock_load_refuses_unheld_field(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	fixture := strings.Replace(ssmFixture(t), `"Version": 61`, `"Version": 61, "Foo": "bar"`, 1)
 	status, body := loadSSM(t, srv, ssmGetParameterExchange(http.StatusOK, fixture))
