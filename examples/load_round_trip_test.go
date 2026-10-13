@@ -2,8 +2,6 @@ package examples_test
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"io"
@@ -36,8 +34,9 @@ const (
 // TestLoadRoundTrip proves load, not real shape. Each working example
 // whose every type is a loadable coverage_matrix.yaml row
 // (CoverageMatrix.RoundTripExamples) is applied against its own fakeaws
-// A, recorded (recordRead), loaded into a fresh fakeaws B, and planned
-// with A's state against B, which must exit 0; then destroyed on A.
+// A, refreshed from A, recorded (recordRead), loaded into a fresh fakeaws
+// B, and planned with A's state against B, plain and refresh-only, each
+// of which must exit 0; then destroyed on A.
 func TestLoadRoundTrip(t *testing.T) {
 	requireE2EGate(t)
 	requireTofu(t)
@@ -62,8 +61,8 @@ func TestLoadRoundTrip(t *testing.T) {
 }
 
 // roundTrip applies working/<name> on a fakeaws A, loads A's recorded
-// read into a fresh fakeaws B, plans A's state against B and destroys
-// on A.
+// read into a fresh fakeaws B, plans A's state against B, plain and
+// refresh-only, and destroys on A.
 func roundTrip(t *testing.T, bin, name string) {
 	dir := t.TempDir()
 	tofu := func(fakeaws string, args ...string) {
@@ -72,16 +71,22 @@ func roundTrip(t *testing.T, bin, name string) {
 		out, err := runTofu(t, dir, identityEnv(t, fakeaws)(args[0]), args...)
 		require.NoError(t, err, "tofu %s against %s:\n%s", args[0], fakeaws, out)
 	}
-	a := startFakeAWS(t, bin)
+	a := startFakeAWS(t, bin).url
 	tofu(a, "init")
 	tofu(a, "apply", "-auto-approve")
+	// The provider's read of an applied object differs from what apply
+	// stored (tags null → {}, a route table's routes, a role's inline
+	// policies), so state first takes A's own read: B is then compared
+	// with what A answers, not with what apply wrote.
+	tofu(a, "apply", "-refresh-only", "-auto-approve")
 	read := recordRead(t, a)
 
-	token := make([]byte, 16)
-	_, _ = rand.Read(token) // never fails (crypto/rand)
-	b := startFakeAWS(t, bin, "-admin-token", hex.EncodeToString(token), "-load-max-bytes", strconv.Itoa(loadMaxBytes))
-	loadRead(t, b, hex.EncodeToString(token), read)
-	tofu(b, "plan", "-detailed-exitcode")
+	b := startFakeAWS(t, bin, "-load-max-bytes", strconv.Itoa(loadMaxBytes))
+	loadRead(t, b, read)
+	tofu(b.url, "plan", "-detailed-exitcode")
+	// A plan exits 0 on drift it plans no action for; refresh-only
+	// exits 2 on any attribute B answers otherwise than A did.
+	tofu(b.url, "plan", "-refresh-only", "-detailed-exitcode")
 	tofu(a, "destroy", "-auto-approve")
 }
 
@@ -98,13 +103,13 @@ func pointExampleAt(t *testing.T, dir, name, fakeaws string) {
 
 // loadRead POSTs read to fakeaws's /mock/load, which must answer 200; a
 // refusal names each row's type and path.
-func loadRead(t *testing.T, fakeaws, token string, read *recordedRead) {
+func loadRead(t *testing.T, fakeaws fakeAWS, read *recordedRead) {
 	t.Helper()
 	body, err := json.Marshal(read)
 	require.NoError(t, err)
-	req, err := http.NewRequest(http.MethodPost, fakeaws+"/mock/load", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, fakeaws.url+"/mock/load", bytes.NewReader(body))
 	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+fakeaws.token)
 	resp, err := (&http.Client{Timeout: recordTimeout}).Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -150,7 +155,7 @@ var recordedRoleReads = []string{"GetRole", "ListRolePolicies", "ListAttachedRol
 
 // recordRead records fakeaws's rows as the reader would read them, as
 // fakeaws's account in smokeEnv's region: recordedLists, then each
-// VPC's and instance's handlers.LoadAttributeReads, then each role's
+// VPC's and instance's handlers.LoadAttributeReads (in action order), then each role's
 // recordedRoleReads and inline policies. The ListRoles that finds the
 // roles is sent and counted in calls, never recorded.
 func recordRead(t *testing.T, fakeaws string) *recordedRead {
@@ -172,13 +177,21 @@ func recordRead(t *testing.T, fakeaws string) *recordedRead {
 	}
 	r.decode(bodies["DescribeVpcs"], &vpcs)
 	r.decode(bodies["DescribeInstances"], &instances)
+	// Each attribute read's id param and the ids recorded for it.
+	idSources := map[string]struct {
+		param string
+		ids   []string
+	}{
+		"DescribeInstanceAttribute": {"InstanceId", instances.IDs},
+		"DescribeVpcAttribute":      {"VpcId", vpcs.IDs},
+	}
 	attributes := handlers.LoadAttributeReads()
-	for action, ids := range map[string][]string{"DescribeVpcAttribute": vpcs.IDs, "DescribeInstanceAttribute": instances.IDs} {
-		require.Contains(t, attributes, action)
-		idParam := strings.TrimSuffix(strings.TrimPrefix(action, "Describe"), "Attribute") + "Id"
-		for _, id := range ids {
+	for _, action := range slices.Sorted(maps.Keys(attributes)) {
+		src, ok := idSources[action]
+		require.True(t, ok, "handlers.LoadAttributeReads names %s, which the recorder has no id source for", action)
+		for _, id := range src.ids {
 			for _, attr := range attributes[action] {
-				r.send("ec2", action, map[string]string{idParam: id, "Attribute": attr}, true)
+				r.send("ec2", action, map[string]string{src.param: id, "Attribute": attr}, true)
 			}
 		}
 	}

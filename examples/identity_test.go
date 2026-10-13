@@ -2,9 +2,12 @@ package examples_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,7 +43,7 @@ func TestIdentityAllowedAccountIDs(t *testing.T) {
 	bin := buildFakeAWS(t)
 
 	dir := copyExample(t, "identity", "allowed_account_ids")
-	env := identityEnv(t, startFakeAWS(t, bin, "-account", allowedAccount(t, dir)))
+	env := identityEnv(t, startFakeAWS(t, bin, "-account", allowedAccount(t, dir)).url)
 	for _, args := range [][]string{
 		{"init"},
 		{"apply", "-auto-approve"},
@@ -52,7 +55,7 @@ func TestIdentityAllowedAccountIDs(t *testing.T) {
 	}
 
 	dir = copyExample(t, "identity", "allowed_account_ids")
-	env = identityEnv(t, startFakeAWS(t, bin))
+	env = identityEnv(t, startFakeAWS(t, bin).url)
 	out, err := runTofu(t, dir, env("init"), "init")
 	require.NoError(t, err, "tofu init:\n%s", out)
 	out, err = runTofu(t, dir, env("apply"), "apply", "-auto-approve")
@@ -86,40 +89,103 @@ func buildFakeAWS(t *testing.T) string {
 	return bin
 }
 
-// startFakeAWS starts bin on a free loopback port with a temp db and
-// args, waits for /healthz, and returns its base URL. t.Cleanup kills it.
-func startFakeAWS(t *testing.T, bin string, args ...string) string {
+// fakeAWS is a fakeaws startFakeAWS started: its base URL and the admin
+// token it was started with.
+type fakeAWS struct{ url, token string }
+
+// startFakeAWS starts bin on a free loopback port (launchFakeAWS) and
+// returns it once it answers. t.Cleanup kills it.
+func startFakeAWS(t *testing.T, bin string, args ...string) fakeAWS {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	port := l.Addr().(*net.TCPAddr).Port
 	require.NoError(t, l.Close())
+	f, err := launchFakeAWS(t, bin, port, args...)
+	require.NoError(t, err)
+	return f
+}
+
+// launchFakeAWS starts bin on port with a temp db, a random admin token
+// of its own and args, and waits until GET /mock/state answers 200 to
+// that token: another fakeaws holding port answers 401, so it is never
+// taken for this one. It fails when the process exits first, as one that
+// lost port does, or answers nothing within 10s. t.Cleanup kills its
+// process group.
+func launchFakeAWS(t *testing.T, bin string, port int, args ...string) (fakeAWS, error) {
+	t.Helper()
+	token := make([]byte, 16)
+	_, _ = rand.Read(token) // never fails (crypto/rand)
+	f := fakeAWS{url: fmt.Sprintf("http://127.0.0.1:%d", port), token: hex.EncodeToString(token)}
 
 	var logs strings.Builder
 	cmd := exec.Command(bin, append([]string{
 		"-bind", "127.0.0.1",
 		"-port", strconv.Itoa(port),
 		"-db", filepath.Join(t.TempDir(), "fakeaws.db"),
+		"-admin-token", f.token,
 	}, args...)...)
 	cmd.Stdout, cmd.Stderr = &logs, &logs
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	if err := cmd.Start(); err != nil {
+		return fakeAWS{}, err
+	}
+	exited := make(chan struct{})
+	go func() {
 		_ = cmd.Wait()
-	})
+		close(exited)
+	}()
+	kill := func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-exited
+	}
+	t.Cleanup(kill)
 
-	url := fmt.Sprintf("http://127.0.0.1:%d", port)
 	client := http.Client{Timeout: time.Second}
-	require.Eventually(t, func() bool {
-		resp, err := client.Get(url + "/healthz")
-		if err != nil {
-			return false
+	deadline := time.After(10 * time.Second)
+	for tick := time.Tick(100 * time.Millisecond); ; {
+		select {
+		case <-exited:
+			return fakeAWS{}, fmt.Errorf("fakeaws %v exited before it answered:\n%s", args, logs.String())
+		case <-deadline:
+			kill()
+			return fakeAWS{}, fmt.Errorf("fakeaws %v did not answer within 10s:\n%s", args, logs.String())
+		case <-tick:
+			if f.answers(&client) {
+				return f, nil
+			}
 		}
-		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	}, 10*time.Second, 100*time.Millisecond, "fakeaws %v did not answer /healthz:\n%s", args, &logs)
-	return url
+	}
+}
+
+// answers reports whether GET /mock/state answers f's token 200.
+func (f fakeAWS) answers(client *http.Client) bool {
+	req, err := http.NewRequest(http.MethodGet, f.url+"/mock/state", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+f.token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// TestStartFakeAWSRefusesATakenPort: a fakeaws started on a port another
+// already holds loses the bind and exits, and launchFakeAWS names that
+// rather than returning the other one.
+func TestStartFakeAWSRefusesATakenPort(t *testing.T) {
+	bin := buildFakeAWS(t)
+	first := startFakeAWS(t, bin)
+	u, err := url.Parse(first.url)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(u.Port())
+	require.NoError(t, err)
+	_, err = launchFakeAWS(t, bin, port)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exited before it answered")
 }
 
 // identityEnv returns smokeEnv with every endpoint moved from the

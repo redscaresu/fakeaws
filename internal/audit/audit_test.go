@@ -59,9 +59,7 @@ func TestFullCoverageAudit(t *testing.T) {
 		return
 	}
 	roundTrips, err := matrix.RoundTripExamples(root)
-	if err != nil {
-		t.Fatalf("list round-tripped examples: %v", err)
-	}
+	require.NoError(t, err, "list round-tripped examples")
 
 	for _, entry := range matrix.Entries {
 		t.Run(entry.AwsResourceType, func(t *testing.T) {
@@ -73,9 +71,7 @@ func TestFullCoverageAudit(t *testing.T) {
 			assertExampleDirOrExempt(t, root, "updates", entry.UpdatesDirName, entry.AwsResourceType,
 				entry.UpdatesExempt, entry.UpdatesReason)
 			assertScenarioCoversResource(t, entry)
-			if problem := loadableProblem(entry, roundTrips); problem != "" {
-				t.Error(problem)
-			}
+			assert.Empty(t, loadableProblem(entry, roundTrips))
 		})
 	}
 }
