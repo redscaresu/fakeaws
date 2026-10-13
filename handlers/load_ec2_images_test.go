@@ -124,3 +124,35 @@ func TestLoadEC2Images_SeedRefusesRecordedFields(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, status, body)
 	assert.Contains(t, body, "a seeded image holds no recorded field")
 }
+
+// TestLoadEC2Images_Deprecated: a loaded image past its deprecationTime
+// is left out unless IncludeDeprecated=true or the caller owns it; one
+// not yet deprecated is always answered.
+func TestLoadEC2Images_Deprecated(t *testing.T) {
+	past := strings.Replace(ec2Fixture(t, "DescribeImages"), "<deprecationTime>2099-10-11T18:57:00.000Z</deprecationTime>",
+		"<deprecationTime>2020-01-01T00:00:00.000Z</deprecationTime>", 1)
+	owned := strings.Replace(past, "<imageOwnerId>"+amazonOwner+"</imageOwnerId>", "<imageOwnerId>"+loadAccount+"</imageOwnerId>", 1)
+	byAlias := func(include string) url.Values {
+		params := url.Values{"Owner.1": {"amazon"}}
+		if include != "" {
+			params.Set("IncludeDeprecated", include)
+		}
+		return params
+	}
+	for _, c := range []struct {
+		name, body string
+		params     url.Values
+		want       []string
+	}{
+		{"default leaves it out", past, byAlias(""), []string{imageArm}},
+		{"false leaves it out", past, byAlias("false"), []string{imageArm}},
+		{"true includes it", past, byAlias("true"), []string{imageX86, imageArm}},
+		{"the owner sees it", owned, byAlias("false"), []string{imageX86, imageArm}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+			loadImages(t, srv, netRecorded{"DescribeImages", map[string]string{}, c.body}.exchange())
+			assert.ElementsMatch(t, c.want, describeImageIDs(t, srv, c.params))
+		})
+	}
+}

@@ -3797,11 +3797,9 @@ type ec2DescribeImagesResult struct {
 }
 
 // imageFilters are the DescribeImages filters fakeaws models: the
-// fields an AMI row stores (repository.EC2AMI and a loaded image's
-// EC2AMIRecorded), what ec2AMIToXML derives from them, and the tag
-// filters. A fixture holds no recorded field, so a filter on one
-// matches no fixture. platform, block-device-mapping.* and the rest
-// stay refused, by name.
+// fields an AMI row stores (repository.EC2AMI), what ec2AMIToXML
+// derives from them, imageRecordedFilters, and the tag filters.
+// platform, block-device-mapping.* and the rest stay refused, by name.
 var imageFilters = ec2FilterTable[ec2ImageXML]{
 	values: map[string]func(ec2ImageXML) []string{
 		"name":                func(x ec2ImageXML) []string { return []string{x.Name} },
@@ -3812,12 +3810,25 @@ var imageFilters = ec2FilterTable[ec2ImageXML]{
 		"root-device-name":    func(x ec2ImageXML) []string { return []string{x.RootDeviceName} },
 		"state":               func(x ec2ImageXML) []string { return []string{x.State} },
 		"image-type":          func(x ec2ImageXML) []string { return []string{x.ImageType} },
-		"architecture":        func(x ec2ImageXML) []string { return []string{x.recorded().Architecture} },
-		"is-public":           func(x ec2ImageXML) []string { return []string{x.recorded().Public} },
-		"root-device-type":    func(x ec2ImageXML) []string { return []string{x.recorded().RootDeviceType} },
-		"platform-details":    func(x ec2ImageXML) []string { return []string{x.recorded().PlatformDetails} },
 	},
 	tagID: func(x ec2ImageXML) string { return x.ImageId },
+}
+
+// imageRecordedFilters are the imageFilters on a loaded image's
+// recorded fields (repository.EC2AMIRecorded). An image with none (a
+// fixture, a /mock/images image) cannot answer them, so a read that
+// meets one is refused naming them, never answered empty.
+var imageRecordedFilters = map[string]func(repository.EC2AMIRecorded) string{
+	"architecture":     func(r repository.EC2AMIRecorded) string { return r.Architecture },
+	"is-public":        func(r repository.EC2AMIRecorded) string { return r.Public },
+	"root-device-type": func(r repository.EC2AMIRecorded) string { return r.RootDeviceType },
+	"platform-details": func(r repository.EC2AMIRecorded) string { return r.PlatformDetails },
+}
+
+func init() {
+	for name, field := range imageRecordedFilters {
+		imageFilters.values[name] = func(x ec2ImageXML) []string { return []string{field(x.recorded())} }
+	}
 }
 
 // recorded is x's recorded fields, none for a fixture's.
@@ -3834,12 +3845,11 @@ func (x ec2ImageXML) recorded() repository.EC2AMIRecorded {
 // keeps account ids, self (the caller) and aliases: amazon matches the
 // fixtures' literal ec2AmazonOwner and a loaded image's recorded
 // imageOwnerAlias, whose owner is numeric. ExecutableBy.N is refused,
-// by name. IncludeDisabled and IncludeDeprecated (which data.aws_ami
-// always sends) are read but change nothing: no fixture is disabled or
-// deprecated.
-//
-// ponytail: a loaded image past its recorded deprecationTime is still
-// answered to IncludeDeprecated=false; honour it if a recording holds one.
+// by name, as is an imageRecordedFilters name that meets an image with
+// no recorded field. A loaded image past its recorded deprecationTime
+// is left out unless IncludeDeprecated=true (which data.aws_ami sends
+// as include_deprecated) or the caller owns it, as EC2 does.
+// IncludeDisabled is read but changes nothing: no image is disabled.
 func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	filters, ok := imageFilters.read(w, req, "ImageId.N", "Owner.N", "IncludeDisabled", "IncludeDeprecated")
 	if !ok {
@@ -3871,20 +3881,44 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 	if !ok {
 		return
 	}
-	// Owner.N keeps images of those owners, by id or alias, "self"
-	// meaning the caller: the scope sweep's Owner.1=self sees none of
-	// the fixtures.
 	owners := queryListValues(req.Params, "Owner.")
+	var recordedOnly []string
+	for _, f := range filters {
+		if imageRecordedFilters[f.name] != nil {
+			recordedOnly = append(recordedOnly, f.name)
+		}
+	}
+	includeDeprecated, now := req.Params.Get("IncludeDeprecated") == "true", time.Now()
 	out := ec2DescribeImagesResult{ImagesSet: []ec2ImageXML{}}
 	for _, a := range amis {
 		x := ec2AMIToXML(a)
-		if (len(owners) == 0 || slices.Contains(owners, a.OwnerID) || a.OwnerID == account && slices.Contains(owners, "self") ||
-			x.ImageOwnerAlias != "" && slices.Contains(owners, x.ImageOwnerAlias)) &&
-			imageFilters.matches(x, filters, tags) {
+		if !imageOwnedBy(x, owners, account) {
+			continue
+		}
+		if a.EC2AMIRecorded == nil && len(recordedOnly) > 0 {
+			ec2Refuse(w, req.Action, recordedOnly...)
+			return
+		}
+		if (includeDeprecated || a.OwnerID == account || !imageDeprecated(x.recorded(), now)) && imageFilters.matches(x, filters, tags) {
 			out.ImagesSet = append(out.ImagesSet, x)
 		}
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeImages", &out)
+}
+
+// imageOwnedBy reports whether Owner.N's owners keep x: none, x's
+// owner id or alias, or self for the caller's own. The scope sweep's
+// Owner.1=self sees none of the fixtures.
+func imageOwnedBy(x ec2ImageXML, owners []string, account string) bool {
+	return len(owners) == 0 || slices.Contains(owners, x.OwnerId) || x.OwnerId == account && slices.Contains(owners, "self") ||
+		x.ImageOwnerAlias != "" && slices.Contains(owners, x.ImageOwnerAlias)
+}
+
+// imageDeprecated reports whether r's recorded deprecationTime is at
+// or before now. One that does not parse as RFC 3339 is not.
+func imageDeprecated(r repository.EC2AMIRecorded, now time.Time) bool {
+	t, err := time.Parse(time.RFC3339, r.DeprecationTime)
+	return err == nil && !t.After(now)
 }
 
 // ----- AvailabilityZone -----

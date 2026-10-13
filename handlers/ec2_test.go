@@ -2845,10 +2845,10 @@ func describeImageIDs(t *testing.T, srv *httptest.Server, params url.Values) []s
 }
 
 // TestEC2_DescribeImagesFilters: each imageFilters name selects the
-// fixtures whose row answers it, and one on a loaded image's recorded
-// field none; Owner.1=self with a name filter keeps none, and a filter
-// on a field AMI rows do not store, or ExecutableBy.N, is refused by
-// name. An image answers the owner-alias
+// fixtures whose row answers it; Owner.1=self with a name filter keeps
+// none, and a filter on a field AMI rows do not store, one on a loaded
+// image's recorded field (which no fixture holds), or ExecutableBy.N,
+// is refused by name. An image answers the owner-alias
 // the filter reads: amazon for an Amazon fixture, none for Ubuntu's.
 func TestEC2_DescribeImagesFilters(t *testing.T) {
 	_, srv := newRecordingApp(t, handlers.Options{DBPath: ":memory:"})
@@ -2870,10 +2870,6 @@ func TestEC2_DescribeImagesFilters(t *testing.T) {
 		{"image-type", "machine", append(amazon, ubuntu...)},
 		{"image-type", "kernel", nil},
 		{"tag:Name", "*", nil},
-		{"architecture", "x86_64", nil},
-		{"is-public", "true", nil},
-		{"root-device-type", "ebs", nil},
-		{"platform-details", "Linux/UNIX", nil},
 	} {
 		assert.ElementsMatch(t, c.want, describeImageIDs(t, srv, filter(c.name, c.value)), "%s=%s", c.name, c.value)
 	}
@@ -2900,6 +2896,10 @@ func TestEC2_DescribeImagesFilters(t *testing.T) {
 		name   string
 	}{
 		{filter("platform", "windows"), "platform"},
+		{filter("architecture", "x86_64"), "architecture"},
+		{filter("is-public", "true"), "is-public"},
+		{filter("root-device-type", "ebs"), "root-device-type"},
+		{filter("platform-details", "Linux/UNIX"), "platform-details"},
 		{url.Values{"ExecutableBy.1": {"all"}}, "ExecutableBy.N"},
 	} {
 		resp, body = ec2Call(t, srv, tagRegion, "DescribeImages", c.params)

@@ -6,8 +6,6 @@ package handlers
 // or al2023 parameter names.
 
 import (
-	"cmp"
-
 	"github.com/redscaresu/fakeaws/repository"
 )
 
@@ -27,7 +25,7 @@ func decodeImages(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 	}
 	items := make([]loadItem, len(body.ImagesSet))
 	for i, x := range body.ImagesSet {
-		recorded := *cmp.Or(x.EC2AMIRecorded, &repository.EC2AMIRecorded{})
+		recorded := x.recorded()
 		recorded.OwnerAlias = x.ImageOwnerAlias
 		ami := &repository.EC2AMI{ID: x.ImageId, Name: x.Name, OwnerID: x.OwnerId, VirtualizationType: x.VirtualizationType,
 			RootDeviceName: x.RootDeviceName, Region: env.Region, EC2AMIRecorded: &recorded}
