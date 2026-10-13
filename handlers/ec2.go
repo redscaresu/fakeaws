@@ -1890,13 +1890,25 @@ type ec2SecurityGroupRuleXML struct {
 	TagSet              []ec2ResourceTagXML     `xml:"tagSet>item,omitempty"`
 }
 
+// ec2AllProtocols is the ip protocol of an all-traffic rule.
+const ec2AllProtocols = "-1"
+
 // ec2UserIdGroupPairInfo is a rule's referencedGroupInfo.
 type ec2UserIdGroupPairInfo struct {
 	GroupId string `xml:"groupId"`
 	UserId  string `xml:"userId,omitempty"`
 }
 
+// ec2SecurityGroupRuleToXML is r as a SecurityGroupRule item. An
+// all-traffic rule (ip protocol -1) answers fromPort and toPort -1 as
+// AWS does, whatever ports it was stored with: the provider's
+// aws_vpc_security_group_*_rule read keeps a null port only when it
+// reads -1. DescribeSecurityGroups' ipPermissions answer the stored
+// ports.
 func ec2SecurityGroupRuleToXML(r repository.EC2SecurityGroupRule) ec2SecurityGroupRuleXML {
+	if r.IPProtocol == ec2AllProtocols {
+		r.FromPort, r.ToPort = -1, -1
+	}
 	x := ec2SecurityGroupRuleXML{
 		SecurityGroupRuleId: r.ID, GroupId: r.GroupID, GroupOwnerId: r.GroupOwnerID, IsEgress: r.IsEgress,
 		IpProtocol: r.IPProtocol, FromPort: r.FromPort, ToPort: r.ToPort,
@@ -2236,31 +2248,38 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 // SecurityGroupRuleId.N (what the provider's
 // aws_vpc_security_group_*_rule delete sends) and of each parsed source
 // (RevokeSecurityGroupRules), all or none; a permission left with no
-// source is gone. A rule id the group lacks in this direction is 400
-// InvalidSecurityGroupRuleId.NotFound. A request with no rule id that
-// names no source through readIpPermissions, or with rule ids and a
-// param neither read, is refused rather than deleting nothing.
+// source is gone. A rule id the group lacks in this direction, an
+// empty one included, is 400 InvalidSecurityGroupRuleId.NotFound. A
+// request with no rule id that names no source through
+// readIpPermissions, or with rule ids and a param outside GroupId,
+// SecurityGroupRuleId.N and IpPermissions.N, is refused rather than
+// deleting nothing.
 func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
 	sgID := req.Params.Get("GroupId")
 	if sgID == "" {
 		ec2Refuse(w, req.Action, "no GroupId") // AWS also takes GroupName for ingress
 		return
 	}
+	ruleIDs := queryIDs(req.Params, "SecurityGroupRuleId.")
+	if len(ruleIDs) > 0 && refuseUnreadBesidePermissions(w, req) {
+		return
+	}
+	// An empty id would revoke by source, matching nothing.
+	if slices.Contains(ruleIDs, "") {
+		writeRuleNotFound(w, repository.RuleNotFoundError{})
+		return
+	}
 	egress := direction == "egress"
 	var rm []repository.EC2SecurityGroupRule
-	ruleIDs := queryIDs(req.Params, "SecurityGroupRuleId.")
 	for _, id := range ruleIDs {
 		rm = append(rm, repository.EC2SecurityGroupRule{ID: id, IsEgress: egress})
 	}
-	switch {
-	case len(ruleIDs) == 0 || hasParamUnder(req.Params, "IpPermissions."):
+	if len(ruleIDs) == 0 || hasParamUnder(req.Params, "IpPermissions.") {
 		perms, ok := readIpPermissions(w, req)
 		if !ok {
 			return
 		}
 		rm = append(rm, sgRules(perms, egress)...)
-	case ec2RefuseUnread(w, req, "GroupId", "SecurityGroupRuleId.N"):
-		return
 	}
 	err := app.repo.RevokeSecurityGroupRules(account, region, sgID, rm)
 	if writeRuleNotFound(w, err) {
@@ -2271,6 +2290,24 @@ func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, accou
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, req.Action, nil)
+}
+
+// refuseUnreadBesidePermissions refuses req through ec2Refuse naming
+// each param a revoke by rule id does not read: any but GroupId,
+// SecurityGroupRuleId.N and those under IpPermissions., which
+// readIpPermissions reads. It reports whether it refused.
+func refuseUnreadBesidePermissions(w http.ResponseWriter, req awsproto.QueryRPCRequest) bool {
+	var names []string
+	for _, k := range unread(req.Params, []string{"GroupId", "SecurityGroupRuleId.N"}) {
+		if !strings.HasPrefix(k, "IpPermissions.") {
+			names = append(names, ec2ParamName(k))
+		}
+	}
+	if len(names) == 0 {
+		return false
+	}
+	ec2Refuse(w, req.Action, names...)
+	return true
 }
 
 // writeRuleNotFound writes 400 InvalidSecurityGroupRuleId.NotFound when
@@ -2401,7 +2438,7 @@ func ipPermissionProblem(p ec2IpPermission) string {
 		return tcpUDPPortProblem(p)
 	case "icmp", "icmpv6", "1", "58":
 		return icmpProblem(p)
-	case "-1":
+	case ec2AllProtocols:
 		// A literal "all" falls through and is refused, as EC2 does
 		// (terraform-provider-aws#1793); the provider sends -1 for it.
 		return ""
