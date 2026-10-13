@@ -77,9 +77,9 @@ type Cache interface {
 // migrate only creates what is missing, so an older db would keep the
 // old shape. An added table needs no bump; it is appended to the golden.
 // Nor does a new data-JSON key, unless an old row read without it
-// answers wrongly: 3 adds the VPC DNS attributes, which an older row
+// answers wrongly: 4 adds the VPC DNS attributes, which an older row
 // would answer false.
-const dbSchemaVersion = 3
+const dbSchemaVersion = 4
 
 // New opens the SQLite database at dbPath, refuses it with
 // models.ErrConflict unless it is new or at dbSchemaVersion, applies

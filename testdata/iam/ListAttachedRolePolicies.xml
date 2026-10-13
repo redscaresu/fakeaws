@@ -1,0 +1,19 @@
+<!-- Source: IAM API Reference, ListAttachedRolePolicies example (https://docs.aws.amazon.com/IAM/latest/APIReference/API_ListAttachedRolePolicies.html), with a customer-managed policy added beside its AWS-managed one. -->
+<ListAttachedRolePoliciesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <ListAttachedRolePoliciesResult>
+    <AttachedPolicies>
+      <member>
+        <PolicyName>ReadOnlyAccess</PolicyName>
+        <PolicyArn>arn:aws:iam::aws:policy/ReadOnlyAccess</PolicyArn>
+      </member>
+      <member>
+        <PolicyName>ApplicationBucketWrite</PolicyName>
+        <PolicyArn>arn:aws:iam::123456789012:policy/application_abc/ApplicationBucketWrite</PolicyArn>
+      </member>
+    </AttachedPolicies>
+    <IsTruncated>false</IsTruncated>
+  </ListAttachedRolePoliciesResult>
+  <ResponseMetadata>
+    <RequestId>9a3b490d-c0bd-11e4-9e2a-EXAMPLE5a2c</RequestId>
+  </ResponseMetadata>
+</ListAttachedRolePoliciesResponse>

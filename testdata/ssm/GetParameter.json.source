@@ -1,0 +1,14 @@
+GetParameter.json is the response body of GetParameter on the public
+parameter /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+in us-east-1.
+
+Shape: the AWS Systems Manager API Reference, GetParameter, Response
+Syntax and Examples (its LastModifiedDate is an epoch number with a
+fraction, as 1582657288.8 there):
+https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_GetParameter.html
+
+Values: the parameter's name, and its account-less ARN, from the
+Systems Manager User Guide, "Calling AMI public parameters":
+https://docs.aws.amazon.com/systems-manager/latest/userguide/parameter-store-public-parameters-ami.html
+The AMI id is the AWS documentation's example id (ami-0abcdef1234567890);
+the version and date are illustrative. Never fakeaws output.

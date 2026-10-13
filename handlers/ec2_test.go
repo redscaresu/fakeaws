@@ -2383,7 +2383,7 @@ func TestAMIFixtures_LoadedAL2023ParameterRow(t *testing.T) {
 	markLoaded(t, dbPath, true)
 	app, srv := newTestApp(t, dbPath)
 	_, err := app.Repository().PutSSMParameter(awsproto.FakeAccountID, &repository.SSMParameterPut{
-		Name: al2023Parameter, Type: "String", Value: loadedAMI, Region: "us-east-1", Now: "2026-10-12T00:00:00Z",
+		Name: al2023Parameter, Type: "String", Value: loadedAMI, Region: "us-east-1", Now: "1791763200",
 	}, false)
 	require.NoError(t, err)
 

@@ -31,6 +31,7 @@ var ssmMigrations = []string{
 		tier            TEXT NOT NULL,
 		tags            TEXT NOT NULL,
 		last_modified   TEXT NOT NULL,
+		arn             TEXT,
 		PRIMARY KEY (account_id, region, name)
 	)`,
 }
@@ -53,7 +54,12 @@ type SSMParameter struct {
 	Tier           string
 	Tags           map[string]string
 	Region         string
-	LastModified   string
+	// LastModified is the seconds since the epoch, spelt as SSM's JSON
+	// answers LastModifiedDate (1700000000, 1727130213.462).
+	LastModified string
+	// ARN is a loaded parameter's recorded ARN, "" for one PutParameter
+	// stored, whose ARN is derived.
+	ARN string
 }
 
 // SSMParameterPut is one PutParameter call. A nil optional field takes
@@ -71,7 +77,7 @@ type SSMParameterPut struct {
 	Tier           *string
 	Tags           map[string]string
 	Region         string
-	Now            string
+	Now            string // as SSMParameter.LastModified
 }
 
 const ssmInsert = `INSERT INTO ssm_parameters (account_id, region, name, type, value, version, description, allowed_pattern, data_type, key_id, tier, tags, last_modified)
@@ -133,36 +139,39 @@ func SSMParameterARNAccount(account, name string) string {
 }
 
 // ssmRefMatch matches a row by a name or ARN reference (the provider
-// passes the ARN after an import by ARN); bind it with ssmRefArgs.
-const ssmRefMatch = `name IN (?, ?, ?)`
+// passes the ARN after an import by ARN); bind it with ssmRefArgs. A row
+// with a recorded ARN matches by its name or that ARN only; any other by
+// its name or the ARN its name derives.
+const ssmRefMatch = `(name = ? OR arn = ? OR (arn IS NULL AND name IN (?, ?)))`
 
-// ssmRefArgs binds ssmRefMatch for ref: ref as a name, and each name
-// ref could be the ARN of (parameter/x is /x's and x's) kept only when
-// awsproto.BuildSSMParameterARN builds exactly ref for it, in this region
-// under this account or, for a public parameter, none. So an ARN in
-// another region or account, a public parameter's ARN with an account,
-// or an ARN not in the builder's form matches nothing.
+// ssmRefArgs binds ssmRefMatch for ref: ref as a name and as a recorded
+// ARN, and each name ref could be the derived ARN of (parameter/x is
+// /x's and x's) kept only when awsproto.BuildSSMParameterARN builds
+// exactly ref for it, in this region under this account or, for a
+// public parameter, none. So an ARN in another region or account, a
+// public parameter's ARN with an account, or an ARN not in the
+// builder's form matches nothing unless it is a row's recorded ARN.
 func ssmRefArgs(account, region, ref string) []any {
-	args := []any{ref, nil, nil}
+	args := []any{ref, ref, nil, nil}
 	_, path, ok := strings.Cut(ref, ":parameter/")
 	if !ok {
 		return args
 	}
 	for i, name := range []string{"/" + path, path} {
 		if awsproto.BuildSSMParameterARN(region, SSMParameterARNAccount(account, name), name) == ref {
-			args[i+1] = name
+			args[i+2] = name
 		}
 	}
 	return args
 }
 
-const ssmSelect = `SELECT name, type, value, version, description, allowed_pattern, data_type, key_id, tier, tags, region, last_modified FROM ssm_parameters`
+const ssmSelect = `SELECT name, type, value, version, description, allowed_pattern, data_type, key_id, tier, tags, region, last_modified, COALESCE(arn, '') FROM ssm_parameters`
 
 func scanSSMParameter(row interface{ Scan(...any) error }) (SSMParameter, error) {
 	var p SSMParameter
 	var tags string
 	err := row.Scan(&p.Name, &p.Type, &p.Value, &p.Version, &p.Description, &p.AllowedPattern,
-		&p.DataType, &p.KeyID, &p.Tier, &tags, &p.Region, &p.LastModified)
+		&p.DataType, &p.KeyID, &p.Tier, &tags, &p.Region, &p.LastModified, &p.ARN)
 	if err != nil {
 		return p, err
 	}
@@ -234,3 +243,36 @@ func (r *Repository) PatchSSMParameterTags(account, region, ref string, patch ma
 	}
 	return nil
 }
+
+// LoadSSMParameter stores p, a recorded parameter, under account through
+// a load's transaction, its ARN as recorded. The loader refuses a
+// recording with no ARN; an empty one would be stored NULL, as a
+// PutParameter row's is.
+func LoadSSMParameter(tx *LoadTx, account string, p *SSMParameter) error {
+	tags, err := json.Marshal(p.Tags)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO ssm_parameters (account_id, region, name, type, value, version, description, allowed_pattern, data_type, key_id, tier, tags, last_modified, arn)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))`,
+		account, p.Region, p.Name, p.Type, p.Value, p.Version, p.Description, p.AllowedPattern,
+		p.DataType, p.KeyID, p.Tier, string(tags), p.LastModified, p.ARN)
+	return err
+}
+
+// LoadedSSMParameter reads the parameter name a load stored back through
+// its transaction, with the account it is stored under.
+func LoadedSSMParameter(tx *LoadTx, name string) (string, *SSMParameter, error) {
+	var account string
+	row := tx.QueryRow(`SELECT account_id, `+strings.TrimPrefix(ssmSelect, "SELECT ")+` WHERE name = ?`, name)
+	p, err := scanSSMParameter(scanFunc(func(dest ...any) error { return row.Scan(append([]any{&account}, dest...)...) }))
+	if err != nil {
+		return "", nil, err
+	}
+	return account, &p, nil
+}
+
+// scanFunc is a Scan as a value scanSSMParameter takes.
+type scanFunc func(dest ...any) error
+
+func (f scanFunc) Scan(dest ...any) error { return f(dest...) }
