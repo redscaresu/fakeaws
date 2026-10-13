@@ -559,7 +559,7 @@ entries:
   # scenario_resource_type omitted: a data source, not a generator resource.
   - aws_service: sts
     aws_resource_type: aws_caller_identity
-    loadable: true
+    loadable_exempt_reason: "No row to load: a load stores the envelope's account as the identity GetCallerIdentity answers (TestContract_identity_stored_in_database), and a fresh fakeaws answers 000000000000 with no load, the account the round trip records, so its round trip could not fail."
     working_dir_name: env_endpoints
     misconfigured_exempt: true
     misconfigured_exempt_reason: "GetCallerIdentity takes no input to misconfigure; a wrong account fails working/env_endpoints via allowed_account_ids (Arn) and its precondition (Account)."

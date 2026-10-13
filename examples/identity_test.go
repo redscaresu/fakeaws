@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -93,25 +94,41 @@ func buildFakeAWS(t *testing.T) string {
 // token it was started with.
 type fakeAWS struct{ url, token string }
 
+// startAttempts is how many free ports startFakeAWS tries: another
+// process can bind the one it picked before fakeaws does.
+const startAttempts = 3
+
+// errExitedFirst is launchFakeAWS's failure when fakeaws exits before
+// it answers, as one that lost its port does.
+var errExitedFirst = errors.New("exited before it answered")
+
 // startFakeAWS starts bin on a free loopback port (launchFakeAWS) and
-// returns it once it answers. t.Cleanup kills it.
+// returns it once it answers, trying a new port when fakeaws exits
+// first, up to startAttempts ports. t.Cleanup kills it.
 func startFakeAWS(t *testing.T, bin string, args ...string) fakeAWS {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := l.Addr().(*net.TCPAddr).Port
-	require.NoError(t, l.Close())
-	f, err := launchFakeAWS(t, bin, port, args...)
-	require.NoError(t, err)
+	var f fakeAWS
+	var err error
+	for range startAttempts {
+		l, lerr := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, lerr)
+		port := l.Addr().(*net.TCPAddr).Port
+		require.NoError(t, l.Close())
+		if f, err = launchFakeAWS(t, bin, port, args...); !errors.Is(err, errExitedFirst) {
+			break
+		}
+	}
+	require.NoError(t, err, "after %d ports", startAttempts)
 	return f
 }
 
 // launchFakeAWS starts bin on port with a temp db, a random admin token
 // of its own and args, and waits until GET /mock/state answers 200 to
 // that token: another fakeaws holding port answers 401, so it is never
-// taken for this one. It fails when the process exits first, as one that
-// lost port does, or answers nothing within 10s. t.Cleanup kills its
-// process group.
+// taken for this one. It fails with errExitedFirst when the process
+// exits first, as one that lost port does, or when it answers nothing
+// within 10s. t.Cleanup kills its process group unless it has exited,
+// when its pid may already be another's.
 func launchFakeAWS(t *testing.T, bin string, port int, args ...string) (fakeAWS, error) {
 	t.Helper()
 	token := make([]byte, 16)
@@ -136,8 +153,12 @@ func launchFakeAWS(t *testing.T, bin string, port int, args ...string) (fakeAWS,
 		close(exited)
 	}()
 	kill := func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-exited
+		select {
+		case <-exited: // reaped: its pid may be another process group's now
+		default:
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			<-exited
+		}
 	}
 	t.Cleanup(kill)
 
@@ -146,7 +167,7 @@ func launchFakeAWS(t *testing.T, bin string, port int, args ...string) (fakeAWS,
 	for tick := time.Tick(100 * time.Millisecond); ; {
 		select {
 		case <-exited:
-			return fakeAWS{}, fmt.Errorf("fakeaws %v exited before it answered:\n%s", args, logs.String())
+			return fakeAWS{}, fmt.Errorf("fakeaws %v %w:\n%s", args, errExitedFirst, logs.String())
 		case <-deadline:
 			kill()
 			return fakeAWS{}, fmt.Errorf("fakeaws %v did not answer within 10s:\n%s", args, logs.String())
@@ -177,6 +198,9 @@ func (f fakeAWS) answers(client *http.Client) bool {
 // already holds loses the bind and exits, and launchFakeAWS names that
 // rather than returning the other one.
 func TestStartFakeAWSRefusesATakenPort(t *testing.T) {
+	requireE2EGate(t)
+	requireShard(t)
+	t.Parallel()
 	bin := buildFakeAWS(t)
 	first := startFakeAWS(t, bin)
 	u, err := url.Parse(first.url)
@@ -184,8 +208,7 @@ func TestStartFakeAWSRefusesATakenPort(t *testing.T) {
 	port, err := strconv.Atoi(u.Port())
 	require.NoError(t, err)
 	_, err = launchFakeAWS(t, bin, port)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "exited before it answered")
+	require.ErrorIs(t, err, errExitedFirst)
 }
 
 // identityEnv returns smokeEnv with every endpoint moved from the

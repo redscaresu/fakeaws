@@ -237,7 +237,7 @@ func resetFakeAWS(t *testing.T) {
 
 // smokeTests are the e2e tests outside the three trees; they are
 // sharded along with the examples.
-var smokeTests = []string{"TestFilterRefused", "TestLoadRoundTrip", "TestSmokeEnvFailsClosed", "TestWebStepOneState"}
+var smokeTests = []string{"TestFilterRefused", "TestLoadRoundTrip", "TestSmokeEnvFailsClosed", "TestStartFakeAWSRefusesATakenPort", "TestWebStepOneState"}
 
 // inShard reports whether name ("<tree>/<dir>" or a smokeTests entry)
 // runs in this job. SMOKE_SHARD=i/n (1-based) deals the sorted names
