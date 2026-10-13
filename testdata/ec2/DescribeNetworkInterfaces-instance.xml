@@ -1,0 +1,46 @@
+<!-- Source: DescribeInstances.xml's interface as its own DescribeNetworkInterfaces item, request NetworkInterfaceId.1, spelt as DescribeNetworkInterfaces.xml spells an item (AWS EC2 API reference, DescribeNetworkInterfaces, Example 1, https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeNetworkInterfaces.html): the same values, its subnet's zone us-west-2c for availabilityZone, requesterManaged false, an empty tagSet, and an attachment that adds the NetworkInterfaceAttachment data type's instanceId and instanceOwnerId (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_NetworkInterfaceAttachment.html). -->
+<DescribeNetworkInterfacesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+    <requestId>fc45294c-006b-457b-bab9-012f5b3b0e40</requestId>
+     <networkInterfaceSet>
+       <item>
+         <networkInterfaceId>eni-551ba033</networkInterfaceId>
+         <subnetId>subnet-0bb1c79de301436ee</subnetId>
+         <vpcId>vpc-0ee975135dEXAMPLE</vpcId>
+         <availabilityZone>us-west-2c</availabilityZone>
+         <description>Primary network interface</description>
+         <ownerId>111122223333</ownerId>
+         <requesterManaged>false</requesterManaged>
+         <status>in-use</status>
+         <macAddress>02:dd:2c:5e:01:69</macAddress>
+         <privateIpAddress>10.0.2.88</privateIpAddress>
+         <privateDnsName>ip-10-0-2-88.us-west-2.compute.internal</privateDnsName>
+         <sourceDestCheck>true</sourceDestCheck>
+         <groupSet>
+           <item>
+             <groupId>sg-1234567890abcdef0</groupId>
+             <groupName>SSHAccess</groupName>
+           </item>
+         </groupSet>
+         <attachment>
+           <attachmentId>eni-attach-39697adc</attachmentId>
+           <instanceId>i-1234567890abcdef0</instanceId>
+           <instanceOwnerId>111122223333</instanceOwnerId>
+           <deviceIndex>0</deviceIndex>
+           <networkCardIndex>0</networkCardIndex>
+           <status>attached</status>
+           <attachTime>2018-05-08T16:46:19.000Z</attachTime>
+           <deleteOnTermination>true</deleteOnTermination>
+         </attachment>
+         <tagSet/>
+         <privateIpAddressesSet>
+           <item>
+             <privateIpAddress>10.0.2.88</privateIpAddress>
+             <privateDnsName>ip-10-0-2-88.us-west-2.compute.internal</privateDnsName>
+             <primary>true</primary>
+           </item>
+         </privateIpAddressesSet>
+         <ipv6AddressesSet/>
+         <interfaceType>interface</interfaceType>
+       </item>
+     </networkInterfaceSet>
+</DescribeNetworkInterfacesResponse>

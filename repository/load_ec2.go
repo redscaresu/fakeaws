@@ -113,6 +113,15 @@ func (lt *LoadTx) PutSecurityGroupRule(account, region string, rule EC2SecurityG
 	return insertRule(lt, account, region, rule)
 }
 
+// PutInstance stores inst under account, or answers models.ErrNotFound
+// when its subnet is not stored, which its foreign key would refuse.
+func (lt *LoadTx) PutInstance(account string, inst *EC2Instance) error {
+	if err := lt.exists(`SELECT 1 FROM ec2_subnets WHERE account_id = ? AND id = ?`, account, inst.SubnetID); err != nil {
+		return err
+	}
+	return insertInstance(lt, account, inst)
+}
+
 // ErrNoSubnet refuses a network interface whose subnet is not stored.
 var ErrNoSubnet = fmt.Errorf("%w: the network interface's subnet is not stored", models.ErrNotFound)
 
@@ -164,6 +173,28 @@ func (lt *LoadTx) UpdateVPC(id string, change func(*EC2VPC)) error {
 	body, _ := json.Marshal(v)
 	_, err = lt.Exec(`UPDATE ec2_vpcs SET data = ? WHERE id = ?`, string(body), id)
 	return err
+}
+
+// UpdateInstance applies change to the stored instance id and saves
+// it, or answers models.ErrNotFound when there is none.
+func (lt *LoadTx) UpdateInstance(id string, change func(*EC2Instance)) error {
+	inst, err := lt.Instance(id)
+	if err != nil {
+		return err
+	}
+	change(inst)
+	body, _ := json.Marshal(inst)
+	_, err = lt.Exec(`UPDATE ec2_instances SET data = ? WHERE id = ?`, string(body), id)
+	return err
+}
+
+// Instance reads the stored instance id.
+func (lt *LoadTx) Instance(id string) (*EC2Instance, error) {
+	var inst EC2Instance
+	if err := lt.data(&inst, `SELECT data FROM ec2_instances WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	return &inst, nil
 }
 
 // VPC reads the stored VPC id.
@@ -286,6 +317,20 @@ func (lt *LoadTx) SecurityGroupRule(id string) (EC2SecurityGroupRule, error) {
 func (lt *LoadTx) NetworkInterface(id string) (*EC2NetworkInterface, error) {
 	var eni EC2NetworkInterface
 	if err := lt.data(&eni, `SELECT data FROM ec2_network_interfaces WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	return &eni, nil
+}
+
+// NetworkInterfaceOfInstance reads the stored network interface
+// attached to instance id, nil when there is none.
+func (lt *LoadTx) NetworkInterfaceOfInstance(id string) (*EC2NetworkInterface, error) {
+	var eni EC2NetworkInterface
+	err := lt.data(&eni, `SELECT data FROM ec2_network_interfaces WHERE instance_id = ?`, id)
+	if errors.Is(err, models.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &eni, nil

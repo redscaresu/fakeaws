@@ -1,0 +1,8 @@
+<!-- Source: AWS EC2 API reference, DescribeInstanceAttribute, Example 1 (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeInstanceAttribute.html), request InstanceId=i-1234567890abcdef0 and Attribute=userData, with its instanceType element replaced by the response's userData member, its value the base64 of a two-line script whose first line ends CR LF and whose last ends LF. -->
+<DescribeInstanceAttributeResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
+  <instanceId>i-1234567890abcdef0</instanceId>
+  <userData>
+    <value>IyEvYmluL2Jhc2gNCnl1bSB1cGRhdGUgLXkK</value>
+  </userData>
+</DescribeInstanceAttributeResponse>

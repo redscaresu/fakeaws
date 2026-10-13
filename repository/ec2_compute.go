@@ -112,11 +112,21 @@ type EC2Instance struct {
 	InstanceType           string `json:"instance_type"`
 	KeyName                string `json:"key_name,omitempty"`
 	IAMInstanceProfileName string `json:"iam_instance_profile_name,omitempty"`
-	UserData               string `json:"user_data,omitempty"` // base64, as RunInstances sent it
-	State                  string `json:"state"`
-	Region                 string `json:"region"`
-	ARN                    string `json:"arn"`
-	CreatedAt              string `json:"created_at"`
+	// IAMInstanceProfileARN and IAMInstanceProfileID are the profile's
+	// as stored when the instance launched, or as recorded for a loaded
+	// instance; empty for a row stored before they were kept.
+	IAMInstanceProfileARN string `json:"iam_instance_profile_arn,omitempty"`
+	IAMInstanceProfileID  string `json:"iam_instance_profile_id,omitempty"`
+	UserData              string `json:"user_data,omitempty"` // base64, as RunInstances sent it or DescribeInstanceAttribute answered it
+	State                 string `json:"state"`
+	Region                string `json:"region"`
+	ARN                   string `json:"arn"`
+	CreatedAt             string `json:"created_at"` // DescribeInstances' launchTime
+	ReservationID         string `json:"reservation_id,omitempty"`
+	// Recorded is a loaded instance's DescribeInstances fields that
+	// nothing else holds, encoded by handlers/ec2.go; a launched instance
+	// has none.
+	Recorded json.RawMessage `json:"recorded,omitempty"`
 	EC2InstanceAttributes
 }
 
@@ -233,17 +243,8 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance, eni *EC2N
 		return err
 	}
 	defer tx.Rollback()
-	body, _ := json.Marshal(inst)
-	var profile *string
-	if inst.IAMInstanceProfileName != "" {
-		profile = &inst.IAMInstanceProfileName
-	}
-	if _, err := tx.Exec(
-		`INSERT INTO ec2_instances (account_id, region, id, subnet_id, ami_id, instance_type, iam_instance_profile_name, state, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		account, inst.Region, inst.ID, inst.SubnetID, inst.AMIID, inst.InstanceType,
-		profile, inst.State, inst.ARN, string(body), inst.CreatedAt,
-	); err != nil {
-		return mapInsertError(err)
+	if err := insertInstance(tx, account, inst); err != nil {
+		return err
 	}
 	used, err := stringSet(tx, subnetPrivateIPs, account, subnet.ID, account, subnet.ID)
 	if err != nil {
@@ -259,6 +260,18 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance, eni *EC2N
 		return err
 	}
 	return tx.Commit()
+}
+
+// insertInstance stores inst under account, with no
+// iam_instance_profile_name when it has no profile.
+func insertInstance(ex execer, account string, inst *EC2Instance) error {
+	body, _ := json.Marshal(inst)
+	_, err := ex.Exec(
+		`INSERT INTO ec2_instances (account_id, region, id, subnet_id, ami_id, instance_type, iam_instance_profile_name, state, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		account, inst.Region, inst.ID, inst.SubnetID, inst.AMIID, inst.InstanceType,
+		nullIfEmpty(inst.IAMInstanceProfileName), inst.State, inst.ARN, string(body), inst.CreatedAt,
+	)
+	return mapInsertError(err)
 }
 
 // insertENI stores eni under account, with no instance_id when it has

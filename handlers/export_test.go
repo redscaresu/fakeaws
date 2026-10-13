@@ -19,6 +19,10 @@ func EC2DeriveEIP(allocID string) string { return ec2DerivePublicIP(ec2EIPNet, a
 
 func EC2DeriveAutoIP(eniID string) string { return ec2DerivePublicIP(ec2AutoIPNet, eniID) }
 
+// For load_ec2_compute_test.go, which records each attribute a loaded
+// instance references.
+var InstanceReadAttributes = ec2InstanceReadAttributes
+
 // For recorder_test.go's test routes, which mark a class.
 var MarkClass = markClass
 
@@ -221,7 +225,7 @@ func testVpcLoader(action string) loader {
 				}}
 				if v.Refs != nil {
 					for _, r := range v.Refs.Refs {
-						items[i].Refs = append(items[i].Refs, loadReference{loadRef{r.Type, r.ID}, r.Unread})
+						items[i].Refs = append(items[i].Refs, loadReference{loadRef: loadRef{r.Type, r.ID}, Unread: r.Unread})
 					}
 				}
 			}

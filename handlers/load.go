@@ -43,10 +43,14 @@ func (ex *loadExchange) key() LoadKey { return LoadKey{ex.Service, ex.Action} }
 type loadRef struct{ Type, ID string }
 
 // loadReference is a row an item references. Unread flags one the
-// reader never reads, so no exchange can hold it.
+// reader never reads, so no exchange can hold it. A Path, with its
+// Index (Tree.Subtree's), is where the item's body holds its own copy
+// of the row, which must agree with the row's recorded item.
 type loadReference struct {
 	loadRef
 	Unread bool
+	Path   string
+	Index  int
 }
 
 // loadItem is one item a loader decoded: its row, where its recorded
@@ -310,7 +314,9 @@ func (run *loadRun) fill(tx *repository.LoadTx) error {
 			}
 		}
 	}
-	run.resolve()
+	if err := run.resolve(); err != nil {
+		return err
+	}
 	for _, row := range run.order {
 		if err := run.diff(tx, row); err != nil {
 			return err
@@ -597,11 +603,15 @@ func itemNode(chain *Tree, path string) *Tree {
 
 // resolve checks every row's references: one naming no loaded row is
 // refused naming both, unless it is flagged Unread, which the answer
-// lists under unresolved.
-func (run *loadRun) resolve() {
+// lists under unresolved; one with a Path is checked by agree.
+func (run *loadRun) resolve() error {
 	for _, row := range run.order {
 		for _, ref := range row.Refs {
-			switch _, loaded := run.rows[ref.loadRef]; {
+			switch target, loaded := run.rows[ref.loadRef]; {
+			case loaded && ref.Path != "":
+				if err := run.agree(row, ref, target); err != nil {
+					return err
+				}
 			case loaded:
 			case ref.Unread:
 				run.answer.Unresolved[ref.Type] = append(run.answer.Unresolved[ref.Type], ref.ID)
@@ -614,6 +624,33 @@ func (run *loadRun) resolve() {
 		slices.Sort(ids)
 		run.answer.Unresolved[typ] = slices.Compact(ids)
 	}
+	return nil
+}
+
+// agree refuses, naming row, target, the field and both exchanges, each
+// field of row's copy of target at ref's path whose value target's
+// recorded item gives otherwise. Only fields holding a value of their
+// own compare: a set or structure the two shapes spell apart (an
+// instance's attachment) is left to row's rendering diff.
+func (run *loadRun) agree(row *loadRow, ref loadReference, target *loadRow) error {
+	copied, err := run.recorded(row.exchange, &loadItem{Path: ref.Path, Index: ref.Index})
+	if err != nil {
+		return err
+	}
+	recorded, err := run.recorded(target.exchange, &target.loadItem)
+	if err != nil {
+		return err
+	}
+	mine, theirs := itemNode(copied, ref.Path), itemNode(recorded, target.Path)
+	key := run.env.Exchanges[target.exchange].key()
+	for _, k := range mine.kids {
+		i := slices.IndexFunc(theirs.kids, func(t *Tree) bool { return t.name == k.name && len(t.kids) == 0 })
+		if !k.member && len(k.kids) == 0 && i >= 0 && theirs.kids[i].text != k.text {
+			run.refuse(row.exchange, "%s %s: its %s %s's %s differs from exchange %d's (%s %s)",
+				row.Type, row.ID, ref.Type, ref.ID, diffLabel(k.name, k.json), target.exchange, key.Service, key.Action)
+		}
+	}
+	return nil
 }
 
 // diff renders row through its loader and refuses each path where the
