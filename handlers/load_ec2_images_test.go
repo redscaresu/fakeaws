@@ -126,8 +126,9 @@ func TestLoadEC2Images_SeedRefusesRecordedFields(t *testing.T) {
 }
 
 // TestLoadEC2Images_Deprecated: a loaded image past its deprecationTime
-// is left out unless IncludeDeprecated=true or the caller owns it; one
-// not yet deprecated is always answered.
+// is left out of a listing unless IncludeDeprecated=true or the caller
+// owns it, and answered when read by its id; one not yet deprecated is
+// always answered.
 func TestLoadEC2Images_Deprecated(t *testing.T) {
 	past := strings.Replace(ec2Fixture(t, "DescribeImages"), "<deprecationTime>2099-10-11T18:57:00.000Z</deprecationTime>",
 		"<deprecationTime>2020-01-01T00:00:00.000Z</deprecationTime>", 1)
@@ -148,6 +149,7 @@ func TestLoadEC2Images_Deprecated(t *testing.T) {
 		{"false leaves it out", past, byAlias("false"), []string{imageArm}},
 		{"true includes it", past, byAlias("true"), []string{imageX86, imageArm}},
 		{"the owner sees it", owned, byAlias("false"), []string{imageX86, imageArm}},
+		{"read by its id", past, url.Values{"ImageId.1": {imageX86}}, []string{imageX86}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})

@@ -3847,8 +3847,12 @@ func (x ec2ImageXML) recorded() repository.EC2AMIRecorded {
 // imageOwnerAlias, whose owner is numeric. ExecutableBy.N is refused,
 // by name, as is an imageRecordedFilters name that meets an image with
 // no recorded field. A loaded image past its recorded deprecationTime
-// is left out unless IncludeDeprecated=true (which data.aws_ami sends
-// as include_deprecated) or the caller owns it, as EC2 does.
+// is left out of a listing (no ImageId.N) unless IncludeDeprecated=true
+// (which data.aws_ami sends as include_deprecated) or the caller owns
+// it: EC2 User Guide, "Deprecate an AMI" (ami-deprecate.html), "the
+// deprecated AMI does not appear in DescribeImages API calls unless you
+// specify its ID or specify that deprecated AMIs must appear", and
+// "AMI owners continue to see deprecated AMIs".
 // IncludeDisabled is read but changes nothing: no image is disabled.
 func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	filters, ok := imageFilters.read(w, req, "ImageId.N", "Owner.N", "IncludeDisabled", "IncludeDeprecated")
@@ -3888,7 +3892,7 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 			recordedOnly = append(recordedOnly, f.name)
 		}
 	}
-	includeDeprecated, now := req.Params.Get("IncludeDeprecated") == "true", time.Now()
+	includeDeprecated, now := len(wanted) > 0 || req.Params.Get("IncludeDeprecated") == "true", time.Now()
 	out := ec2DescribeImagesResult{ImagesSet: []ec2ImageXML{}}
 	for _, a := range amis {
 		x := ec2AMIToXML(a)
