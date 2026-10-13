@@ -202,6 +202,10 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 		app.ec2AuthorizeSecurityGroupRules(w, account, region, "egress", req)
 	case "RevokeSecurityGroupEgress":
 		app.ec2RevokeSecurityGroupRules(w, account, region, "egress", req)
+	case "DescribeSecurityGroupRules":
+		app.ec2DescribeSecurityGroupRules(w, account, region, req)
+	case "ModifySecurityGroupRules":
+		ec2Refuse(w, req.Action, "SecurityGroupRule.N")
 
 	// Any other Action hits the default arm and surfaces as 404 with
 	// a log line — per concepts.md "Anti-patterns explicitly forbidden",
@@ -1883,6 +1887,7 @@ type ec2SecurityGroupRuleXML struct {
 	PrefixListId        string                  `xml:"prefixListId,omitempty"`
 	ReferencedGroupInfo *ec2UserIdGroupPairInfo `xml:"referencedGroupInfo,omitempty"`
 	Description         string                  `xml:"description,omitempty"`
+	TagSet              []ec2ResourceTagXML     `xml:"tagSet>item,omitempty"`
 }
 
 // ec2UserIdGroupPairInfo is a rule's referencedGroupInfo.
@@ -2227,31 +2232,124 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 	awsproto.WriteEC2QueryRPCResponse(w, req.Action, &out)
 }
 
-// ec2RevokeSecurityGroupRules deletes the rule of each parsed source
-// (RevokeSecurityGroupRules); a permission left with no source is gone.
-// A request that names no source, by SecurityGroupRuleId.N (what the
-// provider's aws_vpc_security_group_*_rule delete sends) or through
-// readIpPermissions, is refused rather than deleting nothing.
+// ec2RevokeSecurityGroupRules deletes the rule of each
+// SecurityGroupRuleId.N (what the provider's
+// aws_vpc_security_group_*_rule delete sends) and of each parsed source
+// (RevokeSecurityGroupRules), all or none; a permission left with no
+// source is gone. A rule id the group lacks in this direction is 400
+// InvalidSecurityGroupRuleId.NotFound. A request with no rule id that
+// names no source through readIpPermissions, or with rule ids and a
+// param neither read, is refused rather than deleting nothing.
 func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
-	if hasParamUnder(req.Params, "SecurityGroupRuleId.") {
-		ec2Refuse(w, req.Action, "SecurityGroupRuleId.N")
-		return
-	}
 	sgID := req.Params.Get("GroupId")
 	if sgID == "" {
 		ec2Refuse(w, req.Action, "no GroupId") // AWS also takes GroupName for ingress
 		return
 	}
-	perms, ok := readIpPermissions(w, req)
-	if !ok {
+	egress := direction == "egress"
+	var rm []repository.EC2SecurityGroupRule
+	ruleIDs := queryIDs(req.Params, "SecurityGroupRuleId.")
+	for _, id := range ruleIDs {
+		rm = append(rm, repository.EC2SecurityGroupRule{ID: id, IsEgress: egress})
+	}
+	switch {
+	case len(ruleIDs) == 0 || hasParamUnder(req.Params, "IpPermissions."):
+		perms, ok := readIpPermissions(w, req)
+		if !ok {
+			return
+		}
+		rm = append(rm, sgRules(perms, egress)...)
+	case ec2RefuseUnread(w, req, "GroupId", "SecurityGroupRuleId.N"):
 		return
 	}
-	rm := sgRules(perms, direction == "egress")
-	if err := app.repo.RevokeSecurityGroupRules(account, region, sgID, rm); err != nil {
+	err := app.repo.RevokeSecurityGroupRules(account, region, sgID, rm)
+	if writeRuleNotFound(w, err) {
+		return
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, req.Action, nil)
+}
+
+// writeRuleNotFound writes 400 InvalidSecurityGroupRuleId.NotFound when
+// err is a repository.RuleNotFoundError, which the provider's
+// findSecurityGroupRules reads as the rule gone, and reports whether it
+// wrote.
+// UNVERIFIED(aws-code): InvalidSecurityGroupRuleId.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func writeRuleNotFound(w http.ResponseWriter, err error) bool {
+	var nf repository.RuleNotFoundError
+	if !errors.As(err, &nf) {
+		return false
+	}
+	awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidSecurityGroupRuleId.NotFound",
+		fmt.Sprintf("The security group rule ID '%s' does not exist", nf.ID))
+	return true
+}
+
+// ec2DescribeSecurityGroupRulesResult is a DescribeSecurityGroupRules
+// answer, in testdata/ec2/DescribeSecurityGroupRules.xml's shape.
+type ec2DescribeSecurityGroupRulesResult struct {
+	Rules []ec2SecurityGroupRuleXML `xml:"securityGroupRuleSet>item"`
+}
+
+// sgRuleFilters are the DescribeSecurityGroupRules filters: every name
+// the EC2 API reference lists, and tag-key and tag-value.
+var sgRuleFilters = ec2FilterTable[ec2SecurityGroupRuleXML]{
+	values: map[string]func(ec2SecurityGroupRuleXML) []string{
+		"group-id":               func(r ec2SecurityGroupRuleXML) []string { return []string{r.GroupId} },
+		"security-group-rule-id": func(r ec2SecurityGroupRuleXML) []string { return []string{r.SecurityGroupRuleId} },
+	},
+	tagID: func(r ec2SecurityGroupRuleXML) string { return r.SecurityGroupRuleId },
+}
+
+// ec2DescribeSecurityGroupRules answers each SecurityGroupRuleId.N or,
+// with none, every rule in the region, each through sgRuleFilters, from
+// the rule rows. An unknown id is 400 InvalidSecurityGroupRuleId.NotFound.
+func (app *Application) ec2DescribeSecurityGroupRules(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	filters, ok := sgRuleFilters.read(w, req, "SecurityGroupRuleId.N")
+	if !ok {
+		return
+	}
+	rules, err := app.findSecurityGroupRules(account, region, queryIDs(req.Params, "SecurityGroupRuleId."))
+	if writeRuleNotFound(w, err) {
+		return
+	}
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
+		return
+	}
+	var out ec2DescribeSecurityGroupRulesResult
+	for _, r := range rules {
+		x := ec2SecurityGroupRuleToXML(r)
+		x.TagSet = tags[r.ID]
+		if sgRuleFilters.matches(x, filters, tags) {
+			out.Rules = append(out.Rules, x)
+		}
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, req.Action, &out)
+}
+
+// findSecurityGroupRules returns the rule of each of ids or, with none,
+// every rule in the region.
+func (app *Application) findSecurityGroupRules(account, region string, ids []string) ([]repository.EC2SecurityGroupRule, error) {
+	if len(ids) == 0 {
+		return app.repo.ListRegionSecurityGroupRules(account, region)
+	}
+	var out []repository.EC2SecurityGroupRule
+	for _, id := range ids {
+		r, err := app.repo.GetSecurityGroupRule(account, region, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // refuseIpPermissions writes the error real EC2 answers for the first
@@ -3802,6 +3900,10 @@ var ec2TaggedKinds = []ec2TaggedKind{
 	}},
 	{"sg-", "security-group", "InvalidGroup.NotFound", func(app *Application, account, region, id string) error {
 		_, err := app.repo.GetSecurityGroup(account, region, id)
+		return err
+	}},
+	{"sgr-", "security-group-rule", "InvalidSecurityGroupRuleId.NotFound", func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetSecurityGroupRule(account, region, id)
 		return err
 	}},
 	{"i-", "instance", "InvalidInstanceID.NotFound", func(app *Application, account, region, id string) error {

@@ -1174,6 +1174,45 @@ func (r *Repository) ListSecurityGroupRules(account, region, id string) ([]EC2Se
 	return out, rows.Err()
 }
 
+// ListRegionSecurityGroupRules returns the account's rules in region,
+// every region when region is "", ordered by group, direction,
+// permission and source.
+func (r *Repository) ListRegionSecurityGroupRules(account, region string) ([]EC2SecurityGroupRule, error) {
+	rows, err := r.db.Query(`SELECT `+ruleColumns+` FROM ec2_security_group_rules WHERE account_id = ? AND (? = '' OR region = ?)
+		ORDER BY group_id, is_egress, perm_ord, src_ord`, account, region, region)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []EC2SecurityGroupRule
+	for rows.Next() {
+		rule, err := scanRule(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rule)
+	}
+	return out, rows.Err()
+}
+
+// GetSecurityGroupRule returns the rule id, which must be in region
+// unless region is "" (RuleNotFoundError).
+func (r *Repository) GetSecurityGroupRule(account, region, id string) (EC2SecurityGroupRule, error) {
+	rule, err := scanRule(r.db.QueryRow(`SELECT `+ruleColumns+` FROM ec2_security_group_rules
+		WHERE account_id = ? AND id = ? AND (? = '' OR region = ?)`, account, id, region, region).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return rule, RuleNotFoundError{ID: id}
+	}
+	return rule, err
+}
+
+// RuleNotFoundError is a security group rule id that names no rule
+// where it was looked for. It is models.ErrNotFound.
+type RuleNotFoundError struct{ ID string }
+
+func (e RuleNotFoundError) Error() string { return "security group rule " + e.ID + " not found" }
+func (e RuleNotFoundError) Unwrap() error { return models.ErrNotFound }
+
 // AuthorizeSecurityGroupRules adds to the group id each of rules, in
 // order, whose source its permission (direction, protocol and ports)
 // lacks, after the permission's last source, or as a new permission
@@ -1225,8 +1264,11 @@ func insertRule(ex execer, account, region string, rule EC2SecurityGroupRule) er
 
 // RevokeSecurityGroupRules deletes the group id's rules with the
 // direction, protocol, ports and source of one of rules; one it lacks
-// is no error. A permission keeps its position while it has a source.
-// The group must be in region unless region is "" (ErrNotFound).
+// is no error. A rule with an ID deletes the rule of that id and
+// direction instead, and one the group lacks is RuleNotFoundError,
+// which deletes nothing. A permission keeps its position while it has
+// a source. The group must be in region unless region is ""
+// (ErrNotFound).
 func (r *Repository) RevokeSecurityGroupRules(account, region, id string, rules []EC2SecurityGroupRule) error {
 	return r.inTx(func(tx *sql.Tx) error {
 		if _, err := securityGroupRegion(tx, account, region, id); err != nil {
@@ -1234,6 +1276,12 @@ func (r *Repository) RevokeSecurityGroupRules(account, region, id string, rules 
 		}
 		for _, rule := range rules {
 			rule.GroupID = id
+			if rule.ID != "" {
+				if err := revokeRuleByID(tx, account, rule); err != nil {
+					return err
+				}
+				continue
+			}
 			if _, err := tx.Exec(`DELETE FROM ec2_security_group_rules WHERE `+ruleMatch+` AND `+ruleSourceMatch,
 				ruleMatchArgs(account, rule)...); err != nil {
 				return err
@@ -1241,6 +1289,20 @@ func (r *Repository) RevokeSecurityGroupRules(account, region, id string, rules 
 		}
 		return nil
 	})
+}
+
+// revokeRuleByID deletes the rule rule.ID of rule's group and direction.
+func revokeRuleByID(ex execer, account string, rule EC2SecurityGroupRule) error {
+	res, err := ex.Exec(`DELETE FROM ec2_security_group_rules WHERE account_id = ? AND group_id = ? AND is_egress = ? AND id = ?`,
+		account, rule.GroupID, rule.IsEgress, rule.ID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err == nil && n == 0 {
+		err = RuleNotFoundError{ID: rule.ID}
+	}
+	return err
 }
 
 func (r *Repository) DeleteSecurityGroup(account, region, id string) error {
