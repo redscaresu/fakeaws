@@ -381,11 +381,11 @@ func TestMockLoad_RefusalsChangeNothing(t *testing.T) {
 			[]string{"exchange 0: fakeaws-test PutVpc: vpc vpc-0a references vpc vpc-0absent, which no exchange loaded"}},
 		"a recorded field the write drops": {loadEnvelope(loadAccount, loadRegion,
 			loadExchange("fakeaws-test", "DropField", vpcBody("DropField", "", vpcItem("vpc-0a")))),
-			[]string{"exchange 0: fakeaws-test DropField: vpc: the model cannot hold recorded vpcSet/item[0]/cidrBlock"}},
+			[]string{"exchange 0: fakeaws-test DropField: vpc vpc-0a: the model cannot hold recorded vpcSet/item[0]/cidrBlock"}},
 		"a field the render adds": {loadEnvelope(loadAccount, loadRegion,
 			loadExchange("fakeaws-test", "RenderExtra", vpcBody("RenderExtra", "", vpcItem("vpc-0a"), vpcItem("vpc-0b")))),
-			[]string{"exchange 0: fakeaws-test RenderExtra: vpc: fakeaws would answer vpcSet/item[0]/extra, which the recording does not hold",
-				"exchange 0: fakeaws-test RenderExtra: vpc: fakeaws would answer vpcSet/item[1]/extra, which the recording does not hold"}},
+			[]string{"exchange 0: fakeaws-test RenderExtra: vpc vpc-0a: fakeaws would answer vpcSet/item[0]/extra, which the recording does not hold",
+				"exchange 0: fakeaws-test RenderExtra: vpc vpc-0b: fakeaws would answer vpcSet/item[1]/extra, which the recording does not hold"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := postLoad(t, srv, tc.body)

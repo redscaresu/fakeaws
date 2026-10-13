@@ -186,7 +186,7 @@ func TestLoadSSM_UnmodelledFieldRefusesTheLoad(t *testing.T) {
 	fixture := strings.Replace(ssmFixture(t), `"Version": 61`, `"Version": 61, "Foo": "bar"`, 1)
 	status, body := loadSSM(t, srv, ssmGetParameterExchange(http.StatusOK, fixture))
 	require.Equal(t, http.StatusBadRequest, status, body)
-	assert.Equal(t, []string{"exchange 0: ssm GetParameter: ssm-parameter: the model cannot hold recorded Parameter/Foo"}, loadRefusals(t, body))
+	assert.Equal(t, []string{"exchange 0: ssm GetParameter: ssm-parameter " + al2023Parameter + ": the model cannot hold recorded Parameter/Foo"}, loadRefusals(t, body))
 }
 
 func TestLoadSSM_NonPublicParameterIsRefused(t *testing.T) {

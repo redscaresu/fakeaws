@@ -848,7 +848,10 @@ var sgGoldenSetups = []struct {
 
 // sgRulesGolden holds, for every step of sgGoldenSetups, the group's
 // DescribeSecurityGroups answer and its /mock/state entry, captured from
-// main at 7dcb76e, before rules became ec2_security_group_rules rows.
+// main at 7dcb76e, before rules became ec2_security_group_rules rows,
+// with one edit by hand: an all-traffic permission (ip protocol -1)
+// answers no fromPort or toPort, as AWS does
+// (testdata/ec2/DescribeSecurityGroups.xml).
 const sgRulesGolden = "testdata/sg_rules_from_main.golden"
 
 // sgStateEntry returns sgID's /mock/state security_groups entry as it

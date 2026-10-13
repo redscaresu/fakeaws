@@ -258,7 +258,7 @@ func TestLoadEC2Network_Refusals(t *testing.T) {
 	}{
 		"an element the model cannot hold": {
 			append([]netRecorded{netVpcs(netVpc("vpc-0a", "<isDefault>false</isDefault><fooBar><x>1</x></fooBar>"))}, dns...),
-			"exchange 0: ec2 DescribeVpcs: vpc: the model cannot hold recorded vpcSet/item[0]/fooBar/x",
+			"exchange 0: ec2 DescribeVpcs: vpc vpc-0a: the model cannot hold recorded vpcSet/item[0]/fooBar/x",
 		},
 		"a subnet whose VPC was not recorded": {
 			append([]netRecorded{vpc, netSubnets(netSubnet("subnet-0a", "vpc-0missing", ""))}, dns...),

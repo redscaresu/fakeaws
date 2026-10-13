@@ -617,8 +617,8 @@ func (run *loadRun) resolve() {
 }
 
 // diff renders row through its loader and refuses each path where the
-// rendering and the recorded subtree differ, naming row's type and the
-// path: one only the recording holds is a field the model cannot hold,
+// rendering and the recorded subtree differ, naming row's type and id
+// and the path: one only the recording holds is a field the model cannot hold,
 // and one only the rendering holds a field fakeaws would mint.
 func (run *loadRun) diff(tx *repository.LoadTx, row *loadRow) error {
 	l := loaderFor(run.env.Exchanges[row.exchange].key())
@@ -644,10 +644,10 @@ func (run *loadRun) diff(tx *repository.LoadTx, row *loadRow) error {
 	}
 	recordedOnly, renderedOnly := Diff(l.key, recorded, got)
 	for _, p := range recordedOnly {
-		run.refuse(row.exchange, "%s: the model cannot hold recorded %s", row.Type, p)
+		run.refuse(row.exchange, "%s %s: the model cannot hold recorded %s", row.Type, row.ID, p)
 	}
 	for _, p := range renderedOnly {
-		run.refuse(row.exchange, "%s: fakeaws would answer %s, which the recording does not hold", row.Type, p)
+		run.refuse(row.exchange, "%s %s: fakeaws would answer %s, which the recording does not hold", row.Type, row.ID, p)
 	}
 	return nil
 }

@@ -161,8 +161,6 @@
         <ipPermissionsEgress>
           <item>
             <ipProtocol>-1</ipProtocol>
-            <fromPort>0</fromPort>
-            <toPort>0</toPort>
             <ipRanges>
               <item>
                 <cidrIp>0.0.0.0/0</cidrIp>
@@ -299,8 +297,6 @@
         <ipPermissionsEgress>
           <item>
             <ipProtocol>-1</ipProtocol>
-            <fromPort>0</fromPort>
-            <toPort>0</toPort>
             <ipRanges>
               <item>
                 <cidrIp>0.0.0.0/0</cidrIp>
@@ -375,8 +371,6 @@
         <ipPermissionsEgress>
           <item>
             <ipProtocol>-1</ipProtocol>
-            <fromPort>0</fromPort>
-            <toPort>0</toPort>
             <ipRanges>
               <item>
                 <cidrIp>0.0.0.0/0</cidrIp>
@@ -487,8 +481,6 @@
         <ipPermissionsEgress>
           <item>
             <ipProtocol>-1</ipProtocol>
-            <fromPort>0</fromPort>
-            <toPort>0</toPort>
             <ipRanges>
               <item>
                 <cidrIp>0.0.0.0/0</cidrIp>
@@ -843,8 +835,6 @@
         <ipPermissions>
           <item>
             <ipProtocol>-1</ipProtocol>
-            <fromPort>0</fromPort>
-            <toPort>0</toPort>
             <ipRanges>
               <item>
                 <cidrIp>0.0.0.0/0</cidrIp>
@@ -875,8 +865,6 @@
         <ipPermissions>
           <item>
             <ipProtocol>-1</ipProtocol>
-            <fromPort>0</fromPort>
-            <toPort>0</toPort>
             <ipRanges>
               <item>
                 <cidrIp>0.0.0.0/0</cidrIp>
@@ -920,8 +908,6 @@
         <ipPermissions>
           <item>
             <ipProtocol>-1</ipProtocol>
-            <fromPort>0</fromPort>
-            <toPort>0</toPort>
             <ipRanges>
               <item>
                 <cidrIp>0.0.0.0/0</cidrIp>
@@ -978,8 +964,6 @@
         <ipPermissions>
           <item>
             <ipProtocol>-1</ipProtocol>
-            <fromPort>0</fromPort>
-            <toPort>0</toPort>
             <ipRanges>
               <item>
                 <cidrIp>0.0.0.0/0</cidrIp>
@@ -1049,8 +1033,6 @@
         <ipPermissions>
           <item>
             <ipProtocol>-1</ipProtocol>
-            <fromPort>0</fromPort>
-            <toPort>0</toPort>
             <ipRanges>
               <item>
                 <cidrIp>0.0.0.0/0</cidrIp>
