@@ -709,6 +709,388 @@ func TestEC2_SecurityGroupRuleSourceGroupMustExist(t *testing.T) {
 	assert.Equal(t, []sgRuleSourceXML{{GroupId: missing, UserId: "111122223333"}}, sgPermByPort(ingress, 8443).Groups, "other account admitted")
 }
 
+// sgGoldenStep is one call of a security group rule setup, sent with
+// the group's GroupId; "PEER" in a value stands for the peer group's
+// id. answer says the call's own answer is checked too: an Authorize
+// that adds a rule answers the new rule's id, so only the others are.
+type sgGoldenStep struct {
+	action string
+	params url.Values
+	answer bool
+}
+
+// sgIngressStep is an AuthorizeSecurityGroupIngress of perm.
+func sgIngressStep(perm url.Values) sgGoldenStep {
+	return sgGoldenStep{"AuthorizeSecurityGroupIngress", perm, false}
+}
+
+// sgGoldenSetups is every security group rule setup in this file and
+// admin_test.go (newSGPair's groups stand in for each test's own), plus
+// a revoke of a permission's first source, which keeps its slot.
+var sgGoldenSetups = []struct {
+	name  string
+	steps []sgGoldenStep
+}{
+	{"no rules (admin_test.go seedSG), revoke of an absent rule", []sgGoldenStep{
+		{"RevokeSecurityGroupIngress", sgPerm("tcp", "22", "22", "10.0.0.0/8"), true},
+	}},
+	{"TestEC2_SecurityGroupCRUDPlusRules", []sgGoldenStep{
+		sgIngressStep(sgPerm("tcp", "443", "443", "0.0.0.0/0")),
+		{"AuthorizeSecurityGroupIngress", sgPerm("tcp", "443", "443", "0.0.0.0/0"), true},
+		{"AuthorizeSecurityGroupIngress", sgPerm("tcp", "443", "443", "0.0.0.0/0"), true},
+		{"RevokeSecurityGroupIngress", sgPerm("tcp", "443", "443", "0.0.0.0/0"), true},
+		{"AuthorizeSecurityGroupEgress", sgPerm("-1", "", "", "0.0.0.0/0"), false},
+	}},
+	{"TestEC2_SecurityGroupFullIpPermissionsShape", []sgGoldenStep{
+		sgIngressStep(url.Values{
+			"IpPermissions.1.IpProtocol":                   {"tcp"},
+			"IpPermissions.1.FromPort":                     {"22"},
+			"IpPermissions.1.ToPort":                       {"22"},
+			"IpPermissions.1.IpRanges.1.CidrIp":            {"0.0.0.0/0"},
+			"IpPermissions.1.Ipv6Ranges.1.CidrIpv6":        {"::/0"},
+			"IpPermissions.2.IpProtocol":                   {"tcp"},
+			"IpPermissions.2.FromPort":                     {"443"},
+			"IpPermissions.2.ToPort":                       {"443"},
+			"IpPermissions.2.Groups.1.GroupId":             {"PEER"},
+			"IpPermissions.3.IpProtocol":                   {"tcp"},
+			"IpPermissions.3.FromPort":                     {"5432"},
+			"IpPermissions.3.ToPort":                       {"5432"},
+			"IpPermissions.3.PrefixListIds.1.PrefixListId": {"pl-0123456789abcdef0"},
+		}),
+		{"AuthorizeSecurityGroupEgress", sgPerm("-1", "", "", "0.0.0.0/0"), false},
+		{"RevokeSecurityGroupIngress", url.Values{
+			"IpPermissions.1.IpProtocol":            {"tcp"},
+			"IpPermissions.1.FromPort":              {"22"},
+			"IpPermissions.1.ToPort":                {"22"},
+			"IpPermissions.1.Ipv6Ranges.1.CidrIpv6": {"::/0"},
+		}, true},
+	}},
+	{"authorizeEverySourceKind", []sgGoldenStep{
+		sgIngressStep(url.Values{
+			"IpPermissions.1.IpProtocol":                   {"tcp"},
+			"IpPermissions.1.FromPort":                     {"22"},
+			"IpPermissions.1.ToPort":                       {"22"},
+			"IpPermissions.1.IpRanges.1.CidrIp":            {"10.0.0.0/8"},
+			"IpPermissions.1.IpRanges.1.Description":       {"office"},
+			"IpPermissions.1.Ipv6Ranges.1.CidrIpv6":        {"::/0"},
+			"IpPermissions.1.Ipv6Ranges.1.Description":     {"anywhere v6"},
+			"IpPermissions.1.Groups.1.GroupId":             {"PEER"},
+			"IpPermissions.1.Groups.1.UserId":              {"111122223333"},
+			"IpPermissions.1.Groups.1.Description":         {"from lb"},
+			"IpPermissions.1.PrefixListIds.1.PrefixListId": {"pl-0123456789abcdef0"},
+			"IpPermissions.1.PrefixListIds.1.Description":  {"s3"},
+		}),
+		{"AuthorizeSecurityGroupEgress", url.Values{
+			"IpPermissions.1.IpProtocol":             {"-1"},
+			"IpPermissions.1.IpRanges.1.CidrIp":      {"0.0.0.0/0"},
+			"IpPermissions.1.IpRanges.1.Description": {"all out"},
+		}, false},
+	}},
+	{"TestEC2_SecurityGroupRuleValidation", []sgGoldenStep{
+		{"AuthorizeSecurityGroupIngress", sgPerm("tcp", "22", "22", "10.0.0.0/33"), true},
+		{"AuthorizeSecurityGroupIngress", sgPerm("tcp", "22", "22", "bogus"), true},
+		{"AuthorizeSecurityGroupIngress", url.Values{
+			"IpPermissions.1.IpProtocol":            {"tcp"},
+			"IpPermissions.1.FromPort":              {"22"},
+			"IpPermissions.1.ToPort":                {"22"},
+			"IpPermissions.1.Ipv6Ranges.1.CidrIpv6": {"2001:db8::/129"},
+		}, true},
+		{"AuthorizeSecurityGroupIngress", sgPerm("tcp", "80", "70", "10.0.0.0/8"), true},
+		{"AuthorizeSecurityGroupIngress", sgPerm("tcp", "80", "70000", "10.0.0.0/8"), true},
+		{"AuthorizeSecurityGroupIngress", sgPerm("bogus", "80", "80", "10.0.0.0/8"), true},
+		{"AuthorizeSecurityGroupIngress", sgPerm("all", "", "", "10.0.0.0/8"), true},
+		{"AuthorizeSecurityGroupIngress", sgPerm("256", "", "", "10.0.0.0/8"), true},
+		{"AuthorizeSecurityGroupIngress", sgPerm("6", "80", "70", "10.0.0.0/8"), true},
+		{"AuthorizeSecurityGroupIngress", sgPerm("icmp", "256", "0", "10.0.0.0/8"), true},
+		{"AuthorizeSecurityGroupIngress", sgPerm("icmp", "-1", "0", "10.0.0.0/8"), true},
+		{"AuthorizeSecurityGroupEgress", url.Values{
+			"IpPermissions.1.IpProtocol":            {"icmpv6"},
+			"IpPermissions.1.FromPort":              {"128"},
+			"IpPermissions.1.ToPort":                {"300"},
+			"IpPermissions.1.Ipv6Ranges.1.CidrIpv6": {"::/0"},
+		}, true},
+	}},
+	{"TestEC2_SecurityGroupRulePositiveControls", []sgGoldenStep{
+		sgIngressStep(sgPerm("-1", "", "", "0.0.0.0/0")),
+		sgIngressStep(sgPerm("tcp", "0", "65535", "10.0.0.0/8")),
+		sgIngressStep(sgPerm("icmp", "-1", "-1", "10.0.0.0/8")),
+		sgIngressStep(sgPerm("6", "80", "80", "10.0.0.0/8")),
+		sgIngressStep(url.Values{"IpPermissions.1.IpProtocol": {"icmpv6"}, "IpPermissions.1.FromPort": {"-1"}, "IpPermissions.1.ToPort": {"-1"}, "IpPermissions.1.Ipv6Ranges.1.CidrIpv6": {"::/0"}}),
+	}},
+	{"TestEC2_SecurityGroupRuleSourceGroupMustExist", []sgGoldenStep{
+		{"AuthorizeSecurityGroupIngress", url.Values{
+			"IpPermissions.1.IpProtocol":       {"tcp"},
+			"IpPermissions.1.FromPort":         {"443"},
+			"IpPermissions.1.ToPort":           {"443"},
+			"IpPermissions.1.Groups.1.GroupId": {"sg-0000000000000dead"},
+		}, true},
+		sgIngressStep(url.Values{
+			"IpPermissions.1.IpProtocol":       {"tcp"},
+			"IpPermissions.1.FromPort":         {"443"},
+			"IpPermissions.1.ToPort":           {"443"},
+			"IpPermissions.1.Groups.1.GroupId": {"PEER"},
+		}),
+		sgIngressStep(url.Values{
+			"IpPermissions.1.IpProtocol":       {"tcp"},
+			"IpPermissions.1.FromPort":         {"8443"},
+			"IpPermissions.1.ToPort":           {"8443"},
+			"IpPermissions.1.Groups.1.GroupId": {"sg-0000000000000dead"},
+			"IpPermissions.1.Groups.1.UserId":  {"111122223333"},
+		}),
+	}},
+	{"revoke a permission's first source", []sgGoldenStep{
+		sgIngressStep(sgPerm("tcp", "22", "22", "10.0.0.0/8")),
+		sgIngressStep(sgPerm("tcp", "80", "80", "10.1.0.0/16")),
+		sgIngressStep(sgPerm("tcp", "22", "22", "10.2.0.0/16")),
+		{"RevokeSecurityGroupIngress", sgPerm("tcp", "22", "22", "10.0.0.0/8"), true},
+	}},
+}
+
+// sgRulesGolden holds, for every step of sgGoldenSetups, the group's
+// DescribeSecurityGroups answer and its /mock/state entry, captured from
+// main at 7dcb76e, before rules became ec2_security_group_rules rows.
+const sgRulesGolden = "testdata/sg_rules_from_main.golden"
+
+// sgStateEntry returns sgID's /mock/state security_groups entry as it
+// was encoded.
+func sgStateEntry(t *testing.T, srv *httptest.Server, sgID string) string {
+	t.Helper()
+	resp, body := doGet(t, srv, "/mock/state/ec2")
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GET /mock/state/ec2: %s", body)
+	var state struct {
+		EC2 struct {
+			SecurityGroups []json.RawMessage `json:"security_groups"`
+		} `json:"ec2"`
+	}
+	require.NoError(t, json.Unmarshal(body, &state), "decode /mock/state: %s", body)
+	for _, sg := range state.EC2.SecurityGroups {
+		if strings.Contains(string(sg), `"id":"`+sgID+`"`) {
+			return string(sg)
+		}
+	}
+	require.FailNow(t, "security group missing from /mock/state", "%s in %s", sgID, body)
+	return ""
+}
+
+// TestEC2_SecurityGroupRulesMatchGoldenFromMain: after every step of
+// every sgGoldenSetups setup, the group's DescribeSecurityGroups answer,
+// its /mock/state entry and each answer the step checks are byte for
+// byte sgRulesGolden's. The golden is never regenerated from this code:
+// a new setup's lines are captured from a checkout before the change
+// they guard.
+func TestEC2_SecurityGroupRulesMatchGoldenFromMain(t *testing.T) {
+	const region = "us-east-1"
+	var got strings.Builder
+	for _, setup := range sgGoldenSetups {
+		srv, sgID, peerID := newSGPair(t, region)
+		describe := func() string {
+			resp, body := ec2Call(t, srv, region, "DescribeSecurityGroups", url.Values{"GroupId.1": {sgID}})
+			require.Equal(t, http.StatusOK, resp.StatusCode, "DescribeSecurityGroups: %s", body)
+			return string(body)
+		}
+		names := strings.NewReplacer(sgID, "SG", peerID, "PEER", extractEC2Tag([]byte(describe()), "vpcId"), "VPC")
+		for i, step := range setup.steps {
+			params := url.Values{"GroupId": {sgID}}
+			for k, vs := range step.params {
+				for _, v := range vs {
+					params.Add(k, strings.ReplaceAll(v, "PEER", peerID))
+				}
+			}
+			resp, body := ec2Call(t, srv, region, step.action, params)
+			fmt.Fprintf(&got, "=== %s, step %d: %s %d\n", setup.name, i+1, step.action, resp.StatusCode)
+			if step.answer {
+				got.WriteString(names.Replace(string(body)))
+			}
+			got.WriteString(names.Replace(describe()))
+			got.WriteString(names.Replace(sgStateEntry(t, srv, sgID)) + "\n")
+		}
+	}
+	want, err := os.ReadFile(sgRulesGolden)
+	require.NoError(t, err)
+	assert.Equal(t, string(want), got.String())
+}
+
+// sgRuleSetXML decodes an Authorize* answer's securityGroupRuleSet.
+type sgRuleSetXML struct {
+	Return bool `xml:"return"`
+	Rules  []struct {
+		ID       string `xml:"securityGroupRuleId"`
+		GroupID  string `xml:"groupId"`
+		IsEgress bool   `xml:"isEgress"`
+		CidrIpv4 string `xml:"cidrIpv4"`
+	} `xml:"securityGroupRuleSet>item"`
+}
+
+func decodeRuleSet(t *testing.T, body []byte) sgRuleSetXML {
+	t.Helper()
+	var out sgRuleSetXML
+	require.NoError(t, xml.Unmarshal(body, &out), "decode %s", body)
+	return out
+}
+
+// countRows is the number of rows of table.
+func countRows(t *testing.T, app *handlers.Application, table string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, app.Repository().DB().QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&n))
+	return n
+}
+
+// xmlLeafValue is the text of an element with a value, which
+// blankLeaves replaces so a diff compares element paths only.
+var xmlLeafValue = regexp.MustCompile(`>[^<\s][^<]*<`)
+
+func blankLeaves(body []byte) []byte { return xmlLeafValue.ReplaceAll(body, []byte(">v<")) }
+
+// TestEC2_AuthorizeSecurityGroupRulesAnswerRuleIds: Authorize* answers
+// return and a securityGroupRuleSet item, with its own sgr- id, per rule
+// it adds, in testdata/ec2/AuthorizeSecurityGroupIngress.xml's shape.
+func TestEC2_AuthorizeSecurityGroupRulesAnswerRuleIds(t *testing.T) {
+	const region = "us-east-1"
+	srv, sgID, _ := newSGPair(t, region)
+
+	resp, body := ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{
+		"GroupId":                           {sgID},
+		"IpPermissions.1.IpProtocol":        {"tcp"},
+		"IpPermissions.1.FromPort":          {"22"},
+		"IpPermissions.1.ToPort":            {"22"},
+		"IpPermissions.1.IpRanges.1.CidrIp": {"10.0.0.0/8"},
+		"IpPermissions.1.IpRanges.2.CidrIp": {"10.1.0.0/16"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	ingress := decodeRuleSet(t, body)
+	assert.True(t, ingress.Return)
+	require.Len(t, ingress.Rules, 2, "%s", body)
+	assert.NotEqual(t, ingress.Rules[0].ID, ingress.Rules[1].ID, "each rule its own id")
+	for i, cidr := range []string{"10.0.0.0/8", "10.1.0.0/16"} {
+		r := ingress.Rules[i]
+		assert.Regexp(t, `^sgr-[0-9a-f]{16}$`, r.ID)
+		assert.Equal(t, sgID, r.GroupID)
+		assert.False(t, r.IsEgress)
+		assert.Equal(t, cidr, r.CidrIpv4)
+	}
+
+	resp, body = ec2Call(t, srv, region, "AuthorizeSecurityGroupEgress", url.Values{
+		"GroupId": {sgID}, "IpPermissions.1.IpProtocol": {"-1"}, "IpPermissions.1.IpRanges.1.CidrIp": {"0.0.0.0/0"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	egress := decodeRuleSet(t, body)
+	require.Len(t, egress.Rules, 1, "%s", body)
+	assert.True(t, egress.Rules[0].IsEgress, "an egress authorize answers egress rules")
+	assert.Regexp(t, `^sgr-`, egress.Rules[0].ID)
+
+	// The fixture's own request: AWS EC2 API reference Example 3.
+	resp, body = ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", url.Values{
+		"GroupId":                                {sgID},
+		"IpPermissions.1.IpProtocol":             {"tcp"},
+		"IpPermissions.1.FromPort":               {"3389"},
+		"IpPermissions.1.ToPort":                 {"3389"},
+		"IpPermissions.1.IpRanges.1.CidrIp":      {"192.0.2.0/24"},
+		"IpPermissions.1.IpRanges.1.Description": {"Access from New York office"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	fixture, err := handlers.ParseXML(blankLeaves([]byte(ec2Fixture(t, "AuthorizeSecurityGroupIngress"))))
+	require.NoError(t, err)
+	answer, err := handlers.ParseXML(blankLeaves(body))
+	require.NoError(t, err)
+	fixtureOnly, answerOnly := handlers.Diff(handlers.LoadKey{Service: "ec2", Action: "AuthorizeSecurityGroupIngress"}, fixture, answer)
+	assert.Empty(t, fixtureOnly, "paths only the fixture has: %s", body)
+	assert.Empty(t, answerOnly, "paths only the answer has: %s", body)
+}
+
+// TestEC2_ReauthorizeAddsNoRule: re-authorizing a source the group
+// holds answers requestId alone, as before rules had ids, and adds no
+// row.
+func TestEC2_ReauthorizeAddsNoRule(t *testing.T) {
+	const region = "us-east-1"
+	app, srv := newTestApp(t, ":memory:")
+	vpcID := extractEC2Tag(mustOK(t)(ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})), "vpcId")
+	sgID := extractEC2Tag(mustOK(t)(ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
+		"GroupName": {"web"}, "GroupDescription": {"web"}, "VpcId": {vpcID},
+	})), "groupId")
+	authorize := func() []byte {
+		params := sgPerm("tcp", "443", "443", "0.0.0.0/0")
+		params.Set("GroupId", sgID)
+		return mustOK(t)(ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", params))
+	}
+	authorize()
+	require.Equal(t, 1, countRows(t, app, "ec2_security_group_rules"))
+
+	assert.Equal(t, xml.Header+"<AuthorizeSecurityGroupIngressResponse>\n  <requestId>fakeaws-synthetic</requestId>\n</AuthorizeSecurityGroupIngressResponse>\n", string(authorize()))
+	assert.Equal(t, 1, countRows(t, app, "ec2_security_group_rules"), "no row added")
+}
+
+// TestEC2_SecurityGroupRuleNeedsASource: a permission with no source is
+// refused through ec2Refuse, and no other permission of the request is
+// stored.
+func TestEC2_SecurityGroupRuleNeedsASource(t *testing.T) {
+	const region = "us-east-1"
+	srv, sgID, _ := newSGPair(t, region)
+	params := sgPerm("tcp", "22", "22", "10.0.0.0/8")
+	params.Set("IpPermissions.2.IpProtocol", "tcp")
+	params.Set("IpPermissions.2.FromPort", "80")
+	params.Set("IpPermissions.2.ToPort", "80")
+	params.Set("GroupId", sgID)
+	resp, body := ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", params)
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
+	code, msg := ec2Error(t, body)
+	assert.Equal(t, "NotImplemented", code)
+	assert.Equal(t, "AuthorizeSecurityGroupIngress: not modelled by fakeaws: IpPermissions.N with no source", msg)
+	ingress, _ := describeSGRules(t, srv, region, sgID)
+	assert.Empty(t, ingress)
+}
+
+// TestEC2_SecurityGroupRulesGoWithTheirGroup: DeleteSecurityGroup takes
+// the group's rules and their tags, and leaves another group's rule
+// that references it; DeleteVpc takes every group's rules and tags.
+func TestEC2_SecurityGroupRulesGoWithTheirGroup(t *testing.T) {
+	const region = "us-east-1"
+	app, srv := newTestApp(t, ":memory:")
+	vpcID := extractEC2Tag(mustOK(t)(ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})), "vpcId")
+	group := func(name string) string {
+		return extractEC2Tag(mustOK(t)(ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
+			"GroupName": {name}, "GroupDescription": {name}, "VpcId": {vpcID},
+		})), "groupId")
+	}
+	webID, lbID := group("web"), group("lb")
+	authorize := func(sgID string, params url.Values) string {
+		params.Set("GroupId", sgID)
+		rules := decodeRuleSet(t, mustOK(t)(ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", params))).Rules
+		require.Len(t, rules, 1)
+		require.NoError(t, app.Repository().PutTags(awsproto.FakeAccountID, region, []repository.EC2Tag{
+			{ResourceID: rules[0].ID, ResourceType: "security-group-rule", Key: "Name", Value: sgID},
+		}))
+		return rules[0].ID
+	}
+	webRule := authorize(webID, url.Values{
+		"IpPermissions.1.IpProtocol": {"tcp"}, "IpPermissions.1.FromPort": {"443"}, "IpPermissions.1.ToPort": {"443"},
+		"IpPermissions.1.Groups.1.GroupId": {lbID},
+	})
+	lbRule := authorize(lbID, sgPerm("tcp", "80", "80", "10.0.0.0/8"))
+	ruleTags := func() []string {
+		tags, err := app.Repository().ListTags(awsproto.FakeAccountID, "")
+		require.NoError(t, err)
+		var out []string
+		for _, tag := range tags {
+			if strings.HasPrefix(tag.ResourceID, "sgr-") {
+				out = append(out, tag.ResourceID)
+			}
+		}
+		return out
+	}
+	require.ElementsMatch(t, []string{webRule, lbRule}, ruleTags())
+
+	mustOK(t)(ec2Call(t, srv, region, "DeleteSecurityGroup", url.Values{"GroupId": {lbID}}))
+	assert.Equal(t, []string{webRule}, ruleTags(), "the deleted group's rule tag goes")
+	assert.Equal(t, 1, countRows(t, app, "ec2_security_group_rules"), "the deleted group's rule goes")
+	ingress, _ := describeSGRules(t, srv, region, webID)
+	assert.Equal(t, []sgRuleSourceXML{{GroupId: lbID}}, sgPermByPort(ingress, 443).Groups, "the rule referencing it stays")
+
+	mustOK(t)(ec2Call(t, srv, region, "DeleteVpc", url.Values{"VpcId": {vpcID}}))
+	assert.Empty(t, ruleTags(), "DeleteVpc takes every rule tag")
+	assert.Zero(t, countRows(t, app, "ec2_security_group_rules"), "DeleteVpc takes every rule")
+}
+
 func TestEC2_RunInstancesAndTerminate(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	const region = "us-east-1"

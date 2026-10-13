@@ -65,9 +65,9 @@ func TestAdminMockState_UnknownServiceReturnsEmptyBlock(t *testing.T) {
 }
 
 // stateBreak makes one read behind a service's /mock/state block fail:
-// seed rows (nil seeds nothing), then breakSQL drops the table, a column
-// or corrupts a stored JSON value read sends back. name defaults to
-// read.
+// seed rows (nil seeds nothing), then breakSQL drops the table or
+// corrupts a stored value read sends back (JSON that does not decode, a
+// column that does not scan). name defaults to read.
 type stateBreak struct {
 	read, service, breakSQL, name string
 	seed                          func(t *testing.T, app *handlers.Application, srv *httptest.Server)
@@ -139,13 +139,17 @@ var stateBreaks = []stateBreak{
 	{read: "ListNetworkInterfaces", service: "ec2", breakSQL: `DROP TABLE ec2_network_interfaces`},
 	{read: "ListInstances", service: "ec2", breakSQL: `DROP TABLE ec2_instances`},
 	{read: "ListSecurityGroups", service: "ec2", breakSQL: `DROP TABLE ec2_security_groups`},
-	{read: "GetSecurityGroupRules", service: "ec2", breakSQL: `ALTER TABLE ec2_security_groups DROP COLUMN ingress`,
+	{read: "ListSecurityGroupRules", service: "ec2", breakSQL: `DROP TABLE ec2_security_group_rules`,
 		seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) {
 			seedSG(t, srv, seedVPC(t, srv), "fc")
 		}},
-	{read: "GetSecurityGroupRules", name: "security group rule JSON", service: "ec2", breakSQL: `UPDATE ec2_security_groups SET ingress = 'not json'`,
+	{read: "ListSecurityGroupRules", name: "security group rule row", service: "ec2", breakSQL: `UPDATE ec2_security_group_rules SET from_port = 'not a port'`,
 		seed: func(t *testing.T, _ *handlers.Application, srv *httptest.Server) {
-			seedSG(t, srv, seedVPC(t, srv), "fc")
+			sgID := seedSG(t, srv, seedVPC(t, srv), "fc")
+			mustOK(t)(ec2Call(t, srv, stateRegion, "AuthorizeSecurityGroupIngress", url.Values{
+				"GroupId": {sgID}, "IpPermissions.1.IpProtocol": {"tcp"}, "IpPermissions.1.FromPort": {"22"},
+				"IpPermissions.1.ToPort": {"22"}, "IpPermissions.1.IpRanges.1.CidrIp": {"10.0.0.0/8"},
+			}))
 		}},
 	{read: "ListKeyPairs", service: "ec2", breakSQL: `DROP TABLE ec2_key_pairs`},
 	{read: "ListInternetGateways", service: "ec2", breakSQL: `DROP TABLE ec2_internet_gateways`},
@@ -219,8 +223,8 @@ var stateBreaks = []stateBreak{
 }
 
 // TestAdminMockState_UnreadableTableIs500: every read behind a /mock/state
-// block, a child read as much as a parent's, that fails (a dropped table
-// or column, a stored value that does not decode) answers 500 with only
+// block, a child read as much as a parent's, that fails (a dropped table,
+// a stored value that does not decode or scan) answers 500 with only
 // "<service> state could not be read": no state, and no SQL, table or
 // decoder text, which goes to the log. Never an empty block an orphan
 // check would pass. A read with no case fails the test.

@@ -8,17 +8,18 @@
 //	     ┌──────────────┼─────────────┐
 //	     │              │             │
 //	ec2_subnets  ec2_route_tables  ec2_security_groups
-//	     │              │
-//	ec2_instances  ec2_routes
+//	     │              │             │
+//	ec2_instances  ec2_routes   ec2_security_group_rules
 //
 // This file ships networking only: VPCs, Subnets, InternetGateways,
-// RouteTables, RouteTableAssociations, Routes, SecurityGroups, EIPs.
+// RouteTables, RouteTableAssociations, Routes, SecurityGroups and their
+// rules, EIPs.
 // Compute (instances, key pairs, AMI fixtures) lands in S44-T6 in
 // repository/ec2_compute.go.
 //
 // Server-stamped IDs follow AWS convention:
 //
-//	vpc-, subnet-, sg-, rtb-, igw-, rtbassoc-, eipalloc-, eni-
+//	vpc-, subnet-, sg-, sgr-, rtb-, igw-, rtbassoc-, eipalloc-, eni-
 //
 // Each handler synthesises an id at create time; the repo never
 // honours an id smuggled in from the client (per concepts.md
@@ -121,14 +122,39 @@ var ec2NetworkMigrations = []string{
 		vpc_id       TEXT NOT NULL,
 		group_name   TEXT NOT NULL,
 		description  TEXT NOT NULL,
-		ingress      TEXT NOT NULL DEFAULT '[]',
-		egress       TEXT NOT NULL DEFAULT '[]',
 		arn          TEXT NOT NULL,
 		data         TEXT NOT NULL,
 		created_at   TEXT NOT NULL,
 		PRIMARY KEY (account_id, id),
 		FOREIGN KEY (account_id, vpc_id) REFERENCES ec2_vpcs(account_id, id) ON DELETE CASCADE,
 		UNIQUE (account_id, vpc_id, group_name)
+	)`,
+	// One row per source of a permission: AWS's security group rule.
+	// referenced_group_id has no FK: a pair may name another account's
+	// group, and deleting a group a rule references leaves that rule.
+	`CREATE TABLE IF NOT EXISTS ec2_security_group_rules (
+		account_id          TEXT NOT NULL,
+		region              TEXT NOT NULL,
+		id                  TEXT NOT NULL,
+		group_id            TEXT NOT NULL,
+		group_owner_id      TEXT NOT NULL,
+		is_egress           INTEGER NOT NULL,
+		perm_ord            INTEGER NOT NULL, -- the permission's position in its direction
+		src_ord             INTEGER NOT NULL, -- the source's position in its permission
+		ip_protocol         TEXT NOT NULL,
+		from_port           INTEGER NOT NULL,
+		to_port             INTEGER NOT NULL,
+		cidr_ipv4           TEXT,
+		cidr_ipv6           TEXT,
+		prefix_list_id      TEXT,
+		referenced_group_id TEXT,
+		referenced_user_id  TEXT,
+		description         TEXT NOT NULL,
+		PRIMARY KEY (account_id, id),
+		FOREIGN KEY (account_id, group_id) REFERENCES ec2_security_groups(account_id, id) ON DELETE CASCADE,
+		UNIQUE (account_id, group_id, is_egress, perm_ord, src_ord),
+		CHECK ((cidr_ipv4 IS NOT NULL) + (cidr_ipv6 IS NOT NULL) + (prefix_list_id IS NOT NULL) + (referenced_group_id IS NOT NULL) = 1),
+		CHECK (referenced_user_id IS NULL OR referenced_group_id IS NOT NULL)
 	)`,
 	`CREATE TABLE IF NOT EXISTS ec2_eips (
 		account_id           TEXT NOT NULL,
@@ -165,6 +191,7 @@ func init() {
 		"ec2_route_tables",
 		"ec2_internet_gateways",
 		"ec2_eips",
+		"ec2_security_group_rules",
 		"ec2_security_groups",
 		"ec2_subnets",
 		"ec2_vpcs",
@@ -300,10 +327,29 @@ type EC2SecurityGroup struct {
 	Description string `json:"description"`
 	Region      string `json:"region"`
 	ARN         string `json:"arn"`
-	// Ingress / Egress are stored as JSON in the corresponding columns;
-	// the JSON shape is opaque at this layer — handlers parse / emit
-	// the documented IpPermissions structure.
-	CreatedAt string `json:"created_at"`
+	CreatedAt   string `json:"created_at"`
+}
+
+// EC2SecurityGroupRule is one source of one permission of a security
+// group, a row of ec2_security_group_rules. Exactly one of CidrIPv4,
+// CidrIPv6, PrefixListID and ReferencedGroupID is set, and
+// ReferencedUserID only beside ReferencedGroupID.
+type EC2SecurityGroupRule struct {
+	ID                string
+	GroupID           string
+	GroupOwnerID      string
+	IsEgress          bool
+	PermOrd           int // the permission's position in its direction
+	SrcOrd            int // the source's position in its permission
+	IPProtocol        string
+	FromPort          int
+	ToPort            int
+	CidrIPv4          string
+	CidrIPv6          string
+	PrefixListID      string
+	ReferencedGroupID string
+	ReferencedUserID  string
+	Description       string
 }
 
 type EC2EIP struct {
@@ -1061,44 +1107,140 @@ func (r *Repository) ListSecurityGroups(account, region string) ([]*EC2SecurityG
 	return out, rows.Err()
 }
 
-// GetSecurityGroupRules reads the ingress/egress JSON for an SG,
-// optionally scoped to a region (Codex pass 7 BLOCKING #1).
-func (r *Repository) GetSecurityGroupRules(account, region, id string) (ingress, egress []byte, err error) {
-	var row *sql.Row
-	if region == "" {
-		row = r.db.QueryRow(
-			`SELECT ingress, egress FROM ec2_security_groups WHERE account_id = ? AND id = ?`,
-			account, id,
-		)
-	} else {
-		row = r.db.QueryRow(
-			`SELECT ingress, egress FROM ec2_security_groups WHERE account_id = ? AND region = ? AND id = ?`,
-			account, region, id,
-		)
+// securityGroupRegion returns the region of the group id, which must be
+// in region unless region is "" (ErrNotFound).
+func securityGroupRegion(q interface {
+	QueryRow(string, ...any) *sql.Row
+}, account, region, id string) (string, error) {
+	var got string
+	err := q.QueryRow(`SELECT region FROM ec2_security_groups WHERE account_id = ? AND id = ? AND (? = '' OR region = ?)`,
+		account, id, region, region).Scan(&got)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", models.ErrNotFound
 	}
-	var ingS, egS string
-	if err := row.Scan(&ingS, &egS); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil, models.ErrNotFound
-		}
-		return nil, nil, err
-	}
-	return []byte(ingS), []byte(egS), nil
+	return got, err
 }
 
-func (r *Repository) UpdateSecurityGroupRules(account, region, id, direction string, rulesJSON []byte) error {
-	if _, err := r.GetSecurityGroup(account, region, id); err != nil {
-		return err
+// ruleColumns are the ec2_security_group_rules columns scanRule reads,
+// in order.
+const ruleColumns = `id, group_id, group_owner_id, is_egress, perm_ord, src_ord, ip_protocol, from_port, to_port,
+	cidr_ipv4, cidr_ipv6, prefix_list_id, referenced_group_id, referenced_user_id, description`
+
+// ruleMatch picks a group's rules of one permission (?1-?6: account,
+// group, is_egress, protocol, from and to port); ruleSourceMatch narrows
+// it to one source (?7-?10: the four source columns, NULL but one).
+const (
+	ruleMatch       = `account_id = ?1 AND group_id = ?2 AND is_egress = ?3 AND ip_protocol = ?4 AND from_port = ?5 AND to_port = ?6`
+	ruleSourceMatch = `cidr_ipv4 IS ?7 AND cidr_ipv6 IS ?8 AND prefix_list_id IS ?9 AND referenced_group_id IS ?10`
+)
+
+// ruleMatchArgs are ruleMatch's and ruleSourceMatch's args for rule.
+func ruleMatchArgs(account string, rule EC2SecurityGroupRule) []any {
+	return []any{account, rule.GroupID, rule.IsEgress, rule.IPProtocol, rule.FromPort, rule.ToPort,
+		nullIfEmpty(rule.CidrIPv4), nullIfEmpty(rule.CidrIPv6), nullIfEmpty(rule.PrefixListID), nullIfEmpty(rule.ReferencedGroupID)}
+}
+
+// scanRule reads one ruleColumns row through scan.
+func scanRule(scan func(dest ...any) error) (EC2SecurityGroupRule, error) {
+	var r EC2SecurityGroupRule
+	var v4, v6, pl, group, user sql.NullString
+	err := scan(&r.ID, &r.GroupID, &r.GroupOwnerID, &r.IsEgress, &r.PermOrd, &r.SrcOrd, &r.IPProtocol, &r.FromPort, &r.ToPort,
+		&v4, &v6, &pl, &group, &user, &r.Description)
+	r.CidrIPv4, r.CidrIPv6, r.PrefixListID, r.ReferencedGroupID, r.ReferencedUserID = v4.String, v6.String, pl.String, group.String, user.String
+	return r, err
+}
+
+// ListSecurityGroupRules returns the rules of the group id, which must
+// be in region unless region is "" (ErrNotFound), ordered by direction
+// (ingress first), permission and source.
+func (r *Repository) ListSecurityGroupRules(account, region, id string) ([]EC2SecurityGroupRule, error) {
+	if _, err := securityGroupRegion(r.db, account, region, id); err != nil {
+		return nil, err
 	}
-	col := "ingress"
-	if direction == "egress" {
-		col = "egress"
+	rows, err := r.db.Query(`SELECT `+ruleColumns+` FROM ec2_security_group_rules WHERE account_id = ? AND group_id = ?
+		ORDER BY is_egress, perm_ord, src_ord`, account, id)
+	if err != nil {
+		return nil, err
 	}
-	_, err := r.db.Exec(
-		fmt.Sprintf(`UPDATE ec2_security_groups SET %s = ? WHERE account_id = ? AND id = ?`, col),
-		string(rulesJSON), account, id,
-	)
-	return err
+	defer rows.Close()
+	var out []EC2SecurityGroupRule
+	for rows.Next() {
+		rule, err := scanRule(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rule)
+	}
+	return out, rows.Err()
+}
+
+// AuthorizeSecurityGroupRules adds to the group id each of rules, in
+// order, whose source its permission (direction, protocol and ports)
+// lacks, after the permission's last source, or as a new permission
+// after the direction's last. It returns the rules it added; one whose
+// source is held is skipped, so authorizing is idempotent. The group
+// must be in region unless region is "" (ErrNotFound). The reads and
+// writes share one transaction.
+func (r *Repository) AuthorizeSecurityGroupRules(account, region, id string, rules []EC2SecurityGroupRule) ([]EC2SecurityGroupRule, error) {
+	var added []EC2SecurityGroupRule
+	err := r.inTx(func(tx *sql.Tx) error {
+		groupRegion, err := securityGroupRegion(tx, account, region, id)
+		if err != nil {
+			return err
+		}
+		for _, rule := range rules {
+			rule.GroupID = id
+			var held bool
+			if err := tx.QueryRow(`SELECT
+				COALESCE(MIN(perm_ord), (SELECT COALESCE(MAX(perm_ord) + 1, 0) FROM ec2_security_group_rules
+				                         WHERE account_id = ?1 AND group_id = ?2 AND is_egress = ?3)),
+				COALESCE(MAX(src_ord) + 1, 0),
+				COALESCE(MAX(`+ruleSourceMatch+`), 0)
+				FROM ec2_security_group_rules WHERE `+ruleMatch,
+				ruleMatchArgs(account, rule)...).Scan(&rule.PermOrd, &rule.SrcOrd, &held); err != nil {
+				return err
+			}
+			if held {
+				continue
+			}
+			if err := insertRule(tx, account, groupRegion, rule); err != nil {
+				return err
+			}
+			added = append(added, rule)
+		}
+		return nil
+	})
+	return added, err
+}
+
+func insertRule(ex execer, account, region string, rule EC2SecurityGroupRule) error {
+	_, err := ex.Exec(`INSERT INTO ec2_security_group_rules (account_id, region, `+ruleColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		account, region, rule.ID, rule.GroupID, rule.GroupOwnerID, rule.IsEgress, rule.PermOrd, rule.SrcOrd,
+		rule.IPProtocol, rule.FromPort, rule.ToPort,
+		nullIfEmpty(rule.CidrIPv4), nullIfEmpty(rule.CidrIPv6), nullIfEmpty(rule.PrefixListID),
+		nullIfEmpty(rule.ReferencedGroupID), nullIfEmpty(rule.ReferencedUserID), rule.Description)
+	return mapInsertError(err)
+}
+
+// RevokeSecurityGroupRules deletes the group id's rules with the
+// direction, protocol, ports and source of one of rules; one it lacks
+// is no error. A permission keeps its position while it has a source.
+// The group must be in region unless region is "" (ErrNotFound).
+func (r *Repository) RevokeSecurityGroupRules(account, region, id string, rules []EC2SecurityGroupRule) error {
+	return r.inTx(func(tx *sql.Tx) error {
+		if _, err := securityGroupRegion(tx, account, region, id); err != nil {
+			return err
+		}
+		for _, rule := range rules {
+			rule.GroupID = id
+			if _, err := tx.Exec(`DELETE FROM ec2_security_group_rules WHERE `+ruleMatch+` AND `+ruleSourceMatch,
+				ruleMatchArgs(account, rule)...); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (r *Repository) DeleteSecurityGroup(account, region, id string) error {

@@ -162,19 +162,6 @@ func TestSecurityGroupCRUDPlusRules(t *testing.T) {
 		t.Fatalf("CreateSecurityGroup: %v", err)
 	}
 
-	// Update ingress rules.
-	rules := []byte(`[{"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]`)
-	if err := r.UpdateSecurityGroupRules(testAccount, testRegion, "sg-1", "ingress", rules); err != nil {
-		t.Fatalf("UpdateSecurityGroupRules: %v", err)
-	}
-	gotIng, _, err := r.GetSecurityGroupRules(testAccount, testRegion, "sg-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(gotIng) != string(rules) {
-		t.Errorf("ingress rules: got %q want %q", gotIng, rules)
-	}
-
 	// SG with same group_name in same VPC — UNIQUE violation.
 	sgDup := &EC2SecurityGroup{
 		ID: "sg-2", VPCID: "vpc-1", GroupName: "web", Description: "x",
@@ -182,6 +169,66 @@ func TestSecurityGroupCRUDPlusRules(t *testing.T) {
 	}
 	if err := r.CreateSecurityGroup(testAccount, sgDup); !errors.Is(err, models.ErrConflict) {
 		t.Errorf("duplicate group_name: want ErrConflict, got %v", err)
+	}
+}
+
+// tcpRule is an ingress tcp rule of port from cidr.
+func tcpRule(id string, port int, cidr string) EC2SecurityGroupRule {
+	return EC2SecurityGroupRule{ID: id, GroupOwnerID: testAccount, IPProtocol: "tcp", FromPort: port, ToPort: port, CidrIPv4: cidr}
+}
+
+// ruleSlots names each rule by its id and (perm_ord, src_ord).
+func ruleSlots(rules []EC2SecurityGroupRule) []string {
+	out := make([]string, len(rules))
+	for i, r := range rules {
+		out[i] = fmt.Sprintf("%s %d/%d", r.ID, r.PermOrd, r.SrcOrd)
+	}
+	return out
+}
+
+// TestSecurityGroupRules: an authorized source joins the end of its
+// permission (protocol and ports), or starts one after the direction's
+// last; a held source adds nothing; a revoke keeps a permission's slot
+// while it has a source. The list is ordered by direction, permission
+// and source.
+func TestSecurityGroupRules(t *testing.T) {
+	r := setupRepo(t)
+	require.NoError(t, createVPC(r, &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
+	require.NoError(t, r.CreateSecurityGroup(testAccount, &EC2SecurityGroup{ID: "sg-1", VPCID: "vpc-1", GroupName: "web", Description: "d", Region: testRegion, ARN: "arn", CreatedAt: "t"}))
+
+	egress := tcpRule("sgr-e", 443, "0.0.0.0/0")
+	egress.IsEgress = true
+	added, err := r.AuthorizeSecurityGroupRules(testAccount, testRegion, "sg-1", []EC2SecurityGroupRule{
+		egress,
+		tcpRule("sgr-a", 22, "10.0.0.0/8"),
+		tcpRule("sgr-b", 80, "10.1.0.0/16"),
+		tcpRule("sgr-c", 22, "10.2.0.0/16"),
+		tcpRule("sgr-dup", 22, "10.0.0.0/8"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sgr-e 0/0", "sgr-a 0/0", "sgr-b 1/0", "sgr-c 0/1"}, ruleSlots(added), "a held source is skipped")
+	assert.Equal(t, "sg-1", added[0].GroupID)
+
+	added, err = r.AuthorizeSecurityGroupRules(testAccount, testRegion, "sg-1", []EC2SecurityGroupRule{tcpRule("sgr-again", 80, "10.1.0.0/16")})
+	require.NoError(t, err)
+	assert.Empty(t, added, "re-authorizing adds nothing")
+
+	require.NoError(t, r.RevokeSecurityGroupRules(testAccount, testRegion, "sg-1", []EC2SecurityGroupRule{
+		tcpRule("", 22, "10.0.0.0/8"), tcpRule("", 22, "192.0.2.0/24"),
+	}))
+	rules, err := r.ListSecurityGroupRules(testAccount, testRegion, "sg-1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sgr-c 0/1", "sgr-b 1/0", "sgr-e 0/0"}, ruleSlots(rules), "the first permission keeps its slot")
+
+	_, err = r.AuthorizeSecurityGroupRules(testAccount, testRegion, "sg-1", []EC2SecurityGroupRule{{ID: "sgr-two", IPProtocol: "-1", CidrIPv4: "10.0.0.0/8", CidrIPv6: "::/0"}})
+	assert.Error(t, err, "a rule holds exactly one source")
+	for _, c := range []struct{ region, group string }{{"eu-west-1", "sg-1"}, {testRegion, "sg-missing"}} {
+		region, group := c.region, c.group
+		_, err = r.AuthorizeSecurityGroupRules(testAccount, region, group, []EC2SecurityGroupRule{tcpRule("sgr-x", 1, "10.0.0.0/8")})
+		assert.ErrorIs(t, err, models.ErrNotFound, "authorize %s in %s", group, region)
+		assert.ErrorIs(t, r.RevokeSecurityGroupRules(testAccount, region, group, nil), models.ErrNotFound, "revoke %s in %s", group, region)
+		_, err = r.ListSecurityGroupRules(testAccount, region, group)
+		assert.ErrorIs(t, err, models.ErrNotFound, "list %s in %s", group, region)
 	}
 }
 
