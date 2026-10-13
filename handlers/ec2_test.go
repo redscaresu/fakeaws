@@ -1188,6 +1188,17 @@ func TestEC2_DescribeSecurityGroupRules(t *testing.T) {
 		require.Len(t, one, 1, "%v", params)
 		assert.Equal(t, ids[1], one[0].ID, "%v", params)
 	}
+
+	// ESP (50) takes all ports: sent with none, it answers -1/-1 from
+	// Authorize and Describe, as an all-traffic rule does.
+	esp := sgPerm("50", "", "", "10.9.0.0/16")
+	esp.Set("GroupId", sgID)
+	added := decodeRuleSet(t, mustOK(t)(ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", esp))).Rules
+	require.Len(t, added, 1)
+	assert.Equal(t, [2]int{-1, -1}, [2]int{added[0].FromPort, added[0].ToPort}, "Authorize: protocol 50 ports")
+	_, one := describeRules(t, srv, region, url.Values{"SecurityGroupRuleId.1": {added[0].ID}})
+	require.Len(t, one, 1)
+	assert.Equal(t, [2]int{-1, -1}, [2]int{one[0].FromPort, one[0].ToPort}, "Describe: protocol 50 ports")
 }
 
 // TestEC2_SecurityGroupRuleTags: CreateTags takes an sgr- id, the
@@ -1274,6 +1285,15 @@ func TestEC2_SecurityGroupRuleIdNotFound(t *testing.T) {
 	assert.Len(t, rules, 3, "no rule revoked")
 }
 
+// withRuleKey is a revoke of sgID's tcp 22 198.51.100.0/24 source
+// carrying the param key=value.
+func withRuleKey(sgID, key, value string) url.Values {
+	p := sgPerm("tcp", "22", "22", "198.51.100.0/24")
+	p.Set("GroupId", sgID)
+	p.Set(key, value)
+	return p
+}
+
 // TestEC2_SecurityGroupRuleRefusals: ModifySecurityGroupRules answers
 // 501 naming it; a Describe filter fakeaws does not model and a revoke
 // by rule id with a param it does not read are refused, deleting
@@ -1297,6 +1317,10 @@ func TestEC2_SecurityGroupRuleRefusals(t *testing.T) {
 			"IpPermissions.1.IpProtocol": {"tcp"}, "IpPermissions.1.FromPort": {"22"}, "IpPermissions.1.ToPort": {"22"},
 			"IpPermissions.1.IpRanges.1.CidrIp": {"198.51.100.0/24"},
 		}, "RevokeSecurityGroupIngress: not modelled by fakeaws: CidrIp"},
+		{"RevokeSecurityGroupIngress", withRuleKey(sgID, "SecurityGroupRuleId.N", ids[0]),
+			"RevokeSecurityGroupIngress: not modelled by fakeaws: SecurityGroupRuleId.N"},
+		{"RevokeSecurityGroupIngress", withRuleKey(sgID, "SecurityGroupRuleId.1.Foo", "x"),
+			"RevokeSecurityGroupIngress: not modelled by fakeaws: SecurityGroupRuleId.N.Foo"},
 	}
 	for _, c := range cases {
 		resp, body := ec2Call(t, srv, region, c.action, c.params)

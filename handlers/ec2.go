@@ -1893,20 +1893,29 @@ type ec2SecurityGroupRuleXML struct {
 // ec2AllProtocols is the ip protocol of an all-traffic rule.
 const ec2AllProtocols = "-1"
 
+// ec2PortProtocols are the protocols, by name and number, whose rules
+// carry ports, each with the check of its ports; every other protocol
+// takes all ports.
+var ec2PortProtocols = map[string]func(ec2IpPermission) string{
+	"tcp": tcpUDPPortProblem, "udp": tcpUDPPortProblem, "6": tcpUDPPortProblem, "17": tcpUDPPortProblem,
+	"icmp": icmpProblem, "icmpv6": icmpProblem, "1": icmpProblem, "58": icmpProblem,
+}
+
 // ec2UserIdGroupPairInfo is a rule's referencedGroupInfo.
 type ec2UserIdGroupPairInfo struct {
 	GroupId string `xml:"groupId"`
 	UserId  string `xml:"userId,omitempty"`
 }
 
-// ec2SecurityGroupRuleToXML is r as a SecurityGroupRule item. An
-// all-traffic rule (ip protocol -1) answers fromPort and toPort -1 as
-// AWS does, whatever ports it was stored with: the provider's
+// ec2SecurityGroupRuleToXML is r as a SecurityGroupRule item. A rule
+// of a protocol without ports (-1, ESP's 50, GRE's 47: any not in
+// ec2PortProtocols) answers fromPort and toPort -1 as AWS does,
+// whatever ports it was stored with: the provider's
 // aws_vpc_security_group_*_rule read keeps a null port only when it
 // reads -1. DescribeSecurityGroups' ipPermissions answer the stored
 // ports.
 func ec2SecurityGroupRuleToXML(r repository.EC2SecurityGroupRule) ec2SecurityGroupRuleXML {
-	if r.IPProtocol == ec2AllProtocols {
+	if ec2PortProtocols[strings.ToLower(r.IPProtocol)] == nil {
 		r.FromPort, r.ToPort = -1, -1
 	}
 	x := ec2SecurityGroupRuleXML{
@@ -2260,10 +2269,12 @@ func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, accou
 		ec2Refuse(w, req.Action, "no GroupId") // AWS also takes GroupName for ingress
 		return
 	}
-	ruleIDs := queryIDs(req.Params, "SecurityGroupRuleId.")
-	if len(ruleIDs) > 0 && refuseUnreadBesidePermissions(w, req) {
+	// Any SecurityGroupRuleId. key, one queryIDs does not read
+	// (SecurityGroupRuleId.N itself) included, makes this a revoke by id.
+	if hasParamUnder(req.Params, "SecurityGroupRuleId.") && refuseUnreadBesidePermissions(w, req) {
 		return
 	}
+	ruleIDs := queryIDs(req.Params, "SecurityGroupRuleId.")
 	// An empty id would revoke by source, matching nothing.
 	if slices.Contains(ruleIDs, "") {
 		writeRuleNotFound(w, repository.RuleNotFoundError{})
@@ -2433,12 +2444,10 @@ func ipPermissionProblem(p ec2IpPermission) string {
 			return fmt.Sprintf("CIDR block %s is malformed", r.CidrIpv6)
 		}
 	}
-	switch strings.ToLower(p.IpProtocol) {
-	case "tcp", "udp", "6", "17":
-		return tcpUDPPortProblem(p)
-	case "icmp", "icmpv6", "1", "58":
-		return icmpProblem(p)
-	case ec2AllProtocols:
+	if check := ec2PortProtocols[strings.ToLower(p.IpProtocol)]; check != nil {
+		return check(p)
+	}
+	if p.IpProtocol == ec2AllProtocols {
 		// A literal "all" falls through and is refused, as EC2 does
 		// (terraform-provider-aws#1793); the provider sends -1 for it.
 		return ""
