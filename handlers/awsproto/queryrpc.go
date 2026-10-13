@@ -69,20 +69,30 @@ func ParseQueryRPC(r *http.Request) (QueryRPCRequest, error) {
 // WriteEC2QueryRPCResponse instead. EC2's wire shape places the
 // payload as a direct child of <{Action}Response>.
 func WriteQueryRPCResponse(w http.ResponseWriter, action string, payload any) {
+	body := QueryRPCResponse(action, payload)
+	w.Header().Set("Content-Type", "text/xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+// QueryRPCResponse is the body WriteQueryRPCResponse writes, for a
+// caller that renders a response without answering it (a load's
+// render).
+func QueryRPCResponse(action string, payload any) []byte {
 	if payload != nil {
 		assertNotAnonStruct(payload, "WriteQueryRPCResponse")
 	}
-	w.Header().Set("Content-Type", "text/xml")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(xml.Header))
-	fmt.Fprintf(w, "<%sResponse>\n", action)
+	var w bytes.Buffer
+	w.WriteString(xml.Header)
+	fmt.Fprintf(&w, "<%sResponse>\n", action)
 	if payload != nil {
-		fmt.Fprintf(w, "  <%sResult>\n", action)
-		writeMarshalledPayload(w, payload, "    ")
-		fmt.Fprintf(w, "  </%sResult>\n", action)
+		fmt.Fprintf(&w, "  <%sResult>\n", action)
+		writeMarshalledPayload(&w, payload, "    ")
+		fmt.Fprintf(&w, "  </%sResult>\n", action)
 	}
-	fmt.Fprintf(w, "  <ResponseMetadata>\n    <RequestId>fakeaws-synthetic</RequestId>\n  </ResponseMetadata>\n")
-	fmt.Fprintf(w, "</%sResponse>\n", action)
+	fmt.Fprintf(&w, "  <ResponseMetadata>\n    <RequestId>fakeaws-synthetic</RequestId>\n  </ResponseMetadata>\n")
+	fmt.Fprintf(&w, "</%sResponse>\n", action)
+	return w.Bytes()
 }
 
 // WriteEC2QueryRPCResponse emits the EC2 envelope shape:

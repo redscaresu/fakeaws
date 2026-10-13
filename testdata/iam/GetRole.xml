@@ -1,0 +1,32 @@
+<!-- Source: IAM API Reference, GetRole example (https://docs.aws.amazon.com/IAM/latest/APIReference/API_GetRole.html). The document is URL-encoded as IAM sends it; Description, PermissionsBoundary and Tags are added from the Role data type (https://docs.aws.amazon.com/IAM/latest/APIReference/API_Role.html). -->
+<GetRoleResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <GetRoleResult>
+    <Role>
+      <Path>/application_abc/component_xyz/</Path>
+      <Arn>arn:aws:iam::123456789012:role/application_abc/component_xyz/S3Access</Arn>
+      <RoleName>S3Access</RoleName>
+      <AssumeRolePolicyDocument>%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Principal%22%3A%7B%22Service%22%3A%5B%22ec2.amazonaws.com%22%5D%7D%2C%22Action%22%3A%5B%22sts%3AAssumeRole%22%5D%7D%5D%7D</AssumeRolePolicyDocument>
+      <CreateDate>2012-05-08T23:34:01Z</CreateDate>
+      <RoleId>AROADBQP57FF2AEXAMPLE</RoleId>
+      <Description>Lets the web servers read the application bucket</Description>
+      <PermissionsBoundary>
+        <PermissionsBoundaryType>Policy</PermissionsBoundaryType>
+        <PermissionsBoundaryArn>arn:aws:iam::123456789012:policy/application_abc/Boundary</PermissionsBoundaryArn>
+      </PermissionsBoundary>
+      <Tags>
+        <member>
+          <Key>team</Key>
+          <Value>platform</Value>
+        </member>
+      </Tags>
+      <RoleLastUsed>
+        <LastUsedDate>2019-11-20T17:09:20Z</LastUsedDate>
+        <Region>us-east-1</Region>
+      </RoleLastUsed>
+      <MaxSessionDuration>3600</MaxSessionDuration>
+    </Role>
+  </GetRoleResult>
+  <ResponseMetadata>
+    <RequestId>df37e965-9967-11e1-a4c3-270EXAMPLE04</RequestId>
+  </ResponseMetadata>
+</GetRoleResponse>

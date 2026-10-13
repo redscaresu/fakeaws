@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"net/url"
 	"regexp"
 	"slices"
 	"sort"
@@ -40,6 +41,22 @@ type IgnoreEntry struct {
 var loadIgnores []IgnoreEntry
 
 func registerIgnores(entries ...IgnoreEntry) { loadIgnores = append(loadIgnores, entries...) }
+
+// EncodedEntry names an index-free path of its key's body whose text is
+// a URL-encoded document (IAM's policy documents). Diff compares that
+// text URL-decoded, so two encodings of one document (a raw * or %2A,
+// lower- or upper-case hex) are equal; text that does not decode
+// compares as it is.
+type EncodedEntry struct {
+	Key  LoadKey
+	Path string
+}
+
+// loadEncoded holds every loader file's entries, each registered from
+// that file's init through registerEncoded.
+var loadEncoded []EncodedEntry
+
+func registerEncoded(entries ...EncodedEntry) { loadEncoded = append(loadEncoded, entries...) }
 
 // diffAlwaysIgnored names fields no diff compares, at any depth: request
 // ids and paging, which differ between any two answers.
@@ -372,28 +389,38 @@ func diffRootPath(t *Tree) string {
 // diffRootPath, and a member with no counterpart is named whole. Two
 // differently named XML roots are named and nothing under them compared.
 // diffAlwaysIgnored's fields and key's ignore entries are pruned from both
-// trees before anything is compared. A nil tree is an empty body.
+// trees before anything is compared, and key's encoded entries are
+// decoded. A nil tree is an empty body.
 //
 // A path is names shown through diffLabel, never a value.
 func Diff(key LoadKey, recorded, rendered *Tree) (recordedOnly, renderedOnly []string) {
-	ignore := map[string]bool{}
+	rules := diffRules{ignore: map[string]bool{}, decode: map[string]bool{}}
 	for _, e := range loadIgnores {
 		if e.Key == key {
-			ignore[e.Path] = true
+			rules.ignore[e.Path] = true
 		}
 	}
-	return diffIgnoring(ignore, recorded, rendered)
+	for _, e := range loadEncoded {
+		if e.Key == key {
+			rules.decode[e.Path] = true
+		}
+	}
+	return diffIgnoring(rules, recorded, rendered)
 }
 
-// diffIgnoring is Diff pruning the index-free paths ignore names, from
-// the roots: ignore entries apply through Diff, or through this re-rooted
-// at an item (loadRun.repeat), and nowhere else.
-func diffIgnoring(ignore map[string]bool, recorded, rendered *Tree) (recordedOnly, renderedOnly []string) {
+// diffRules are the index-free paths, from the roots, a diff prunes
+// (ignore) and compares URL-decoded (decode).
+type diffRules struct{ ignore, decode map[string]bool }
+
+// diffIgnoring is Diff by rules: ignore and encoded entries apply
+// through Diff, or through this re-rooted at an item (loadRun.repeat),
+// and nowhere else.
+func diffIgnoring(rules diffRules, recorded, rendered *Tree) (recordedOnly, renderedOnly []string) {
 	recorded, rendered = diffOrEmpty(recorded), diffOrEmpty(rendered)
 	if recorded.name != "" && rendered.name != "" && recorded.name != rendered.name {
 		return []string{diffRootPath(recorded)}, []string{diffRootPath(rendered)}
 	}
-	d := treeDiffer{ignore: ignore, forms: map[*Tree]string{}}
+	d := treeDiffer{diffRules: rules, forms: map[*Tree]string{}}
 	recordedOnly, renderedOnly = d.node(d.pruneRoot(recorded), d.pruneRoot(rendered))
 	for i, p := range recordedOnly {
 		if p == "" {
@@ -418,8 +445,8 @@ func diffOrEmpty(t *Tree) *Tree {
 }
 
 type treeDiffer struct {
-	ignore map[string]bool
-	forms  map[*Tree]string // each pruned node's form, built once
+	diffRules
+	forms map[*Tree]string // each pruned node's form, built once
 }
 
 // pruneRoot is prune for a root, which stays, emptied, when nothing under
@@ -434,11 +461,17 @@ func (d treeDiffer) pruneRoot(t *Tree) *Tree {
 // prune returns a copy of t without the fields Diff never compares and
 // without any node that holds no value and no kids, before or after
 // that, or nil when nothing is left: an empty element is absent. A kid
-// kept keeps its index, so a dropped member still counts. shape is t's
-// index-free path, which ignore entries name.
+// kept keeps its index, so a dropped member still counts. A decode
+// path's text is URL-decoded. shape is t's index-free path, which ignore
+// and encoded entries name.
 func (d treeDiffer) prune(t *Tree, shape string) *Tree {
 	c := *t
 	c.kids = nil
+	if d.decode[shape] {
+		if text, err := url.QueryUnescape(c.text); err == nil {
+			c.text = text
+		}
+	}
 	for _, k := range t.kids {
 		kShape := diffJoin(shape, k.name)
 		if diffAlwaysIgnored[k.name] || d.ignore[kShape] {

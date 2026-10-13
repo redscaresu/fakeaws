@@ -120,6 +120,17 @@ func (r *Repository) ResourceTags(account string, table TaggedTable, arn string)
 	return out, err
 }
 
+// ARNByName is the ARN of table's row name, ErrNotFound when there is
+// none: an IAM table, whose rows are keyed by name.
+func (r *Repository) ARNByName(account string, table TaggedTable, name string) (string, error) {
+	var arn string
+	err := r.db.QueryRow(fmt.Sprintf(`SELECT arn FROM %s WHERE account_id = ? AND name = ?`, table), account, name).Scan(&arn)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("%s %s: %w", table, name, models.ErrNotFound)
+	}
+	return arn, err
+}
+
 // resourceExists reports ErrNotFound unless table holds arn. table is
 // always one of the TaggedTable constants, never caller input.
 func resourceExists(tx *sql.Tx, account string, table TaggedTable, arn string) error {
