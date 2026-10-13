@@ -3789,6 +3789,7 @@ type ec2ImageXML struct {
 	State              string `xml:"imageState"`
 	ImageType          string `xml:"imageType"`
 	ImageOwnerAlias    string `xml:"imageOwnerAlias,omitempty"`
+	*repository.EC2AMIRecorded
 }
 
 type ec2DescribeImagesResult struct {
@@ -3796,10 +3797,11 @@ type ec2DescribeImagesResult struct {
 }
 
 // imageFilters are the DescribeImages filters fakeaws models: the
-// fields an AMI row stores (repository.EC2AMI), what ec2AMIToXML
-// derives from them, and the tag filters. The row has no field for
-// architecture, platform, block-device-mapping.* and the rest, so
-// those stay refused, by name.
+// fields an AMI row stores (repository.EC2AMI and a loaded image's
+// EC2AMIRecorded), what ec2AMIToXML derives from them, and the tag
+// filters. A fixture holds no recorded field, so a filter on one
+// matches no fixture. platform, block-device-mapping.* and the rest
+// stay refused, by name.
 var imageFilters = ec2FilterTable[ec2ImageXML]{
 	values: map[string]func(ec2ImageXML) []string{
 		"name":                func(x ec2ImageXML) []string { return []string{x.Name} },
@@ -3810,19 +3812,34 @@ var imageFilters = ec2FilterTable[ec2ImageXML]{
 		"root-device-name":    func(x ec2ImageXML) []string { return []string{x.RootDeviceName} },
 		"state":               func(x ec2ImageXML) []string { return []string{x.State} },
 		"image-type":          func(x ec2ImageXML) []string { return []string{x.ImageType} },
+		"architecture":        func(x ec2ImageXML) []string { return []string{x.recorded().Architecture} },
+		"is-public":           func(x ec2ImageXML) []string { return []string{x.recorded().Public} },
+		"root-device-type":    func(x ec2ImageXML) []string { return []string{x.recorded().RootDeviceType} },
+		"platform-details":    func(x ec2ImageXML) []string { return []string{x.recorded().PlatformDetails} },
 	},
 	tagID: func(x ec2ImageXML) string { return x.ImageId },
+}
+
+// recorded is x's recorded fields, none for a fixture's.
+func (x ec2ImageXML) recorded() repository.EC2AMIRecorded {
+	if x.EC2AMIRecorded == nil {
+		return repository.EC2AMIRecorded{}
+	}
+	return *x.EC2AMIRecorded
 }
 
 // ec2DescribeImages answers ImageId.N, most common from
 // terraform-provider-aws where users pass a literal AMI id, Owner.N
 // and imageFilters (data.aws_ami's owners and filter blocks). Owner.N
-// keeps account ids, self (the caller) and amazon, which matches the
-// fixtures' literal ec2AmazonOwner; a loaded database has no fixtures
-// and its Amazon images a numeric owner, so amazon matches none there. ExecutableBy.N is refused, by name. IncludeDisabled and
-// IncludeDeprecated (which data.aws_ami always sends) are read:
-// fakeaws has no disabled or deprecated image, so neither can change
-// the answer.
+// keeps account ids, self (the caller) and aliases: amazon matches the
+// fixtures' literal ec2AmazonOwner and a loaded image's recorded
+// imageOwnerAlias, whose owner is numeric. ExecutableBy.N is refused,
+// by name. IncludeDisabled and IncludeDeprecated (which data.aws_ami
+// always sends) are read but change nothing: no fixture is disabled or
+// deprecated.
+//
+// ponytail: a loaded image past its recorded deprecationTime is still
+// answered to IncludeDeprecated=false; honour it if a recording holds one.
 func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	filters, ok := imageFilters.read(w, req, "ImageId.N", "Owner.N", "IncludeDisabled", "IncludeDeprecated")
 	if !ok {
@@ -3854,13 +3871,15 @@ func (app *Application) ec2DescribeImages(w http.ResponseWriter, account, region
 	if !ok {
 		return
 	}
-	// Owner.N keeps images of those owners, "self" meaning the caller:
-	// the scope sweep's Owner.1=self sees none of the fixtures.
+	// Owner.N keeps images of those owners, by id or alias, "self"
+	// meaning the caller: the scope sweep's Owner.1=self sees none of
+	// the fixtures.
 	owners := queryListValues(req.Params, "Owner.")
 	out := ec2DescribeImagesResult{ImagesSet: []ec2ImageXML{}}
 	for _, a := range amis {
 		x := ec2AMIToXML(a)
-		if (len(owners) == 0 || slices.Contains(owners, a.OwnerID) || a.OwnerID == account && slices.Contains(owners, "self")) &&
+		if (len(owners) == 0 || slices.Contains(owners, a.OwnerID) || a.OwnerID == account && slices.Contains(owners, "self") ||
+			x.ImageOwnerAlias != "" && slices.Contains(owners, x.ImageOwnerAlias)) &&
 			imageFilters.matches(x, filters, tags) {
 			out.ImagesSet = append(out.ImagesSet, x)
 		}
@@ -4063,16 +4082,22 @@ func ec2Refuse(w http.ResponseWriter, action string, names ...string) {
 
 // ec2AmazonOwner is the literal owner of the Amazon fixtures and of a
 // /mock/images image that names none. An image with it answers it as
-// imageOwnerAlias too; any other owner answers no alias.
+// imageOwnerAlias too; any other fixture or /mock/images owner answers
+// no alias.
 const ec2AmazonOwner = "amazon"
 
+// ec2AMIToXML is a's DescribeImages item. A loaded image answers its
+// recorded fields and alias, never one derived from its owner.
 func ec2AMIToXML(a *repository.EC2AMI) ec2ImageXML {
 	x := ec2ImageXML{
 		ImageId: a.ID, Name: a.Name, OwnerId: a.OwnerID,
 		VirtualizationType: a.VirtualizationType, RootDeviceName: a.RootDeviceName,
-		State: "available", ImageType: "machine",
+		State: "available", ImageType: "machine", EC2AMIRecorded: a.EC2AMIRecorded,
 	}
-	if a.OwnerID == ec2AmazonOwner {
+	switch {
+	case a.EC2AMIRecorded != nil:
+		x.ImageOwnerAlias = a.OwnerAlias
+	case a.OwnerID == ec2AmazonOwner:
 		x.ImageOwnerAlias = ec2AmazonOwner
 	}
 	return x

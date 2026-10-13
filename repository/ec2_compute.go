@@ -24,8 +24,8 @@
 // in that case.
 //
 // AMIs are read-only at v1 — handlers/ec2.go ships a fixture set
-// (ami-0abcd1234 etc.) and the repository just stores the set so
-// DescribeImages can answer it, by id, owner and the filters
+// (ami-0abcd1234 etc.), or a load stores recorded images (EC2AMIRecorded),
+// and DescribeImages answers the rows by id, owner and the filters
 // data.aws_ami sends (handlers/ec2.go's imageFilters).
 package repository
 
@@ -201,6 +201,70 @@ type EC2AMI struct {
 	VirtualizationType string `json:"virtualization_type"`
 	RootDeviceName     string `json:"root_device_name"`
 	Region             string `json:"region"`
+	// EC2AMIRecorded is a loaded image's; a fixture or a /mock/images
+	// image has none.
+	*EC2AMIRecorded
+}
+
+// EC2AMIRecorded is what a loaded image's DescribeImages item holds
+// besides EC2AMI's own fields, as recorded: the fields
+// terraform-provider-aws's aws_ami reads. Its xml tags are that item's,
+// which handlers/ec2.go's ec2ImageXML embeds it in; its owner alias is
+// answered there, beside the fixtures' derived one.
+type EC2AMIRecorded struct {
+	OwnerAlias         string              `json:"owner_alias,omitempty" xml:"-"`
+	ImageLocation      string              `json:"image_location,omitempty" xml:"imageLocation,omitempty"`
+	CreationDate       string              `json:"creation_date,omitempty" xml:"creationDate,omitempty"`
+	DeprecationTime    string              `json:"deprecation_time,omitempty" xml:"deprecationTime,omitempty"`
+	LastLaunchedTime   string              `json:"last_launched_time,omitempty" xml:"lastLaunchedTime,omitempty"`
+	Public             string              `json:"public,omitempty" xml:"isPublic,omitempty"`
+	Architecture       string              `json:"architecture,omitempty" xml:"architecture,omitempty"`
+	Platform           string              `json:"platform,omitempty" xml:"platform,omitempty"`
+	PlatformDetails    string              `json:"platform_details,omitempty" xml:"platformDetails,omitempty"`
+	UsageOperation     string              `json:"usage_operation,omitempty" xml:"usageOperation,omitempty"`
+	Description        string              `json:"description,omitempty" xml:"description,omitempty"`
+	KernelID           string              `json:"kernel_id,omitempty" xml:"kernelId,omitempty"`
+	RamdiskID          string              `json:"ramdisk_id,omitempty" xml:"ramdiskId,omitempty"`
+	RootDeviceType     string              `json:"root_device_type,omitempty" xml:"rootDeviceType,omitempty"`
+	BlockDeviceMapping []EC2AMIBlockDevice `json:"block_device_mapping,omitempty" xml:"blockDeviceMapping>item,omitempty"`
+	ProductCodes       []EC2AMIProductCode `json:"product_codes,omitempty" xml:"productCodes>item,omitempty"`
+	StateReason        *EC2AMIStateReason  `json:"state_reason,omitempty" xml:"stateReason,omitempty"`
+	Hypervisor         string              `json:"hypervisor,omitempty" xml:"hypervisor,omitempty"`
+	EnaSupport         string              `json:"ena_support,omitempty" xml:"enaSupport,omitempty"`
+	SriovNetSupport    string              `json:"sriov_net_support,omitempty" xml:"sriovNetSupport,omitempty"`
+	BootMode           string              `json:"boot_mode,omitempty" xml:"bootMode,omitempty"`
+	TpmSupport         string              `json:"tpm_support,omitempty" xml:"tpmSupport,omitempty"`
+	ImdsSupport        string              `json:"imds_support,omitempty" xml:"imdsSupport,omitempty"`
+}
+
+// EC2AMIBlockDevice is one item of an image's blockDeviceMapping.
+type EC2AMIBlockDevice struct {
+	DeviceName  string     `json:"device_name,omitempty" xml:"deviceName,omitempty"`
+	VirtualName string     `json:"virtual_name,omitempty" xml:"virtualName,omitempty"`
+	EBS         *EC2AMIEBS `json:"ebs,omitempty" xml:"ebs,omitempty"`
+}
+
+// EC2AMIEBS is a block device's ebs.
+type EC2AMIEBS struct {
+	SnapshotID          string `json:"snapshot_id,omitempty" xml:"snapshotId,omitempty"`
+	VolumeSize          string `json:"volume_size,omitempty" xml:"volumeSize,omitempty"`
+	DeleteOnTermination string `json:"delete_on_termination,omitempty" xml:"deleteOnTermination,omitempty"`
+	VolumeType          string `json:"volume_type,omitempty" xml:"volumeType,omitempty"`
+	Iops                string `json:"iops,omitempty" xml:"iops,omitempty"`
+	Throughput          string `json:"throughput,omitempty" xml:"throughput,omitempty"`
+	Encrypted           string `json:"encrypted,omitempty" xml:"encrypted,omitempty"`
+}
+
+// EC2AMIProductCode is one item of an image's productCodes.
+type EC2AMIProductCode struct {
+	ProductCode string `json:"product_code,omitempty" xml:"productCode,omitempty"`
+	Type        string `json:"type,omitempty" xml:"type,omitempty"`
+}
+
+// EC2AMIStateReason is an image's stateReason.
+type EC2AMIStateReason struct {
+	Code    string `json:"code,omitempty" xml:"code,omitempty"`
+	Message string `json:"message,omitempty" xml:"message,omitempty"`
 }
 
 // ----- Instance CRUD -----
@@ -754,9 +818,15 @@ func (r *Repository) DeleteKeyPair(account, region, name string) error {
 // AMIs (it only reads them).
 
 func (r *Repository) SeedAMI(account string, ami *EC2AMI) error {
+	return insertAMI(r.db, "INSERT OR IGNORE", account, ami)
+}
+
+// insertAMI stores ami under account with verb: INSERT OR IGNORE for a
+// seed, which leaves a stored id alone, or INSERT for a load.
+func insertAMI(ex execer, verb, account string, ami *EC2AMI) error {
 	body, _ := json.Marshal(ami)
-	_, err := r.db.Exec(
-		`INSERT OR IGNORE INTO ec2_amis (account_id, region, id, name, owner_id, virtualization_type, root_device_name, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := ex.Exec(
+		verb+` INTO ec2_amis (account_id, region, id, name, owner_id, virtualization_type, root_device_name, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		account, ami.Region, ami.ID, ami.Name, ami.OwnerID, ami.VirtualizationType, ami.RootDeviceName, string(body),
 	)
 	return err

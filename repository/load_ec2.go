@@ -152,6 +152,11 @@ func (lt *LoadTx) PutKeyPair(account string, kp *EC2KeyPair) error {
 	return insertKeyPair(lt, account, kp)
 }
 
+// PutAMI stores ami under account.
+func (lt *LoadTx) PutAMI(account string, ami *EC2AMI) error {
+	return insertAMI(lt, "INSERT", account, ami)
+}
+
 // PutAvailabilityZone stores z under account.
 func (lt *LoadTx) PutAvailabilityZone(account string, z AvailabilityZone) error {
 	return putAvailabilityZone(lt, account, z)
@@ -366,6 +371,15 @@ func (lt *LoadTx) KeyPair(name string) (*EC2KeyPair, error) {
 		return nil, err
 	}
 	return &kp, nil
+}
+
+// AMI reads the stored image id.
+func (lt *LoadTx) AMI(id string) (*EC2AMI, error) {
+	var ami EC2AMI
+	if err := lt.data(&ami, `SELECT data FROM ec2_amis WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	return &ami, nil
 }
 
 // AvailabilityZone reads the stored zone named name.

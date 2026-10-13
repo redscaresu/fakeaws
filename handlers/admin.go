@@ -159,7 +159,8 @@ const maxAdminBodyBytes = 64 << 10
 
 // seedImageRequest is the /mock/images body: the EC2AMI JSON shape
 // (ami_id, name, owner_id, virtualization_type, root_device_name,
-// region) plus the account it is seeded into.
+// region) plus the account it is seeded into. EC2AMIRecorded's fields
+// decode too, and validateSeedImage refuses them.
 type seedImageRequest struct {
 	repository.EC2AMI
 	AccountID string `json:"account_id"`
@@ -250,7 +251,7 @@ func amiFieldDiff(stored, want *repository.EC2AMI) []string {
 
 // validateSeedImage fills the AL2023 fixture's owner and
 // virtualization type when absent and the stored account, and returns
-// a message for the first missing or malformed field. The id is
+// a message for the first missing, malformed or recorded-only field. The id is
 // checked in seedAMI, which knows whether it already exists.
 func validateSeedImage(req *seedImageRequest, account string) string {
 	switch {
@@ -262,6 +263,8 @@ func validateSeedImage(req *seedImageRequest, account string) string {
 		return "root_device_name is required"
 	case req.AccountID != "" && req.AccountID != account:
 		return "account_id must be " + account
+	case req.EC2AMIRecorded != nil:
+		return "a seeded image holds no recorded field (architecture, description and the rest): only a load stores those"
 	}
 	if req.OwnerID == "" {
 		req.OwnerID = ec2AmazonOwner
