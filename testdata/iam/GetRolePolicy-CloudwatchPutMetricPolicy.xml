@@ -1,0 +1,11 @@
+<!-- Source: IAM API Reference, GetRolePolicy example (https://docs.aws.amazon.com/IAM/latest/APIReference/API_GetRolePolicy.html), for the ListRolePolicies example's other name. The document, indented to prove it loads byte-exact, is URL-encoded as IAM sends it. -->
+<GetRolePolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <GetRolePolicyResult>
+    <PolicyName>CloudwatchPutMetricPolicy</PolicyName>
+    <RoleName>S3Access</RoleName>
+    <PolicyDocument>%7B%0A%20%20%22Version%22%3A%20%222012-10-17%22%2C%0A%20%20%22Statement%22%3A%20%5B%0A%20%20%20%20%7B%0A%20%20%20%20%20%20%22Effect%22%3A%20%22Allow%22%2C%0A%20%20%20%20%20%20%22Action%22%3A%20%22cloudwatch%3APutMetricData%22%2C%0A%20%20%20%20%20%20%22Resource%22%3A%20%22%2A%22%0A%20%20%20%20%7D%0A%20%20%5D%0A%7D</PolicyDocument>
+  </GetRolePolicyResult>
+  <ResponseMetadata>
+    <RequestId>7e7cd8bc-99ef-11e1-a4c3-27EXAMPLE805</RequestId>
+  </ResponseMetadata>
+</GetRolePolicyResponse>

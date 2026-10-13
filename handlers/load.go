@@ -53,7 +53,9 @@ type loadReference struct {
 // subtree sits in the exchange's body (Tree.Subtree's path and index),
 // the rows it references, and write, which stores its rows through tx.
 // The load calls write once per row: an item another exchange already
-// loaded is compared, never written again.
+// loaded is compared, never written again. An item with no write stores
+// no row (a list naming rows another exchange loads): it is rendered and
+// its references checked, but loaded never counts it.
 type loadItem struct {
 	loadRef
 	Path  string
@@ -512,16 +514,18 @@ func (run *loadRun) exchange(tx *repository.LoadTx, l *loader, i int) error {
 			}
 			continue
 		}
-		refused, err := run.guard(tx, l, i, func() error { return item.write(tx) })
-		if err != nil {
-			return err
-		}
-		if refused {
-			continue
+		if item.write != nil {
+			refused, err := run.guard(tx, l, i, func() error { return item.write(tx) })
+			if err != nil {
+				return err
+			}
+			if refused {
+				continue
+			}
+			run.answer.Loaded[item.Type]++
 		}
 		row := &loadRow{loadItem: item, exchange: i, seen: map[int]int{run.chain[i]: i}}
 		run.rows[item.loadRef], run.order = row, append(run.order, row)
-		run.answer.Loaded[item.Type]++
 	}
 	return nil
 }
@@ -540,7 +544,8 @@ func (run *loadRun) recorded(i int, item *loadItem) (*Tree, error) {
 // once when the two recorded items are equal by Diff, else it is refused
 // naming it and both exchanges. The items compare below their paths,
 // unnamed, so one item two actions answer (GetRole's Role, ListRoles'
-// member) compares by its fields, under both keys' ignore entries.
+// member) compares by its fields, under both keys' ignore and encoded
+// entries.
 func (run *loadRun) repeat(first *loadRow, i int, item *loadItem) error {
 	if at, ok := first.seen[run.chain[i]]; ok {
 		run.refuse(i, "%s %s repeats in its page chain, first at exchange %d", item.Type, item.ID, at)
@@ -556,18 +561,24 @@ func (run *loadRun) repeat(first *loadRow, i int, item *loadItem) error {
 		return err
 	}
 	key := run.env.Exchanges[first.exchange].key()
-	ignore := map[string]bool{}
-	for _, e := range loadIgnores {
+	rules := diffRules{ignore: map[string]bool{}, decode: map[string]bool{}}
+	add := func(rule map[string]bool, entryKey LoadKey, path string) {
 		for _, side := range []struct {
 			key  LoadKey
 			path string
 		}{{key, first.Path}, {run.env.Exchanges[i].key(), item.Path}} {
-			if rel, ok := strings.CutPrefix(e.Path, side.path+"/"); ok && e.Key == side.key {
-				ignore[rel] = true
+			if rel, ok := strings.CutPrefix(path, side.path+"/"); ok && entryKey == side.key {
+				rule[rel] = true
 			}
 		}
 	}
-	if rec, ren := diffIgnoring(ignore, itemNode(was, first.Path), itemNode(now, item.Path)); len(rec)+len(ren) > 0 {
+	for _, e := range loadIgnores {
+		add(rules.ignore, e.Key, e.Path)
+	}
+	for _, e := range loadEncoded {
+		add(rules.decode, e.Key, e.Path)
+	}
+	if rec, ren := diffIgnoring(rules, itemNode(was, first.Path), itemNode(now, item.Path)); len(rec)+len(ren) > 0 {
 		run.refuse(i, "%s %s differs from exchange %d's (%s %s)", item.Type, item.ID, first.exchange, key.Service, key.Action)
 	}
 	return nil
