@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -67,6 +68,7 @@ type readBacker struct {
 	t         *testing.T
 	srv       *httptest.Server
 	name      string
+	read      []byte
 	region    string
 	exchanges []readBackExchange
 }
@@ -91,7 +93,7 @@ func readBack(t *testing.T, name string, read []byte) []string {
 	}
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:", LoadMaxBytes: int64(len(read))})
 	srv.Client().Timeout = readBackTimeout
-	r := &readBacker{t: t, srv: srv, name: name, region: env.Region, exchanges: env.Exchanges}
+	r := &readBacker{t: t, srv: srv, name: name, read: read, region: env.Region, exchanges: env.Exchanges}
 	status, body := postLoad(t, srv, string(read))
 	if status != http.StatusOK {
 		return r.refused(status, []byte(body))
@@ -186,34 +188,28 @@ func (r *readBacker) refusal(refusal string) string {
 	return r.line(i, "the load refused it "+withheld)
 }
 
-// entries are the read's exchanges by the request that made them: the
-// 2xx pages of one entry, as the load links them (one key, and params
-// equal but for the loader's request token), together in recorded
-// order; each NotFound alone.
+// entries are the read's exchanges by the request that made them: each
+// page chain the load linked (handlers.LoadChains), and each other
+// exchange alone, a NotFound or a 2xx page no chain holds, in recorded
+// order.
 func (r *readBacker) entries() [][]int {
+	chains, err := handlers.LoadChains(r.read)
+	require.NoError(r.t, err)
+	byFirst, chained := map[int][]int{}, map[int]bool{}
+	for _, c := range chains {
+		byFirst[c[0]] = c
+		for _, i := range c {
+			chained[i] = true
+		}
+	}
 	var out [][]int
-	byEntry := map[string]int{}
-	for i, ex := range r.exchanges {
-		if !readBackOK(ex.Status) {
+	for i := range r.exchanges {
+		switch c, first := byFirst[i]; {
+		case first:
+			out = append(out, c)
+		case !chained[i]:
 			out = append(out, []int{i})
-			continue
 		}
-		key := handlers.LoadKey{Service: ex.Service, Action: ex.Action}
-		params := string(ex.Params)
-		var form map[string]any
-		if json.Unmarshal(ex.Params, &form) == nil {
-			delete(form, handlers.LoadRequestToken(key))
-			b, err := json.Marshal(form)
-			require.NoError(r.t, err)
-			params = string(b)
-		}
-		entry := key.Service + " " + key.Action + " " + params
-		if e, ok := byEntry[entry]; ok {
-			out[e] = append(out[e], i)
-			continue
-		}
-		byEntry[entry] = len(out)
-		out = append(out, []int{i})
 	}
 	return out
 }
@@ -261,26 +257,25 @@ func (r *readBacker) compare(entry []int) []string {
 	return out
 }
 
+// readBackQuery sends a query service's request through its test
+// helper, which adds Action and Version as infrafactory's reader does.
+var readBackQuery = map[string]func(r *readBacker, action string, form url.Values) (*http.Response, []byte){
+	"ec2": func(r *readBacker, action string, form url.Values) (*http.Response, []byte) {
+		return ec2Call(r.t, r.srv, r.region, action, form)
+	},
+	"iam": func(r *readBacker, action string, form url.Values) (*http.Response, []byte) {
+		return iamCall(r.t, r.srv, action, form)
+	},
+}
+
 // resend sends ex's request as infrafactory's reader sent it
-// (internal/harness/aws_reader.go, awsReplay.request): an EC2 query's
-// params as a form with Action and Version (ec2Call), an SSM json one's
-// as the body with X-Amz-Target (ssmDoIn). It returns the status and
-// body, or why it sent nothing: an exchange of any other service is
-// reported, never skipped.
+// (internal/harness/aws_reader.go, awsReplay.request): a query
+// exchange's params as a form with Action and Version (readBackQuery),
+// an SSM json one's as the body with X-Amz-Target (ssmDoIn). It returns
+// the status and body, or why it sent nothing: an exchange of any other
+// service is reported, never skipped.
 func (r *readBacker) resend(ex readBackExchange) (int, []byte, string) {
-	switch ex.Service {
-	case "ec2":
-		var params map[string]string
-		if err := json.Unmarshal(ex.Params, &params); err != nil {
-			return 0, nil, "its params are not a query form"
-		}
-		form := url.Values{}
-		for k, v := range params {
-			form.Set(k, v)
-		}
-		resp, body := ec2Call(r.t, r.srv, r.region, ex.Action, form)
-		return resp.StatusCode, body, ""
-	case "ssm":
+	if ex.Service == "ssm" {
 		resp, err := ssmDoIn(r.srv, r.region, ex.Action, string(ex.Params))
 		require.NoError(r.t, err)
 		defer resp.Body.Close()
@@ -288,7 +283,20 @@ func (r *readBacker) resend(ex readBackExchange) (int, []byte, string) {
 		require.NoError(r.t, err)
 		return resp.StatusCode, body, ""
 	}
-	return 0, nil, "its service is not one a read-back re-sends"
+	send, ok := readBackQuery[ex.Service]
+	if !ok {
+		return 0, nil, "its service is not one a read-back re-sends"
+	}
+	var params map[string]string
+	if err := json.Unmarshal(ex.Params, &params); err != nil {
+		return 0, nil, "its params are not a query form"
+	}
+	form := url.Values{}
+	for k, v := range params {
+		form.Set(k, v)
+	}
+	resp, body := send(r, ex.Action, form)
+	return resp.StatusCode, body, ""
 }
 
 // loadReadFixture is testdata/load/<name>.
@@ -348,9 +356,11 @@ func TestLoadReadBack_ReportsNoValue(t *testing.T) {
 }
 
 // TestLoadReadBack_PagesAndNotFound: a paged read's pages, merged, equal
-// the one answer fakeaws gives; a NotFound reads back equal only as its
-// status and code, so one of a parameter another exchange loads fails,
-// and so does one whose request fakeaws refuses with another code.
+// the one answer fakeaws gives, and so do each chain's when the read
+// sends the request twice; a role's IAM read reads back equal; a
+// NotFound reads back equal only as its status and code, so one of a
+// parameter another exchange loads fails, and so does one whose request
+// fakeaws refuses with another code.
 func TestLoadReadBack_PagesAndNotFound(t *testing.T) {
 	const vpc = "vpc-0paged"
 	subnets := func(params map[string]string, subnet, tail string) netRecorded {
@@ -369,20 +379,23 @@ func TestLoadReadBack_PagesAndNotFound(t *testing.T) {
 	badName, err := json.Marshal(map[string]any{"service": "ssm", "protocol": "json", "action": "GetParameter",
 		"params": map[string]any{"Name": 5}, "status": http.StatusBadRequest, "body": notFoundBody})
 	require.NoError(t, err)
+	read := func(exchanges ...string) string { return loadEnvelope(loadAccount, netRegion, exchanges...) }
 	for _, tc := range []struct {
-		name      string
-		exchanges []string
-		want      []string
+		name string
+		read string
+		want []string
 	}{
-		{"paged", paged, nil},
-		{"not found", []string{notFound}, nil},
-		{"not found but loaded", []string{ssmGetParameterExchange(http.StatusOK, ssmFixture(t)), notFound},
+		{"paged", read(paged...), nil},
+		{"paged, read twice", read(slices.Concat(paged, paged[1:3])...), nil},
+		{"a role", iamReadEnvelope(t, iamRoleRead, asRecorded), nil},
+		{"not found", read(notFound), nil},
+		{"not found but loaded", read(ssmGetParameterExchange(http.StatusOK, ssmFixture(t)), notFound),
 			[]string{"not found but loaded: exchange 1: ssm GetParameter: answered status 200, not the recorded NotFound (status 400, its code)"}},
-		{"not found, refused with another code", []string{string(badName)},
+		{"not found, refused with another code", read(string(badName)),
 			[]string{"not found, refused with another code: exchange 0: ssm GetParameter: answered status 400, not the recorded NotFound (status 400, its code)"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, readBack(t, tc.name, []byte(loadEnvelope(loadAccount, netRegion, tc.exchanges...))))
+			assert.Equal(t, tc.want, readBack(t, tc.name, []byte(tc.read)))
 		})
 	}
 }

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"encoding/xml"
@@ -24,10 +25,40 @@ func EC2DeriveAutoIP(eniID string) string { return ec2DerivePublicIP(ec2AutoIPNe
 var InstanceReadAttributes = ec2InstanceReadAttributes
 
 // For load_read_back_test.go, which re-sends each recorded exchange:
-// the request token a loader's later pages carry, the parse a load gives
-// a body, the error code of a NotFound, and the ends of the refusals
-// naming a path, which it reports.
-func LoadRequestToken(key LoadKey) string { return loaderFor(key).requestToken }
+// the page chains a load links, the parse a load gives a body, the error
+// code of a NotFound, and the ends of the refusals naming a path, which
+// it reports.
+
+// LoadChains is read's page chains as a load links them (loadRun.link):
+// each the indexes of its 2xx pages in recorded order, the chains in the
+// order of their first pages. read must be one /mock/load took.
+func LoadChains(read []byte) ([][]int, error) {
+	var env loadEnvelope
+	if err := decodeStrict(bytes.NewReader(read), &env); err != nil {
+		return nil, err
+	}
+	run := loadRun{
+		env:    &env,
+		answer: &loadAnswer{Loaded: map[string]int{}, Absent: map[string]int{}, Unresolved: map[string][]string{}},
+		trees:  map[int]*Tree{},
+		chain:  make([]int, len(env.Exchanges)),
+	}
+	run.link()
+	var out [][]int
+	at := map[int]int{} // a chain's first page → its index in out
+	for i := range env.Exchanges {
+		if run.trees[i] == nil {
+			continue // not a 2xx page
+		}
+		if k, ok := at[run.chain[i]]; ok {
+			out[k] = append(out[k], i)
+			continue
+		}
+		at[run.chain[i]] = len(out)
+		out = append(out, []int{i})
+	}
+	return out, nil
+}
 
 var (
 	ParseLoadBody = parseLoadBody
