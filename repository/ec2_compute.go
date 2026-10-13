@@ -112,11 +112,21 @@ type EC2Instance struct {
 	InstanceType           string `json:"instance_type"`
 	KeyName                string `json:"key_name,omitempty"`
 	IAMInstanceProfileName string `json:"iam_instance_profile_name,omitempty"`
-	UserData               string `json:"user_data,omitempty"` // base64, as RunInstances sent it
-	State                  string `json:"state"`
-	Region                 string `json:"region"`
-	ARN                    string `json:"arn"`
-	CreatedAt              string `json:"created_at"`
+	// IAMInstanceProfileARN and IAMInstanceProfileID are the profile's
+	// as stored when the instance launched, or as recorded for a loaded
+	// instance; empty for a row stored before they were kept.
+	IAMInstanceProfileARN string `json:"iam_instance_profile_arn,omitempty"`
+	IAMInstanceProfileID  string `json:"iam_instance_profile_id,omitempty"`
+	UserData              string `json:"user_data,omitempty"` // base64, as RunInstances sent it or DescribeInstanceAttribute answered it
+	State                 string `json:"state"`
+	Region                string `json:"region"`
+	ARN                   string `json:"arn"`
+	CreatedAt             string `json:"created_at"` // DescribeInstances' launchTime
+	ReservationID         string `json:"reservation_id,omitempty"`
+	// Recorded is a loaded instance's DescribeInstances fields that
+	// nothing else holds, encoded by handlers/ec2.go; a launched instance
+	// has none.
+	Recorded json.RawMessage `json:"recorded,omitempty"`
 	EC2InstanceAttributes
 }
 
@@ -161,6 +171,10 @@ type EC2NetworkInterface struct {
 	OwnerID            string                `json:"owner_id,omitempty"`
 	Status             string                `json:"status,omitempty"`
 	PrivateIPAddresses []EC2PrivateIPAddress `json:"private_ip_addresses,omitempty"`
+	// KeepOnTermination is a loaded attached ENI's recorded
+	// deleteOnTermination false: terminating its instance detaches it
+	// (SetInstanceState). A launched ENI is deleted with its instance.
+	KeepOnTermination bool `json:"keep_on_termination,omitempty"`
 }
 
 // EC2PrivateIPAddress is one of a loaded ENI's private IPv4 addresses.
@@ -233,17 +247,8 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance, eni *EC2N
 		return err
 	}
 	defer tx.Rollback()
-	body, _ := json.Marshal(inst)
-	var profile *string
-	if inst.IAMInstanceProfileName != "" {
-		profile = &inst.IAMInstanceProfileName
-	}
-	if _, err := tx.Exec(
-		`INSERT INTO ec2_instances (account_id, region, id, subnet_id, ami_id, instance_type, iam_instance_profile_name, state, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		account, inst.Region, inst.ID, inst.SubnetID, inst.AMIID, inst.InstanceType,
-		profile, inst.State, inst.ARN, string(body), inst.CreatedAt,
-	); err != nil {
-		return mapInsertError(err)
+	if err := insertInstance(tx, account, inst); err != nil {
+		return err
 	}
 	used, err := stringSet(tx, subnetPrivateIPs, account, subnet.ID, account, subnet.ID)
 	if err != nil {
@@ -259,6 +264,18 @@ func (r *Repository) CreateInstance(account string, inst *EC2Instance, eni *EC2N
 		return err
 	}
 	return tx.Commit()
+}
+
+// insertInstance stores inst under account, with no
+// iam_instance_profile_name when it has no profile.
+func insertInstance(ex execer, account string, inst *EC2Instance) error {
+	body, _ := json.Marshal(inst)
+	_, err := ex.Exec(
+		`INSERT INTO ec2_instances (account_id, region, id, subnet_id, ami_id, instance_type, iam_instance_profile_name, state, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		account, inst.Region, inst.ID, inst.SubnetID, inst.AMIID, inst.InstanceType,
+		nullIfEmpty(inst.IAMInstanceProfileName), inst.State, inst.ARN, string(body), inst.CreatedAt,
+	)
+	return mapInsertError(err)
 }
 
 // insertENI stores eni under account, with no instance_id when it has
@@ -471,7 +488,9 @@ func (e *InstanceError) Unwrap() error { return e.Err }
 // terminal-state refusal is enforced here). An id with no row, and the
 // termination of an instance whose DisableAPITermination is set, are
 // refused too, each as an *InstanceError, moving none. Terminating
-// deletes the instance's ENIs and clears its EIP associations.
+// deletes the instance's ENIs, but for one a load kept on termination,
+// which it detaches, and clears the associations of its EIPs on the
+// ENIs it deletes.
 func (r *Repository) SetInstanceState(account, region, state string, ids ...string) ([]string, error) {
 	previous := make([]string, len(ids))
 	err := r.inTx(func(tx *sql.Tx) error {
@@ -515,10 +534,23 @@ func setInstanceStateTx(tx *sql.Tx, account, region, id, state string) (string, 
 	if state != "terminated" {
 		return was, nil
 	}
+	// An ENI attached with deleteOnTermination false stays, detached and
+	// available, as on EC2, and so does an Elastic IP's association with
+	// it; the instance's other ENIs go with it.
+	if _, err := tx.Exec(`UPDATE ec2_network_interfaces SET instance_id = NULL,
+		   data = json_set(json_remove(data, '$.instance_id', '$.attachment_id', '$.keep_on_termination'), '$.status', 'available')
+		 WHERE account_id = ? AND instance_id = ? AND json_extract(data, '$.keep_on_termination')`, account, id); err != nil {
+		return "", err
+	}
 	if _, err := tx.Exec(`DELETE FROM ec2_network_interfaces WHERE account_id = ? AND instance_id = ?`, account, id); err != nil {
 		return "", err
 	}
-	// EC2 disassociates an instance's Elastic IPs when it terminates.
+	if _, err := tx.Exec(`UPDATE ec2_eips SET instance_id = NULL, data = json_remove(data, '$.instance_id')
+		 WHERE account_id = ? AND instance_id = ? AND network_interface_id IN (SELECT id FROM ec2_network_interfaces WHERE account_id = ?)`,
+		account, id, account); err != nil {
+		return "", err
+	}
+	// EC2 disassociates an instance's other Elastic IPs when it terminates.
 	_, err = tx.Exec(
 		`UPDATE ec2_eips SET network_interface_id = NULL, instance_id = NULL, association_id = NULL,
 		   data = json_remove(data, '$.network_interface_id', '$.instance_id', '$.association_id', '$.private_ip')

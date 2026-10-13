@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -2593,21 +2594,117 @@ type ec2InstanceXML struct {
 	ImageId             string                   `xml:"imageId"`
 	InstanceType        string                   `xml:"instanceType"`
 	KeyName             string                   `xml:"keyName,omitempty"`
+	LaunchTime          string                   `xml:"launchTime,omitempty"`
 	SubnetId            string                   `xml:"subnetId,omitempty"`
+	VpcId               string                   `xml:"vpcId,omitempty"`
 	PrivateIpAddress    string                   `xml:"privateIpAddress,omitempty"`
+	PrivateDnsName      string                   `xml:"privateDnsName,omitempty"`
 	IpAddress           string                   `xml:"ipAddress,omitempty"`
 	SourceDestCheck     *bool                    `xml:"sourceDestCheck,omitempty"`
-	EbsOptimized        bool                     `xml:"ebsOptimized,omitempty"`
+	EbsOptimized        bool                     `xml:"ebsOptimized"`
 	IamProfile          *ec2IamProfileXML        `xml:"iamInstanceProfile,omitempty"`
 	InstanceState       ec2InstanceStateXML      `xml:"instanceState"`
 	GroupSet            []ec2InstanceSGXML       `xml:"groupSet>item,omitempty"`
 	NetworkInterfaceSet []ec2NetworkInterfaceXML `xml:"networkInterfaceSet>item,omitempty"`
 	TagSet              []ec2ResourceTagXML      `xml:"tagSet>item,omitempty"`
+	ec2InstanceRecordedXML
 }
 
-// ec2NetworkInterfaceXML serves both an instance's networkInterfaceSet
-// item and a DescribeNetworkInterfaces item; the SDK ignores the
-// fields one shape has and the other lacks.
+// ec2InstanceRecordedXML are the fields of a loaded instance that
+// fakeaws holds as DescribeInstances recorded them
+// (repository.EC2Instance.Recorded) and answers back; a launched
+// instance has none. A scalar is its recorded text, so it reads back
+// byte-exact and an absent one stays absent.
+type ec2InstanceRecordedXML struct {
+	DnsName                          string                      `xml:"dnsName,omitempty"`
+	Placement                        *ec2InstancePlacementXML    `xml:"placement,omitempty"`
+	Monitoring                       *ec2InstanceMonitoringXML   `xml:"monitoring,omitempty"`
+	Architecture                     string                      `xml:"architecture,omitempty"`
+	RootDeviceType                   string                      `xml:"rootDeviceType,omitempty"`
+	RootDeviceName                   string                      `xml:"rootDeviceName,omitempty"`
+	BlockDeviceMapping               []ec2InstanceBlockDeviceXML `xml:"blockDeviceMapping>item,omitempty"`
+	VirtualizationType               string                      `xml:"virtualizationType,omitempty"`
+	ClientToken                      string                      `xml:"clientToken,omitempty"`
+	Hypervisor                       string                      `xml:"hypervisor,omitempty"`
+	CpuOptions                       *ec2InstanceCPUOptionsXML   `xml:"cpuOptions,omitempty"`
+	CapacityReservationSpecification *ec2InstanceCapacityXML     `xml:"capacityReservationSpecification,omitempty"`
+	HibernationOptions               *ec2InstanceHibernationXML  `xml:"hibernationOptions,omitempty"`
+	EnclaveOptions                   *ec2InstanceEnclaveXML      `xml:"enclaveOptions,omitempty"`
+	MetadataOptions                  *ec2InstanceMetadataXML     `xml:"metadataOptions,omitempty"`
+	MaintenanceOptions               *ec2InstanceMaintenanceXML  `xml:"maintenanceOptions,omitempty"`
+	PrivateDnsNameOptions            *ec2InstancePrivateDNSXML   `xml:"privateDnsNameOptions,omitempty"`
+	PlatformDetails                  string                      `xml:"platformDetails,omitempty"`
+	UsageOperation                   string                      `xml:"usageOperation,omitempty"`
+	BootMode                         string                      `xml:"bootMode,omitempty"`
+}
+
+type ec2InstancePlacementXML struct {
+	AvailabilityZone     string `xml:"availabilityZone,omitempty"`
+	GroupName            string `xml:"groupName,omitempty"`
+	Tenancy              string `xml:"tenancy,omitempty"`
+	HostId               string `xml:"hostId,omitempty"`
+	HostResourceGroupArn string `xml:"hostResourceGroupArn,omitempty"`
+	PartitionNumber      string `xml:"partitionNumber,omitempty"`
+}
+
+type ec2InstanceMonitoringXML struct {
+	State string `xml:"state,omitempty"`
+}
+
+type ec2InstanceBlockDeviceXML struct {
+	DeviceName string `xml:"deviceName,omitempty"`
+	Ebs        *struct {
+		VolumeId            string `xml:"volumeId,omitempty"`
+		Status              string `xml:"status,omitempty"`
+		AttachTime          string `xml:"attachTime,omitempty"`
+		DeleteOnTermination string `xml:"deleteOnTermination,omitempty"`
+	} `xml:"ebs,omitempty"`
+}
+
+type ec2InstanceCPUOptionsXML struct {
+	CoreCount      string `xml:"coreCount,omitempty"`
+	ThreadsPerCore string `xml:"threadsPerCore,omitempty"`
+	AmdSevSnp      string `xml:"amdSevSnp,omitempty"`
+}
+
+type ec2InstanceCapacityXML struct {
+	CapacityReservationPreference string `xml:"capacityReservationPreference,omitempty"`
+	CapacityReservationTarget     *struct {
+		CapacityReservationId               string `xml:"capacityReservationId,omitempty"`
+		CapacityReservationResourceGroupArn string `xml:"capacityReservationResourceGroupArn,omitempty"`
+	} `xml:"capacityReservationTarget,omitempty"`
+}
+
+type ec2InstanceHibernationXML struct {
+	Configured string `xml:"configured,omitempty"`
+}
+
+type ec2InstanceEnclaveXML struct {
+	Enabled string `xml:"enabled,omitempty"`
+}
+
+type ec2InstanceMetadataXML struct {
+	State                   string `xml:"state,omitempty"`
+	HttpTokens              string `xml:"httpTokens,omitempty"`
+	HttpPutResponseHopLimit string `xml:"httpPutResponseHopLimit,omitempty"`
+	HttpEndpoint            string `xml:"httpEndpoint,omitempty"`
+	HttpProtocolIpv6        string `xml:"httpProtocolIpv6,omitempty"`
+	InstanceMetadataTags    string `xml:"instanceMetadataTags,omitempty"`
+}
+
+type ec2InstanceMaintenanceXML struct {
+	AutoRecovery string `xml:"autoRecovery,omitempty"`
+}
+
+type ec2InstancePrivateDNSXML struct {
+	HostnameType                    string `xml:"hostnameType,omitempty"`
+	EnableResourceNameDnsARecord    string `xml:"enableResourceNameDnsARecord,omitempty"`
+	EnableResourceNameDnsAAAARecord string `xml:"enableResourceNameDnsAAAARecord,omitempty"`
+}
+
+// ec2NetworkInterfaceXML serves both a DescribeNetworkInterfaces item
+// and an instance's networkInterfaceSet item, which
+// ec2InstanceENIToXML clears of the fields that shape lacks.
 type ec2NetworkInterfaceXML struct {
 	NetworkInterfaceId    string                `xml:"networkInterfaceId"`
 	SubnetId              string                `xml:"subnetId"`
@@ -2615,7 +2712,7 @@ type ec2NetworkInterfaceXML struct {
 	AvailabilityZone      string                `xml:"availabilityZone,omitempty"`
 	Description           string                `xml:"description,omitempty"`
 	OwnerId               string                `xml:"ownerId"`
-	RequesterManaged      bool                  `xml:"requesterManaged"`
+	RequesterManaged      *bool                 `xml:"requesterManaged,omitempty"`
 	Status                string                `xml:"status"`
 	InterfaceType         string                `xml:"interfaceType"`
 	MacAddress            string                `xml:"macAddress,omitempty"`
@@ -2637,8 +2734,8 @@ type ec2ENIPrivateIPXML struct {
 
 type ec2ENIAttachmentXML struct {
 	AttachmentId        string `xml:"attachmentId"`
-	InstanceId          string `xml:"instanceId"`
-	InstanceOwnerId     string `xml:"instanceOwnerId"`
+	InstanceId          string `xml:"instanceId,omitempty"`
+	InstanceOwnerId     string `xml:"instanceOwnerId,omitempty"`
 	DeviceIndex         int    `xml:"deviceIndex"`
 	NetworkCardIndex    int    `xml:"networkCardIndex"`
 	Status              string `xml:"status"`
@@ -2671,7 +2768,8 @@ type ec2InstanceStateXML struct {
 }
 
 type ec2InstanceSGXML struct {
-	GroupId string `xml:"groupId"`
+	GroupId   string `xml:"groupId"`
+	GroupName string `xml:"groupName,omitempty"` // an instance's own groupSet's only
 }
 
 type ec2RunInstancesResult struct {
@@ -2713,41 +2811,78 @@ func ec2InstanceStateForName(name string) ec2InstanceStateXML {
 	return ec2InstanceStateXML{Code: ec2InstanceStateCodes[name], Name: name}
 }
 
-// ec2InstanceToXML renders inst; eni is its primary ENI, nil once
-// terminated.
-func ec2InstanceToXML(account string, inst *repository.EC2Instance, eni *repository.EC2NetworkInterface) ec2InstanceXML {
+// ec2InstanceNet is what an instance's answer reads besides its row:
+// its primary ENI, nil once terminated; the Elastic IP associated with
+// it, nil for none; and the names of its groups, nil for an answer that
+// names none (RunInstances').
+type ec2InstanceNet struct {
+	eni        *repository.EC2NetworkInterface
+	eip        *repository.EC2EIP
+	groupNames map[string]string
+}
+
+// ec2InstanceToXML renders inst on net. An instance launched before its
+// profile's ARN was stored answers one built from the name.
+func ec2InstanceToXML(account string, inst *repository.EC2Instance, net ec2InstanceNet) (ec2InstanceXML, error) {
 	x := ec2InstanceXML{
 		InstanceId:    inst.ID,
 		ImageId:       inst.AMIID,
 		InstanceType:  inst.InstanceType,
 		KeyName:       inst.KeyName,
+		LaunchTime:    inst.CreatedAt,
 		EbsOptimized:  inst.EBSOptimized,
 		InstanceState: ec2InstanceStateForName(inst.State),
 	}
-	if inst.IAMInstanceProfileName != "" {
-		x.IamProfile = &ec2IamProfileXML{
-			Arn: awsproto.BuildIAMInstanceProfileARN(account, inst.IAMInstanceProfileName),
-			Id:  inst.IAMInstanceProfileName,
+	if len(inst.Recorded) > 0 {
+		if err := json.Unmarshal(inst.Recorded, &x.ec2InstanceRecordedXML); err != nil {
+			return x, err
 		}
 	}
-	if eni == nil {
-		return x
+	if inst.IAMInstanceProfileName != "" {
+		x.IamProfile = &ec2IamProfileXML{
+			Arn: cmp.Or(inst.IAMInstanceProfileARN, awsproto.BuildIAMInstanceProfileARN(account, inst.IAMInstanceProfileName)),
+			Id:  cmp.Or(inst.IAMInstanceProfileID, inst.IAMInstanceProfileName),
+		}
 	}
-	eniXML := ec2ENIToXML(account, eni, nil)
+	eni := net.eni
+	if eni == nil {
+		return x, nil
+	}
+	eniXML := ec2InstanceENIToXML(account, eni, net.eip)
 	x.SubnetId = eni.SubnetID
+	x.VpcId = eni.VPCID
 	x.PrivateIpAddress = eni.PrivateIP
+	x.PrivateDnsName = eni.PrivateDNSName
 	x.IpAddress = eni.PublicIP
 	x.SourceDestCheck = &eniXML.SourceDestCheck
-	x.GroupSet = eniXML.GroupSet
+	for _, g := range eniXML.GroupSet {
+		x.GroupSet = append(x.GroupSet, ec2InstanceSGXML{GroupId: g.GroupId, GroupName: net.groupNames[g.GroupId]})
+	}
 	x.NetworkInterfaceSet = []ec2NetworkInterfaceXML{eniXML}
+	return x, nil
+}
+
+// ec2InstanceENIToXML renders eni, with eip the Elastic IP associated
+// with it (nil for none), as an instance's networkInterfaceSet item:
+// without the zone, requesterManaged, tags, attachment owner or
+// association ids a DescribeNetworkInterfaces item has and EC2's
+// InstanceNetworkInterface lacks.
+func ec2InstanceENIToXML(account string, eni *repository.EC2NetworkInterface, eip *repository.EC2EIP) ec2NetworkInterfaceXML {
+	x := ec2ENIToXML(account, eni, eip)
+	x.AvailabilityZone, x.RequesterManaged = "", nil
+	if x.Attachment != nil {
+		x.Attachment.InstanceId, x.Attachment.InstanceOwnerId = "", ""
+	}
+	if x.Association != nil {
+		x.Association.AllocationId, x.Association.AssociationId = "", ""
+	}
 	return x
 }
 
 // ec2ENIToXML renders eni; eip is the address associated with it, nil
-// for none or when the caller does not read it (an instance's
-// networkInterfaceSet). An ENI with no instance has no attachment. A
+// for none. An ENI with no instance has no attachment. A
 // launched ENI, which stores no owner, status or type, answers account,
-// in-use and interface.
+// in-use and interface, and is deleted on termination.
 func ec2ENIToXML(account string, eni *repository.EC2NetworkInterface, eip *repository.EC2EIP) ec2NetworkInterfaceXML {
 	x := ec2NetworkInterfaceXML{
 		NetworkInterfaceId: eni.ID,
@@ -2756,7 +2891,7 @@ func ec2ENIToXML(account string, eni *repository.EC2NetworkInterface, eip *repos
 		AvailabilityZone:   eni.AvailabilityZone,
 		Description:        eni.Description,
 		OwnerId:            cmp.Or(eni.OwnerID, account),
-		RequesterManaged:   eni.RequesterManaged,
+		RequesterManaged:   &eni.RequesterManaged,
 		Status:             cmp.Or(eni.Status, "in-use"),
 		InterfaceType:      cmp.Or(eni.InterfaceType, "interface"),
 		MacAddress:         eni.MacAddress,
@@ -2771,7 +2906,7 @@ func ec2ENIToXML(account string, eni *repository.EC2NetworkInterface, eip *repos
 			InstanceId:          eni.InstanceID,
 			InstanceOwnerId:     account,
 			Status:              "attached",
-			DeleteOnTermination: true,
+			DeleteOnTermination: !eni.KeepOnTermination,
 		}
 	}
 	for _, sgID := range eni.SecurityGroupIDs {
@@ -2960,12 +3095,22 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 	id := "i-" + ec2RandID()
 	inst := &repository.EC2Instance{
 		ID: id, SubnetID: nw.subnetID, AMIID: imageID, InstanceType: instanceType, KeyName: keyName,
-		IAMInstanceProfileName: req.Params.Get("IamInstanceProfile.Name"),
-		UserData:               req.Params.Get("UserData"),
-		State:                  "running",
-		Region:                 region,
-		ARN:                    awsproto.BuildEC2InstanceARN(region, account, id),
-		CreatedAt:              time.Now().UTC().Format(time.RFC3339),
+		UserData:      req.Params.Get("UserData"),
+		State:         "running",
+		Region:        region,
+		ARN:           awsproto.BuildEC2InstanceARN(region, account, id),
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+		ReservationID: "r-" + ec2RandID(),
+	}
+	// The instance answers the profile's stored ARN and id: a loaded
+	// profile's ARN carries its path, which the name alone does not.
+	if name := req.Params.Get("IamInstanceProfile.Name"); name != "" {
+		profile, err := app.repo.GetInstanceProfile(account, name)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return
+		}
+		inst.IAMInstanceProfileName, inst.IAMInstanceProfileARN, inst.IAMInstanceProfileID = name, profile.ARN, profile.ID
 	}
 	setInstanceAttributes(&inst.EC2InstanceAttributes, req.Params, "")
 	eni := &repository.EC2NetworkInterface{
@@ -2986,19 +3131,24 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
+	x, err := ec2InstanceToXML(account, inst, ec2InstanceNet{eni: eni})
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
 	awsproto.WriteEC2QueryRPCResponse(w, "RunInstances", &ec2RunInstancesResult{
-		Reservation:  "r-" + ec2RandID(),
+		Reservation:  inst.ReservationID,
 		OwnerId:      account,
-		InstancesSet: []ec2InstanceXML{ec2InstanceToXML(account, inst, eni)},
+		InstancesSet: []ec2InstanceXML{x},
 	})
 }
 
 // ec2InstanceRow is what DescribeInstances filters: the instance as
-// answered, plus what the answer does not show, the primary ENI's VPC,
-// the launch subnet's zone and the owning account.
+// answered, plus what the answer does not show, the launch subnet's
+// zone and the owning account.
 type ec2InstanceRow struct {
-	x                    ec2InstanceXML
-	vpcID, zone, ownerID string
+	x             ec2InstanceXML
+	zone, ownerID string
 }
 
 // instanceFilters are the DescribeInstances filters fakeaws models;
@@ -3012,7 +3162,7 @@ var instanceFilters = ec2FilterTable[ec2InstanceRow]{
 		"instance-type":       func(r ec2InstanceRow) []string { return []string{r.x.InstanceType} },
 		"image-id":            func(r ec2InstanceRow) []string { return []string{r.x.ImageId} },
 		"subnet-id":           func(r ec2InstanceRow) []string { return []string{r.x.SubnetId} },
-		"vpc-id":              func(r ec2InstanceRow) []string { return []string{r.vpcID} },
+		"vpc-id":              func(r ec2InstanceRow) []string { return []string{r.x.VpcId} },
 		"private-ip-address":  func(r ec2InstanceRow) []string { return []string{r.x.PrivateIpAddress} },
 		"ip-address":          func(r ec2InstanceRow) []string { return []string{r.x.IpAddress} },
 		"availability-zone":   func(r ec2InstanceRow) []string { return []string{r.zone} },
@@ -3022,7 +3172,8 @@ var instanceFilters = ec2FilterTable[ec2InstanceRow]{
 }
 
 // ec2DescribeInstances answers InstanceId.N or, with none, the
-// region's instances, either way narrowed by instanceFilters.
+// region's instances, either way narrowed by instanceFilters, each in
+// its reservation with the others launched in it.
 func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	filters, ok := instanceFilters.read(w, req, "InstanceId.N")
 	if !ok {
@@ -3042,6 +3193,16 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
+	groupNames, err := app.groupNames(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	eips, err := app.repo.ListEIPs(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
 	tags, ok := app.tagSets(w, account)
 	if !ok {
 		return
@@ -3050,25 +3211,49 @@ func (app *Application) ec2DescribeInstances(w http.ResponseWriter, account, reg
 		ReservationSet: make([]ec2ReservationXML, 0, len(instances)),
 	}
 	for _, inst := range instances {
-		eni := enis[inst.ID]
-		row := ec2InstanceRow{x: ec2InstanceToXML(account, inst, eni), ownerID: account}
-		row.x.TagSet = tags[inst.ID]
-		if eni != nil {
-			row.vpcID = eni.VPCID
+		net := ec2InstanceNet{eni: enis[inst.ID], groupNames: groupNames}
+		if i := slices.IndexFunc(eips, func(e *repository.EC2EIP) bool { return net.eni != nil && e.NetworkInterfaceID == net.eni.ID }); i >= 0 {
+			net.eip = eips[i]
 		}
+		x, err := ec2InstanceToXML(account, inst, net)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return
+		}
+		row := ec2InstanceRow{x: x, ownerID: account}
+		row.x.TagSet = tags[inst.ID]
 		if i := slices.IndexFunc(subnets, func(s *repository.EC2Subnet) bool { return s.ID == inst.SubnetID }); i >= 0 {
 			row.zone = subnets[i].AvailabilityZone
 		}
-		if !instanceFilters.matches(row, filters, tags) {
-			continue
+		if instanceFilters.matches(row, filters, tags) {
+			out.ReservationSet = ec2Reserve(out.ReservationSet, account, inst.ReservationID, row.x)
 		}
-		out.ReservationSet = append(out.ReservationSet, ec2ReservationXML{
-			ReservationId: "r-" + ec2RandID(),
-			OwnerId:       account,
-			InstancesSet:  []ec2InstanceXML{row.x},
-		})
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInstances", &out)
+}
+
+// ec2Reserve adds x to reservation id of set, which it opens when set
+// has none. An instance stored before its reservation was gets one of
+// its own.
+func ec2Reserve(set []ec2ReservationXML, account, id string, x ec2InstanceXML) []ec2ReservationXML {
+	if i := slices.IndexFunc(set, func(r ec2ReservationXML) bool { return r.ReservationId == id }); id != "" && i >= 0 {
+		set[i].InstancesSet = append(set[i].InstancesSet, x)
+		return set
+	}
+	return append(set, ec2ReservationXML{ReservationId: cmp.Or(id, "r-"+ec2RandID()), OwnerId: account, InstancesSet: []ec2InstanceXML{x}})
+}
+
+// groupNames maps each security group id of region to its name.
+func (app *Application) groupNames(account, region string) (map[string]string, error) {
+	groups, err := app.repo.ListSecurityGroups(account, region)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(groups))
+	for _, g := range groups {
+		out[g.ID] = g.GroupName
+	}
+	return out, nil
 }
 
 // ec2FindInstances looks up each id or, with none, lists the region's
@@ -3988,7 +4173,7 @@ type ec2AttributeBoolValue struct {
 // instance row, or its primary ENI for sourceDestCheck.
 //
 // CRITICAL[ec2-instance-attributes-from-rows]: each Attribute this
-// switch answers MUST be what RunInstances or ModifyInstanceAttribute
+// answers MUST be what RunInstances, ModifyInstanceAttribute or a load
 // last stored, else AWS's default; any other Attribute MUST be refused
 // through ec2Refuse, never answered with a constant, and a missing one
 // MUST be 400 MissingParameter; and an unknown InstanceId MUST be 400
@@ -4005,7 +4190,35 @@ func (app *Application) ec2DescribeInstanceAttribute(w http.ResponseWriter, acco
 		return
 	}
 	out := ec2DescribeInstanceAttributeResult{InstanceId: instanceID}
-	switch attr := req.Params.Get("Attribute"); attr {
+	switch attr := req.Params.Get("Attribute"); {
+	case ec2InstanceAttributeAnswer(&out, inst, attr):
+	case attr == "sourceDestCheck":
+		// A terminated instance has no ENI, so no sourceDestCheck, as
+		// in DescribeInstances.
+		enis, err := app.instanceENIs(account)
+		if err != nil {
+			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+			return
+		}
+		if eni := enis[instanceID]; eni != nil {
+			out.SourceDestCheck = &ec2AttributeBoolValue{Value: eni.SourceDestCheck}
+		}
+	case attr == "":
+		// UNVERIFIED(aws-code): MissingParameter from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "MissingParameter",
+			"The request must contain the parameter Attribute.")
+		return
+	default:
+		ec2Refuse(w, req.Action, "Attribute="+attr)
+		return
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInstanceAttribute", &out)
+}
+
+// ec2InstanceAttributeAnswer sets attr on out from inst when attr is
+// one the instance row holds, and reports whether it was.
+func ec2InstanceAttributeAnswer(out *ec2DescribeInstanceAttributeResult, inst *repository.EC2Instance, attr string) bool {
+	switch attr {
 	case "instanceInitiatedShutdownBehavior":
 		out.InstanceInitiatedShutdownBehavior = &ec2AttributeStringValue{Value: cmp.Or(inst.ShutdownBehavior, "stop")}
 	case "disableApiTermination":
@@ -4019,27 +4232,10 @@ func (app *Application) ec2DescribeInstanceAttribute(w http.ResponseWriter, acco
 		out.UserData = &ec2AttributeStringValue{Value: inst.UserData}
 	case "ebsOptimized":
 		out.EbsOptimized = &ec2AttributeBoolValue{Value: inst.EBSOptimized}
-	case "sourceDestCheck":
-		// A terminated instance has no ENI, so no sourceDestCheck, as
-		// in DescribeInstances.
-		enis, err := app.instanceENIs(account)
-		if err != nil {
-			awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
-			return
-		}
-		if eni := enis[instanceID]; eni != nil {
-			out.SourceDestCheck = &ec2AttributeBoolValue{Value: eni.SourceDestCheck}
-		}
-	case "":
-		// UNVERIFIED(aws-code): MissingParameter from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
-		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "MissingParameter",
-			"The request must contain the parameter Attribute.")
-		return
 	default:
-		ec2Refuse(w, req.Action, "Attribute="+attr)
-		return
+		return false
 	}
-	awsproto.WriteEC2QueryRPCResponse(w, "DescribeInstanceAttribute", &out)
+	return true
 }
 
 // ----- Tags -----

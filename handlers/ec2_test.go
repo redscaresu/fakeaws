@@ -2068,7 +2068,7 @@ func TestContract_ec2_instance_attributes_from_rows(t *testing.T) {
 		"instanceInitiatedShutdownBehavior": "stop", "ebsOptimized": "false",
 	}, values(id), "AWS's defaults when nothing is set")
 	_, raw := describeInstance(t, srv, region, id)
-	assert.NotContains(t, raw, "ebsOptimized", "DescribeInstances is unchanged when nothing is set")
+	assert.Contains(t, raw, "<ebsOptimized>false</ebsOptimized>", "DescribeInstances answers ebsOptimized, as EC2 does, set or not")
 
 	modified := map[string]string{
 		"sourceDestCheck": "false", "disableApiTermination": "true", "disableApiStop": "true",
@@ -2938,8 +2938,8 @@ func TestContract_ec2_filter_refusal_names_every_name_sorted(t *testing.T) {
 }
 
 // TestEC2_AnswersStoredAccount: under a stored account every ownerId,
-// the instance's ENI and its IAM instance profile Arn carry that
-// account, and so does every ARN in the ec2 block of /mock/state.
+// the instance's ENI, its attachment's owner and its IAM instance
+// profile Arn carry that account, and so does every ARN in the ec2 block of /mock/state.
 func TestEC2_AnswersStoredAccount(t *testing.T) {
 	_, srv := newOptionsApp(t, handlers.Options{DBPath: ":memory:", AccountID: otherAccount})
 	const region = "us-east-1"
@@ -2980,8 +2980,7 @@ func TestEC2_AnswersStoredAccount(t *testing.T) {
 		type instanceXML struct {
 			ProfileARN string `xml:"iamInstanceProfile>arn"`
 			ENIs       []struct {
-				OwnerId         string `xml:"ownerId"`
-				InstanceOwnerId string `xml:"attachment>instanceOwnerId"`
+				OwnerId string `xml:"ownerId"`
 			} `xml:"networkInterfaceSet>item"`
 		}
 		var out struct {
@@ -2994,8 +2993,11 @@ func TestEC2_AnswersStoredAccount(t *testing.T) {
 		assert.Equal(t, profileARN, insts[0].ProfileARN, action)
 		require.Len(t, insts[0].ENIs, 1, "%s: %s", action, body)
 		assert.Equal(t, otherAccount, insts[0].ENIs[0].OwnerId, action)
-		assert.Equal(t, otherAccount, insts[0].ENIs[0].InstanceOwnerId, action)
 	}
+	// An instance's networkInterfaceSet has no attachment owner; the
+	// interface's own answer does.
+	eni := owned("DescribeNetworkInterfaces", url.Values{"Filter.1.Name": {"attachment.instance-id"}, "Filter.1.Value.1": {instID}})
+	assert.Equal(t, otherAccount, extractEC2Tag(eni, "instanceOwnerId"), "%s", eni)
 
 	resp, body = doGet(t, srv, "/mock/state/ec2")
 	require.Equal(t, http.StatusOK, resp.StatusCode, "GET /mock/state/ec2: %s", body)
