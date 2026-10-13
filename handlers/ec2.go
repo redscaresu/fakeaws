@@ -1928,42 +1928,57 @@ func queryListItems(params url.Values, prefix string) []string {
 }
 
 // parseIpPermissions reads the flattened IpPermissions.<n>.* params
-// out of the Query-RPC body.
-func parseIpPermissions(req awsproto.QueryRPCRequest) []ec2IpPermission {
-	var out []ec2IpPermission
+// out of the Query-RPC body. keyless names each field of a source item
+// that lacks its key, which is no source (parseIpPermission).
+func parseIpPermissions(req awsproto.QueryRPCRequest) (perms []ec2IpPermission, keyless []string) {
 	for _, base := range queryListItems(req.Params, "IpPermissions.") {
-		out = append(out, parseIpPermission(req.Params, base))
+		perm, k := parseIpPermission(req.Params, base)
+		perms, keyless = append(perms, perm), append(keyless, k...)
 	}
-	return out
+	return perms, keyless
 }
 
-func parseIpPermission(p url.Values, base string) ec2IpPermission {
-	perm := ec2IpPermission{IpProtocol: p.Get(base + "IpProtocol")}
+// parseIpPermission reads the permission at base. A source item without
+// its key (a Groups.N with a GroupName or UserId but no GroupId) is no
+// source; its fields come back in keyless.
+func parseIpPermission(p url.Values, base string) (perm ec2IpPermission, keyless []string) {
+	perm = ec2IpPermission{IpProtocol: p.Get(base + "IpProtocol")}
 	perm.FromPort, _ = strconv.Atoi(p.Get(base + "FromPort"))
 	perm.ToPort, _ = strconv.Atoi(p.Get(base + "ToPort"))
-	for _, it := range queryListItems(p, base+"IpRanges.") {
-		if v := p.Get(it + "CidrIp"); v != "" {
-			perm.IpRanges = append(perm.IpRanges, ec2IpRange{CidrIp: v, Description: p.Get(it + "Description")})
+	for _, it := range keyedItems(p, base, "IpRanges.", "CidrIp", &keyless) {
+		perm.IpRanges = append(perm.IpRanges, ec2IpRange{CidrIp: p.Get(it + "CidrIp"), Description: p.Get(it + "Description")})
+	}
+	for _, it := range keyedItems(p, base, "Ipv6Ranges.", "CidrIpv6", &keyless) {
+		perm.Ipv6Ranges = append(perm.Ipv6Ranges, ec2Ipv6Range{CidrIpv6: p.Get(it + "CidrIpv6"), Description: p.Get(it + "Description")})
+	}
+	for _, it := range keyedItems(p, base, "Groups.", "GroupId", &keyless) {
+		perm.UserIdGroupPairs = append(perm.UserIdGroupPairs, ec2UserIdGroupPair{
+			GroupId: p.Get(it + "GroupId"), UserId: p.Get(it + "UserId"), Description: p.Get(it + "Description"),
+		})
+	}
+	for _, it := range keyedItems(p, base, "PrefixListIds.", "PrefixListId", &keyless) {
+		perm.PrefixListIds = append(perm.PrefixListIds, ec2PrefixListId{PrefixListId: p.Get(it + "PrefixListId"), Description: p.Get(it + "Description")})
+	}
+	return perm, keyless
+}
+
+// keyedItems returns the items of base's list that hold key, and adds
+// to keyless each field of an item that does not, named as ec2Refuse
+// names a param: IpPermissions.N.Groups.N.GroupName.
+func keyedItems(p url.Values, base, list, key string, keyless *[]string) []string {
+	var out []string
+	for _, it := range queryListItems(p, base+list) {
+		if p.Get(it+key) != "" {
+			out = append(out, it)
+			continue
+		}
+		for k := range p {
+			if field, ok := strings.CutPrefix(k, it); ok {
+				*keyless = append(*keyless, "IpPermissions.N."+list+"N."+field)
+			}
 		}
 	}
-	for _, it := range queryListItems(p, base+"Ipv6Ranges.") {
-		if v := p.Get(it + "CidrIpv6"); v != "" {
-			perm.Ipv6Ranges = append(perm.Ipv6Ranges, ec2Ipv6Range{CidrIpv6: v, Description: p.Get(it + "Description")})
-		}
-	}
-	for _, it := range queryListItems(p, base+"Groups.") {
-		if v := p.Get(it + "GroupId"); v != "" {
-			perm.UserIdGroupPairs = append(perm.UserIdGroupPairs, ec2UserIdGroupPair{
-				GroupId: v, UserId: p.Get(it + "UserId"), Description: p.Get(it + "Description"),
-			})
-		}
-	}
-	for _, it := range queryListItems(p, base+"PrefixListIds.") {
-		if v := p.Get(it + "PrefixListId"); v != "" {
-			perm.PrefixListIds = append(perm.PrefixListIds, ec2PrefixListId{PrefixListId: v, Description: p.Get(it + "Description")})
-		}
-	}
-	return perm
+	return out
 }
 
 func (app *Application) ec2CreateSecurityGroup(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -2151,9 +2166,17 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 		ec2Refuse(w, req.Action, "no GroupId") // AWS also takes GroupName for ingress
 		return
 	}
-	add := parseIpPermissions(req)
+	// fakeaws tags no rule on create, so any TagSpecification.N is refused.
+	if _, refused := refuseTagSpecifications(w, req.Params); refused {
+		return
+	}
+	add, keyless := parseIpPermissions(req)
 	if len(add) == 0 {
 		ec2Refuse(w, req.Action, "no IpPermissions.N") // AWS also takes the legacy top-level IpProtocol, CidrIp, ...
+		return
+	}
+	if len(keyless) > 0 {
+		ec2Refuse(w, req.Action, keyless...) // e.g. a Groups.N GroupName, which AWS resolves in the default VPC
 		return
 	}
 	if app.refuseIpPermissions(w, account, region, add) {
@@ -2188,13 +2211,27 @@ func (app *Application) ec2AuthorizeSecurityGroupRules(w http.ResponseWriter, ac
 
 // ec2RevokeSecurityGroupRules deletes the rule of each parsed source
 // (RevokeSecurityGroupRules); a permission left with no source is gone.
+// A revoke by SecurityGroupRuleId.N, which the provider's
+// aws_vpc_security_group_*_rule delete sends, is refused: it would
+// otherwise name no source and delete nothing.
 func (app *Application) ec2RevokeSecurityGroupRules(w http.ResponseWriter, account, region, direction string, req awsproto.QueryRPCRequest) {
+	if slices.ContainsFunc(slices.Collect(maps.Keys(req.Params)), func(k string) bool {
+		return strings.HasPrefix(k, "SecurityGroupRuleId.")
+	}) {
+		ec2Refuse(w, req.Action, "SecurityGroupRuleId.N")
+		return
+	}
 	sgID := req.Params.Get("GroupId")
 	if sgID == "" {
 		ec2Refuse(w, req.Action, "no GroupId") // AWS also takes GroupName for ingress
 		return
 	}
-	rm := sgRules(parseIpPermissions(req), direction == "egress")
+	perms, keyless := parseIpPermissions(req)
+	if len(keyless) > 0 {
+		ec2Refuse(w, req.Action, keyless...)
+		return
+	}
+	rm := sgRules(perms, direction == "egress")
 	if err := app.repo.RevokeSecurityGroupRules(account, region, sgID, rm); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return

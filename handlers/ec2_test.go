@@ -1020,24 +1020,102 @@ func TestEC2_ReauthorizeAddsNoRule(t *testing.T) {
 	assert.Equal(t, 1, countRows(t, app, "ec2_security_group_rules"), "no row added")
 }
 
-// TestEC2_SecurityGroupRuleNeedsASource: a permission with no source is
-// refused through ec2Refuse, and no other permission of the request is
-// stored.
-func TestEC2_SecurityGroupRuleNeedsASource(t *testing.T) {
+// TestEC2_SecurityGroupRuleSourceRefusals: a permission with no source,
+// or a source item without its key (a Groups.N GroupName, UserId or
+// Description with no GroupId), is refused through ec2Refuse naming
+// what was sent, and the group's rules stay as they were: the request's
+// first permission would otherwise add (Authorize) or remove (Revoke)
+// a rule.
+func TestEC2_SecurityGroupRuleSourceRefusals(t *testing.T) {
+	const region = "us-east-1"
+	cases := []struct {
+		name, action string
+		perm2        url.Values
+		names        string
+	}{
+		{"no source", "AuthorizeSecurityGroupIngress", url.Values{}, "IpPermissions.N with no source"},
+		{"group name, no group id", "AuthorizeSecurityGroupIngress",
+			url.Values{"IpPermissions.2.Groups.1.GroupName": {"web"}}, "IpPermissions.N.Groups.N.GroupName"},
+		{"user id and description, no group id", "AuthorizeSecurityGroupEgress",
+			url.Values{"IpPermissions.2.Groups.1.UserId": {"111122223333"}, "IpPermissions.2.Groups.1.Description": {"d"}},
+			"IpPermissions.N.Groups.N.Description, IpPermissions.N.Groups.N.UserId"},
+		{"ip range description, no cidr", "AuthorizeSecurityGroupIngress",
+			url.Values{"IpPermissions.2.IpRanges.1.Description": {"d"}}, "IpPermissions.N.IpRanges.N.Description"},
+		{"revoke by group name", "RevokeSecurityGroupIngress",
+			url.Values{"IpPermissions.2.Groups.1.GroupName": {"web"}}, "IpPermissions.N.Groups.N.GroupName"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			const held = "10.0.0.0/8"
+			srv, sgID, _ := newSGPair(t, region)
+			sgAuthorize(t, srv, region, "AuthorizeSecurityGroupIngress", sgID, sgPerm("tcp", "22", "22", held))
+			cidr := "10.1.0.0/16"
+			if strings.HasPrefix(c.action, "Revoke") {
+				cidr = held
+			}
+			params := sgPerm("tcp", "22", "22", cidr)
+			params.Set("GroupId", sgID)
+			params.Set("IpPermissions.2.IpProtocol", "tcp")
+			params.Set("IpPermissions.2.FromPort", "80")
+			params.Set("IpPermissions.2.ToPort", "80")
+			for k, v := range c.perm2 {
+				params[k] = v
+			}
+			resp, body := ec2Call(t, srv, region, c.action, params)
+			assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
+			code, msg := ec2Error(t, body)
+			assert.Equal(t, "NotImplemented", code)
+			assert.Equal(t, c.action+": not modelled by fakeaws: "+c.names, msg)
+			ingress, egress := describeSGRules(t, srv, region, sgID)
+			assert.Equal(t, []sgPermXML{{IpProtocol: "tcp", FromPort: 22, ToPort: 22, IpRanges: []sgRuleSourceXML{{CidrIp: held}}}}, ingress, "ingress as it was")
+			assert.Empty(t, egress, "egress as it was")
+		})
+	}
+}
+
+// TestEC2_RevokeByRuleIdRefused: a revoke naming SecurityGroupRuleId.N,
+// which the provider's aws_vpc_security_group_*_rule delete sends, is
+// refused through ec2Refuse, and the rule stays.
+func TestEC2_RevokeByRuleIdRefused(t *testing.T) {
 	const region = "us-east-1"
 	srv, sgID, _ := newSGPair(t, region)
 	params := sgPerm("tcp", "22", "22", "10.0.0.0/8")
-	params.Set("IpPermissions.2.IpProtocol", "tcp")
-	params.Set("IpPermissions.2.FromPort", "80")
-	params.Set("IpPermissions.2.ToPort", "80")
 	params.Set("GroupId", sgID)
-	resp, body := ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", params)
+	rules := decodeRuleSet(t, mustOK(t)(ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", params))).Rules
+	require.Len(t, rules, 1)
+
+	resp, body := ec2Call(t, srv, region, "RevokeSecurityGroupIngress", url.Values{
+		"GroupId": {sgID}, "SecurityGroupRuleId.1": {rules[0].ID},
+	})
 	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
 	code, msg := ec2Error(t, body)
 	assert.Equal(t, "NotImplemented", code)
-	assert.Equal(t, "AuthorizeSecurityGroupIngress: not modelled by fakeaws: IpPermissions.N with no source", msg)
+	assert.Equal(t, "RevokeSecurityGroupIngress: not modelled by fakeaws: SecurityGroupRuleId.N", msg)
 	ingress, _ := describeSGRules(t, srv, region, sgID)
-	assert.Empty(t, ingress)
+	assert.Equal(t, []sgRuleSourceXML{{CidrIp: "10.0.0.0/8"}}, sgPermByPort(ingress, 22).IpRanges, "the rule stays")
+}
+
+// TestEC2_AuthorizeTagSpecificationRefused: fakeaws tags no rule on
+// create, so Authorize* refuses any TagSpecification.N as other
+// operations refuse a type they cannot tag, and adds no row.
+func TestEC2_AuthorizeTagSpecificationRefused(t *testing.T) {
+	const region = "us-east-1"
+	app, srv := newTestApp(t, ":memory:")
+	vpcID := extractEC2Tag(mustOK(t)(ec2Call(t, srv, region, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})), "vpcId")
+	sgID := extractEC2Tag(mustOK(t)(ec2Call(t, srv, region, "CreateSecurityGroup", url.Values{
+		"GroupName": {"web"}, "GroupDescription": {"web"}, "VpcId": {vpcID},
+	})), "groupId")
+	params := sgPerm("tcp", "22", "22", "10.0.0.0/8")
+	params.Set("GroupId", sgID)
+	params.Set("TagSpecification.1.ResourceType", "security-group-rule")
+	params.Set("TagSpecification.1.Tag.1.Key", "Name")
+	params.Set("TagSpecification.1.Tag.1.Value", "ssh")
+	resp, body := ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", params)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	code, msg := ec2Error(t, body)
+	assert.Equal(t, "InvalidParameterValue", code)
+	assert.Equal(t, "'security-group-rule' is not a valid taggable resource type for this operation.", msg)
+	assert.Zero(t, countRows(t, app, "ec2_security_group_rules"), "no row added")
 }
 
 // TestEC2_SecurityGroupRulesGoWithTheirGroup: DeleteSecurityGroup takes
