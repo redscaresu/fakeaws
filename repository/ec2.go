@@ -173,6 +173,33 @@ type EC2VPC struct {
 	ARN       string `json:"arn"`
 	State     string `json:"state"` // "available" — collapsed state machine
 	CreatedAt string `json:"created_at"`
+	// OwnerID is the account DescribeVpcs answers, the stored account
+	// for a created VPC and the recorded one for a loaded VPC, which may
+	// be another's (a shared VPC).
+	OwnerID                   string                    `json:"owner_id"`
+	IsDefault                 bool                      `json:"is_default"`
+	DhcpOptionsID             string                    `json:"dhcp_options_id"`
+	InstanceTenancy           string                    `json:"instance_tenancy"`
+	CidrBlockAssociations     []EC2CidrBlockAssociation `json:"cidr_block_associations"`
+	Ipv6CidrBlockAssociations []EC2CidrBlockAssociation `json:"ipv6_cidr_block_associations,omitempty"`
+	// EnableDNSSupport and EnableDNSHostnames are what
+	// DescribeVpcAttribute answers and ModifyVpcAttribute sets.
+	EnableDNSSupport   bool `json:"enable_dns_support"`
+	EnableDNSHostnames bool `json:"enable_dns_hostnames"`
+}
+
+// EC2CidrBlockAssociation is one CIDR block a VPC or subnet holds: an
+// IPv4 block, or an IPv6 one with, on a VPC, its pool, network border
+// group, source and address attribute.
+type EC2CidrBlockAssociation struct {
+	AssociationID        string `json:"association_id"`
+	CidrBlock            string `json:"cidr_block"`
+	State                string `json:"state"`
+	StatusMessage        string `json:"status_message,omitempty"`
+	Ipv6Pool             string `json:"ipv6_pool,omitempty"`
+	NetworkBorderGroup   string `json:"network_border_group,omitempty"`
+	IPSource             string `json:"ip_source,omitempty"`
+	Ipv6AddressAttribute string `json:"ipv6_address_attribute,omitempty"`
 }
 
 type EC2Subnet struct {
@@ -186,7 +213,28 @@ type EC2Subnet struct {
 	CreatedAt        string `json:"created_at"`
 	// MapPublicIPOnLaunch gives a launch that does not set
 	// AssociatePublicIpAddress a public IP.
-	MapPublicIPOnLaunch bool `json:"map_public_ip_on_launch"`
+	MapPublicIPOnLaunch         bool   `json:"map_public_ip_on_launch"`
+	OwnerID                     string `json:"owner_id"`
+	AvailableIPAddressCount     int    `json:"available_ip_address_count"`
+	DefaultForAz                bool   `json:"default_for_az"`
+	AssignIpv6AddressOnCreation bool   `json:"assign_ipv6_address_on_creation"`
+	// The fields below are left out of some answers (the API
+	// reference's), so nil or empty answers none.
+	MapCustomerOwnedIPOnLaunch    *bool                     `json:"map_customer_owned_ip_on_launch,omitempty"`
+	EnableDNS64                   *bool                     `json:"enable_dns64,omitempty"`
+	Ipv6Native                    *bool                     `json:"ipv6_native,omitempty"`
+	EnableLniAtDeviceIndex        *int                      `json:"enable_lni_at_device_index,omitempty"`
+	CustomerOwnedIpv4Pool         string                    `json:"customer_owned_ipv4_pool,omitempty"`
+	OutpostARN                    string                    `json:"outpost_arn,omitempty"`
+	Ipv6CidrBlockAssociations     []EC2CidrBlockAssociation `json:"ipv6_cidr_block_associations,omitempty"`
+	PrivateDNSNameOptionsOnLaunch *EC2PrivateDNSNameOptions `json:"private_dns_name_options_on_launch,omitempty"`
+}
+
+// EC2PrivateDNSNameOptions is a subnet's privateDnsNameOptionsOnLaunch.
+type EC2PrivateDNSNameOptions struct {
+	HostnameType                    string `json:"hostname_type"`
+	EnableResourceNameDNSARecord    bool   `json:"enable_resource_name_dns_a_record"`
+	EnableResourceNameDNSAAAARecord bool   `json:"enable_resource_name_dns_aaaa_record"`
 }
 
 type EC2InternetGateway struct {
@@ -195,6 +243,10 @@ type EC2InternetGateway struct {
 	Region    string `json:"region"`
 	ARN       string `json:"arn"`
 	CreatedAt string `json:"created_at"`
+	OwnerID   string `json:"owner_id"`
+	// AttachmentState is the attachment's state while VPCID is set:
+	// AttachInternetGateway sets it to available, and a detach drops it.
+	AttachmentState string `json:"attachment_state,omitempty"`
 }
 
 type EC2RouteTable struct {
@@ -266,17 +318,35 @@ func (r *Repository) CreateVPCWithDefaultGroup(account string, v *EC2VPC, sg *EC
 		return err
 	}
 	defer tx.Rollback()
-	body, _ := json.Marshal(v)
-	if _, err := tx.Exec(
-		`INSERT INTO ec2_vpcs (account_id, region, id, cidr_block, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		account, v.Region, v.ID, v.CidrBlock, v.ARN, string(body), v.CreatedAt,
-	); err != nil {
+	if err := insertVPC(tx, account, v); err != nil {
 		return mapInsertError(err)
 	}
 	if err := insertSecurityGroup(tx, account, sg); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// insertVPC stores v under account.
+func insertVPC(ex execer, account string, v *EC2VPC) error {
+	body, _ := json.Marshal(v)
+	_, err := ex.Exec(
+		`INSERT INTO ec2_vpcs (account_id, region, id, cidr_block, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		account, v.Region, v.ID, v.CidrBlock, v.ARN, string(body), v.CreatedAt,
+	)
+	return err
+}
+
+// UpdateVPC applies change to the VPC and saves it.
+func (r *Repository) UpdateVPC(account, region, id string, change func(*EC2VPC)) error {
+	v, err := r.GetVPC(account, region, id)
+	if err != nil {
+		return err
+	}
+	change(v)
+	body, _ := json.Marshal(v)
+	_, err = r.db.Exec(`UPDATE ec2_vpcs SET data = ? WHERE account_id = ? AND id = ?`, string(body), account, id)
+	return err
 }
 
 // BackfillDefaultGroups gives each VPC that has no group named
@@ -386,7 +456,7 @@ func (r *Repository) DeleteVPC(account, region, id string) error {
 	// SET NULL would NULL account_id too. Real EC2's contract is
 	// detach-on-vpc-delete (the IGW survives, just unattached).
 	if _, err := r.db.Exec(
-		`UPDATE ec2_internet_gateways SET vpc_id = NULL WHERE account_id = ? AND vpc_id = ?`,
+		`UPDATE ec2_internet_gateways SET `+igwDetach+` WHERE account_id = ? AND vpc_id = ?`,
 		account, id,
 	); err != nil {
 		return fmt.Errorf("detach igws before vpc delete: %w", err)
@@ -443,14 +513,20 @@ func (r *Repository) CreateSubnet(account string, s *EC2Subnet) error {
 	if err := subnetOverlap(tx, account, s.VPCID, cidr); err != nil {
 		return err
 	}
-	body, _ := json.Marshal(s)
-	if _, err := tx.Exec(
-		`INSERT INTO ec2_subnets (account_id, region, id, vpc_id, cidr_block, availability_zone, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		account, s.Region, s.ID, s.VPCID, s.CidrBlock, s.AvailabilityZone, s.ARN, string(body), s.CreatedAt,
-	); err != nil {
+	if err := insertSubnet(tx, account, s); err != nil {
 		return mapInsertError(err)
 	}
 	return tx.Commit()
+}
+
+// insertSubnet stores s under account.
+func insertSubnet(ex execer, account string, s *EC2Subnet) error {
+	body, _ := json.Marshal(s)
+	_, err := ex.Exec(
+		`INSERT INTO ec2_subnets (account_id, region, id, vpc_id, cidr_block, availability_zone, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		account, s.Region, s.ID, s.VPCID, s.CidrBlock, s.AvailabilityZone, s.ARN, string(body), s.CreatedAt,
+	)
+	return err
 }
 
 // subnetOverlap returns ErrSubnetConflict when cidr overlaps a subnet of
@@ -567,17 +643,23 @@ func (r *Repository) DeleteSubnet(account, region, id string) error {
 // ----- InternetGateway -----
 
 func (r *Repository) CreateInternetGateway(account string, igw *EC2InternetGateway) error {
-	body, _ := json.Marshal(igw)
-	var vpcID *string
-	if igw.VPCID != "" {
-		vpcID = &igw.VPCID
-	}
-	_, err := r.db.Exec(
-		`INSERT INTO ec2_internet_gateways (account_id, region, id, vpc_id, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		account, igw.Region, igw.ID, vpcID, igw.ARN, string(body), igw.CreatedAt,
-	)
-	return mapInsertError(err)
+	return mapInsertError(insertInternetGateway(r.db, account, igw))
 }
+
+// insertInternetGateway stores igw under account, its vpc_id NULL when
+// it is detached.
+func insertInternetGateway(ex execer, account string, igw *EC2InternetGateway) error {
+	body, _ := json.Marshal(igw)
+	_, err := ex.Exec(
+		`INSERT INTO ec2_internet_gateways (account_id, region, id, vpc_id, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		account, igw.Region, igw.ID, nullIfEmpty(igw.VPCID), igw.ARN, string(body), igw.CreatedAt,
+	)
+	return err
+}
+
+// igwDetach is the SET clause of every detach: vpc_id and the
+// attachment's state go together.
+const igwDetach = `vpc_id = NULL, data = json_remove(data, '$.attachment_state')`
 
 // AttachInternetGateway attaches an IGW to a VPC. Both must live in
 // the same region as the request (Codex pass 7 BLOCKING #1).
@@ -590,7 +672,7 @@ func (r *Repository) AttachInternetGateway(account, region, igwID, vpcID string)
 		return err
 	}
 	res, err := r.db.Exec(
-		`UPDATE ec2_internet_gateways SET vpc_id = ? WHERE account_id = ? AND id = ?`,
+		`UPDATE ec2_internet_gateways SET vpc_id = ?, data = json_set(data, '$.attachment_state', 'available') WHERE account_id = ? AND id = ?`,
 		vpcID, account, igwID,
 	)
 	if err != nil {
@@ -608,7 +690,7 @@ func (r *Repository) DetachInternetGateway(account, region, igwID string) error 
 		return err
 	}
 	res, err := r.db.Exec(
-		`UPDATE ec2_internet_gateways SET vpc_id = NULL WHERE account_id = ? AND id = ?`,
+		`UPDATE ec2_internet_gateways SET `+igwDetach+` WHERE account_id = ? AND id = ?`,
 		account, igwID,
 	)
 	if err != nil {
@@ -1285,9 +1367,13 @@ type AvailabilityZone struct {
 }
 
 // PutAvailabilityZone stores z under account, replacing the row for
-// the same region and zone name. fakeaws-loader is its caller.
+// the same region and zone name.
 func (r *Repository) PutAvailabilityZone(account string, z AvailabilityZone) error {
-	_, err := r.db.Exec(`INSERT OR REPLACE INTO availability_zones
+	return putAvailabilityZone(r.db, account, z)
+}
+
+func putAvailabilityZone(ex execer, account string, z AvailabilityZone) error {
+	_, err := ex.Exec(`INSERT OR REPLACE INTO availability_zones
 		(account_id, region, zone_name, zone_id, state, opt_in_status, zone_type, group_name, network_border_group)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		account, z.Region, z.ZoneName, z.ZoneID, z.State, z.OptInStatus, z.ZoneType, z.GroupName, z.NetworkBorderGroup)

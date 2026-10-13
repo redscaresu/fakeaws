@@ -71,18 +71,20 @@ type EC2TagMatch struct {
 // PutTags adds tags, overwriting the value of a key already on the
 // resource, in one transaction.
 func (r *Repository) PutTags(account, region string, tags []EC2Tag) error {
-	return r.inTx(func(tx *sql.Tx) error {
-		for _, t := range tags {
-			if _, err := tx.Exec(
-				`INSERT INTO ec2_tags (account_id, region, resource_id, resource_type, key, value) VALUES (?, ?, ?, ?, ?, ?)
-				ON CONFLICT (account_id, resource_id, key) DO UPDATE SET value = excluded.value`,
-				account, region, t.ResourceID, t.ResourceType, t.Key, t.Value,
-			); err != nil {
-				return err
-			}
+	return r.inTx(func(tx *sql.Tx) error { return putTags(tx, account, region, tags) })
+}
+
+func putTags(ex execer, account, region string, tags []EC2Tag) error {
+	for _, t := range tags {
+		if _, err := ex.Exec(
+			`INSERT INTO ec2_tags (account_id, region, resource_id, resource_type, key, value) VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT (account_id, resource_id, key) DO UPDATE SET value = excluded.value`,
+			account, region, t.ResourceID, t.ResourceType, t.Key, t.Value,
+		); err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // DeleteTags removes the matching tags from each resource, or every

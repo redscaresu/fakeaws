@@ -1,0 +1,23 @@
+<!-- Source: AWS EC2 API reference, DescribeInternetGateways, Example (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeInternetGateways.html), no request params; the attachment's vpcId vpc-cEXAMPLE changed to DescribeVpcs.xml's vpc-0ee975135dEXAMPLE. -->
+<DescribeInternetGatewaysResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+    <requestId>e0fbdd4f-8e6d-437c-92eb-bc72864831d8</requestId>
+    <internetGatewaySet>
+        <item>
+            <internetGatewayId>igw-036dde5c85EXAMPLE</internetGatewayId>
+            <ownerId>11112222333304</ownerId>
+            <attachmentSet/>
+            <tagSet/>
+        </item>
+        <item>
+            <internetGatewayId>igw-0EXAMPLE</internetGatewayId>
+            <ownerId>053534965804</ownerId>
+            <attachmentSet>
+                <item>
+                    <vpcId>vpc-0ee975135dEXAMPLE</vpcId>
+                    <state>available</state>
+                </item>
+            </attachmentSet>
+            <tagSet/>
+        </item>
+    </internetGatewaySet>
+</DescribeInternetGatewaysResponse>

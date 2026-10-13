@@ -219,10 +219,8 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 // ec2VpcXML mirrors the real EC2 CreateVpc/DescribeVpcs response
 // shape. terraform-provider-aws's resourceVPCCreate (vpc_.go:235)
 // iterates CidrBlockAssociationSet and reads OwnerId during Read;
-// nil/missing values panic the provider plugin. We populate the
-// associated CIDR block, owner id, default DHCP options id, and
-// default tenancy so the standard EC2 schema fields the provider
-// expects are all non-nil.
+// nil/missing values panic the provider plugin. Every field is the
+// stored VPC's (ec2VpcToXML): newEC2VPC fills each for a created VPC.
 type ec2VpcXML struct {
 	VpcId                       string                          `xml:"vpcId"`
 	State                       string                          `xml:"state"`
@@ -247,13 +245,18 @@ type ec2VpcCidrBlockAssociationXML struct {
 }
 
 type ec2VpcCidrBlockAssociationState struct {
-	State string `xml:"state"`
+	State         string `xml:"state"`
+	StatusMessage string `xml:"statusMessage,omitempty"`
 }
 
 type ec2VpcIpv6BlockAssociationXML struct {
-	AssociationId  string                          `xml:"associationId"`
-	Ipv6CidrBlock  string                          `xml:"ipv6CidrBlock"`
-	CidrBlockState ec2VpcCidrBlockAssociationState `xml:"ipv6CidrBlockState"`
+	AssociationId        string                          `xml:"associationId"`
+	Ipv6CidrBlock        string                          `xml:"ipv6CidrBlock"`
+	CidrBlockState       ec2VpcCidrBlockAssociationState `xml:"ipv6CidrBlockState"`
+	Ipv6Pool             string                          `xml:"ipv6Pool,omitempty"`
+	NetworkBorderGroup   string                          `xml:"networkBorderGroup,omitempty"`
+	IpSource             string                          `xml:"ipSource,omitempty"`
+	Ipv6AddressAttribute string                          `xml:"ipv6AddressAttribute,omitempty"`
 }
 
 type ec2DescribeVpcsResult struct {
@@ -302,7 +305,7 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	out := ec2CreateVpcResult{Vpc: ec2VpcToXML(account, v)}
+	out := ec2CreateVpcResult{Vpc: ec2VpcToXML(v)}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateVpc", &out)
 }
 
@@ -310,7 +313,8 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 // refuses every Filter.N, by name.
 var ec2NoFilters ec2FilterTable[any]
 
-// vpcIsDefault is false for every VPC: fakeaws has no default VPC.
+// vpcIsDefault is the VPC's isDefault: false for a created VPC, as
+// fakeaws makes no default VPC, and the recorded value for a loaded one.
 func vpcIsDefault(v ec2VpcXML) []string { return []string{strconv.FormatBool(v.IsDefault)} }
 
 // vpcFilters are the DescribeVpcs filters fakeaws models: the AWS
@@ -372,7 +376,7 @@ func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region s
 	}
 	out := ec2DescribeVpcsResult{VpcSet: make([]ec2VpcXML, 0, len(vpcs))}
 	for _, v := range vpcs {
-		x := ec2VpcToXML(account, v)
+		x := ec2VpcToXML(v)
 		x.TagSet = tags[v.ID]
 		if vpcFilters.matches(x, filters, tags) {
 			out.VpcSet = append(out.VpcSet, x)
@@ -386,34 +390,69 @@ func (app *Application) ec2DescribeVpcs(w http.ResponseWriter, account, region s
 // the `Attribute` parameter, response returns just that attribute's
 // boolean value. terraform-provider-aws calls this twice as part of
 // the aws_vpc Read flow (once per attribute) after CreateVpc.
-//
-// fakeaws doesn't persist per-VPC DNS settings; both attributes
-// default to true (matching the AWS default for non-default VPCs).
 func (app *Application) ec2DescribeVpcAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if _, err := app.repo.GetVPC(account, region, req.Params.Get("VpcId")); err != nil {
+	v, err := app.repo.GetVPC(account, region, req.Params.Get("VpcId"))
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	attr := req.Params.Get("Attribute")
-	out := ec2DescribeVpcAttributeResult{VpcId: req.Params.Get("VpcId")}
-	switch attr {
-	case "enableDnsSupport":
-		out.EnableDnsSupport = &ec2BoolValue{Value: true}
-	case "enableDnsHostnames":
-		out.EnableDnsHostnames = &ec2BoolValue{Value: true}
-	case "enableNetworkAddressUsageMetrics":
-		out.EnableNetworkAddressUsageMetrics = &ec2BoolValue{Value: false}
-	}
+	out := ec2VpcAttribute(v, req.Params.Get("Attribute"))
 	awsproto.WriteEC2QueryRPCResponse(w, "DescribeVpcAttribute", &out)
 }
 
-// ec2ModifyVpcAttribute accepts the provider's writes to DNS / hostname
-// flags but doesn't persist them — fakeaws returns the same defaults
-// from ec2DescribeVpcAttribute regardless. Accepts (silently) so the
-// provider's apply doesn't error; revisit when a scenario actually
-// depends on the persisted value.
+// ec2VpcAttribute is v's attribute: the stored enableDnsSupport or
+// enableDnsHostnames, or enableNetworkAddressUsageMetrics, which is
+// always false.
+func ec2VpcAttribute(v *repository.EC2VPC, attr string) ec2DescribeVpcAttributeResult {
+	out := ec2DescribeVpcAttributeResult{VpcId: v.ID}
+	switch attr {
+	case "enableDnsSupport":
+		out.EnableDnsSupport = &ec2BoolValue{Value: *vpcDNS(v, attr)}
+	case "enableDnsHostnames":
+		out.EnableDnsHostnames = &ec2BoolValue{Value: *vpcDNS(v, attr)}
+	case "enableNetworkAddressUsageMetrics":
+		out.EnableNetworkAddressUsageMetrics = &ec2BoolValue{Value: false}
+	}
+	return out
+}
+
+// ec2VpcDNSAttributes are the VPC attributes fakeaws stores, as
+// DescribeVpcAttribute names them.
+var ec2VpcDNSAttributes = []string{"enableDnsSupport", "enableDnsHostnames"}
+
+// vpcDNS is v's field holding attr, one of ec2VpcDNSAttributes.
+func vpcDNS(v *repository.EC2VPC, attr string) *bool {
+	if attr == "enableDnsSupport" {
+		return &v.EnableDNSSupport
+	}
+	return &v.EnableDNSHostnames
+}
+
+// vpcDNSParam is the ModifyVpcAttribute param that sets attr:
+// EnableDnsSupport.Value for enableDnsSupport.
+func vpcDNSParam(attr string) string { return strings.ToUpper(attr[:1]) + attr[1:] + ".Value" }
+
+// ec2ModifyVpcAttribute stores each of ec2VpcDNSAttributes its param
+// (vpcDNSParam) sets, true or false (400 InvalidParameterValue
+// otherwise), for DescribeVpcAttribute to answer. Any other attribute
+// is accepted and not stored.
 func (app *Application) ec2ModifyVpcAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if _, err := app.repo.GetVPC(account, region, req.Params.Get("VpcId")); err != nil {
+	p := req.Params
+	values := map[string][]string{}
+	for _, attr := range ec2VpcDNSAttributes {
+		values[vpcDNSParam(attr)] = ec2Bool
+	}
+	if refuseInvalidValues(w, p, values) {
+		return
+	}
+	err := app.repo.UpdateVPC(account, region, p.Get("VpcId"), func(v *repository.EC2VPC) {
+		for _, attr := range ec2VpcDNSAttributes {
+			if p.Has(vpcDNSParam(attr)) {
+				*vpcDNS(v, attr) = p.Get(vpcDNSParam(attr)) == "true"
+			}
+		}
+	})
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -459,10 +498,13 @@ type ec2SubnetXML struct {
 	SubnetArn                     string                          `xml:"subnetArn"`
 	DefaultForAz                  bool                            `xml:"defaultForAz"`
 	MapPublicIpOnLaunch           bool                            `xml:"mapPublicIpOnLaunch"`
-	MapCustomerOwnedIpOnLaunch    bool                            `xml:"mapCustomerOwnedIpOnLaunch"`
+	MapCustomerOwnedIpOnLaunch    *bool                           `xml:"mapCustomerOwnedIpOnLaunch,omitempty"`
 	AssignIpv6AddressOnCreation   bool                            `xml:"assignIpv6AddressOnCreation"`
-	EnableDns64                   bool                            `xml:"enableDns64"`
-	Ipv6Native                    bool                            `xml:"ipv6Native"`
+	EnableDns64                   *bool                           `xml:"enableDns64,omitempty"`
+	Ipv6Native                    *bool                           `xml:"ipv6Native,omitempty"`
+	EnableLniAtDeviceIndex        *int                            `xml:"enableLniAtDeviceIndex,omitempty"`
+	CustomerOwnedIpv4Pool         string                          `xml:"customerOwnedIpv4Pool,omitempty"`
+	OutpostArn                    string                          `xml:"outpostArn,omitempty"`
 	Ipv6CidrBlockAssociationSet   []ec2SubnetIpv6BlockAssociation `xml:"ipv6CidrBlockAssociationSet>item,omitempty"`
 	PrivateDnsNameOptionsOnLaunch *ec2SubnetPrivateDnsOptionsXML  `xml:"privateDnsNameOptionsOnLaunch,omitempty"`
 	TagSet                        []ec2ResourceTagXML             `xml:"tagSet>item,omitempty"`
@@ -541,7 +583,7 @@ func (app *Application) ec2CreateSubnet(w http.ResponseWriter, account, region s
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	out := ec2CreateSubnetResult{Subnet: ec2SubnetToXML(account, s, zoneID)}
+	out := ec2CreateSubnetResult{Subnet: ec2SubnetToXML(s, zoneID)}
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateSubnet", &out)
 }
 
@@ -587,7 +629,6 @@ func subnetDefaultForAz(s ec2SubnetXML) []string { return []string{strconv.Forma
 // subnetFilters are the DescribeSubnets filters fakeaws models: the AWS
 // names whose value a subnet answers, each camelCase alias AWS
 // documents and data.aws_subnet sends, and the tag filters.
-// default-for-az is false for every subnet: fakeaws has no default VPC.
 var subnetFilters = ec2FilterTable[ec2SubnetXML]{
 	values: map[string]func(ec2SubnetXML) []string{
 		"subnet-id":            func(s ec2SubnetXML) []string { return []string{s.SubnetId} },
@@ -647,7 +688,7 @@ func (app *Application) ec2DescribeSubnets(w http.ResponseWriter, account, regio
 	}
 	out := ec2DescribeSubnetsResult{SubnetSet: make([]ec2SubnetXML, 0, len(subnets))}
 	for _, s := range subnets {
-		x := ec2SubnetToXML(account, s, zoneID)
+		x := ec2SubnetToXML(s, zoneID)
 		x.TagSet = tags[s.ID]
 		if len(ids) > 0 && !slices.Contains(ids, s.ID) || !subnetFilters.matches(x, filters, tags) {
 			continue
@@ -704,22 +745,52 @@ func ec2RandID() string {
 	return hex.EncodeToString(b)
 }
 
+// newEC2VPC is a created VPC: not the default VPC, under placeholder
+// DHCP options, with its one CIDR block associated and both DNS
+// attributes true. AWS defaults enableDnsHostnames to false.
 func newEC2VPC(account, region, id, cidr string) *repository.EC2VPC {
 	return &repository.EC2VPC{
 		ID: id, CidrBlock: cidr, Region: region,
-		ARN:       awsproto.BuildEC2VPCARN(region, account, id),
-		State:     "available",
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		ARN:             awsproto.BuildEC2VPCARN(region, account, id),
+		State:           "available",
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		OwnerID:         account,
+		DhcpOptionsID:   "dopt-fakeaws-default",
+		InstanceTenancy: "default",
+		CidrBlockAssociations: []repository.EC2CidrBlockAssociation{
+			{AssociationID: "vpc-cidr-assoc-" + id, CidrBlock: cidr, State: "associated"},
+		},
+		EnableDNSSupport:   true,
+		EnableDNSHostnames: true,
 	}
 }
 
+// newEC2Subnet is a created subnet: IPv4 only, not the default for its
+// zone, its instances named by IP.
 func newEC2Subnet(account, region, id, vpcID, cidr, az string) *repository.EC2Subnet {
 	return &repository.EC2Subnet{
 		ID: id, VPCID: vpcID, CidrBlock: cidr, AvailabilityZone: az,
 		Region: region,
 		ARN:    awsproto.BuildEC2SubnetARN(region, account, id),
 		State:  "available", CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		OwnerID:                       account,
+		AvailableIPAddressCount:       subnetAvailableIPs(cidr),
+		MapCustomerOwnedIPOnLaunch:    new(false),
+		EnableDNS64:                   new(false),
+		Ipv6Native:                    new(false),
+		PrivateDNSNameOptionsOnLaunch: &repository.EC2PrivateDNSNameOptions{HostnameType: "ip-name"},
 	}
+}
+
+// subnetAvailableIPs is a new subnet's available IPv4 count: its
+// block's size less the 5 addresses AWS reserves (.0 to .3 and the
+// broadcast), 251 for a /24, and 251 for a block it cannot parse.
+func subnetAvailableIPs(cidr string) int {
+	p, err := netip.ParsePrefix(cidr)
+	if err != nil || p.Bits() < 16 || p.Bits() > 28 {
+		return 251
+	}
+	return 1<<(32-p.Bits()) - 5
 }
 
 func newEC2SecurityGroup(account, region, vpcID, name, desc string) *repository.EC2SecurityGroup {
@@ -737,57 +808,69 @@ func newDefaultGroup(account, region, vpcID string) *repository.EC2SecurityGroup
 	return newEC2SecurityGroup(account, region, vpcID, repository.DefaultGroupName, "default VPC security group")
 }
 
-func ec2VpcToXML(account string, v *repository.EC2VPC) ec2VpcXML {
-	return ec2VpcXML{
+func ec2VpcToXML(v *repository.EC2VPC) ec2VpcXML {
+	x := ec2VpcXML{
 		VpcId:           v.ID,
 		State:           v.State,
 		CidrBlock:       v.CidrBlock,
-		DhcpOptionsId:   "dopt-fakeaws-default",
-		InstanceTenancy: "default",
-		OwnerId:         account,
-		IsDefault:       false,
-		CidrBlockAssociationSet: []ec2VpcCidrBlockAssociationXML{
-			{
-				AssociationId:  "vpc-cidr-assoc-" + v.ID,
-				CidrBlock:      v.CidrBlock,
-				CidrBlockState: ec2VpcCidrBlockAssociationState{State: "associated"},
-			},
-		},
+		DhcpOptionsId:   v.DhcpOptionsID,
+		InstanceTenancy: v.InstanceTenancy,
+		OwnerId:         v.OwnerID,
+		IsDefault:       v.IsDefault,
 	}
+	for _, a := range v.CidrBlockAssociations {
+		x.CidrBlockAssociationSet = append(x.CidrBlockAssociationSet, ec2VpcCidrBlockAssociationXML{
+			AssociationId: a.AssociationID, CidrBlock: a.CidrBlock, CidrBlockState: ec2CidrBlockState(a),
+		})
+	}
+	for _, a := range v.Ipv6CidrBlockAssociations {
+		x.Ipv6CidrBlockAssociationSet = append(x.Ipv6CidrBlockAssociationSet, ec2VpcIpv6BlockAssociationXML{
+			AssociationId: a.AssociationID, Ipv6CidrBlock: a.CidrBlock, CidrBlockState: ec2CidrBlockState(a),
+			Ipv6Pool: a.Ipv6Pool, NetworkBorderGroup: a.NetworkBorderGroup, IpSource: a.IPSource, Ipv6AddressAttribute: a.Ipv6AddressAttribute,
+		})
+	}
+	return x
+}
+
+// ec2CidrBlockState is a's cidrBlockState or ipv6CidrBlockState.
+func ec2CidrBlockState(a repository.EC2CidrBlockAssociation) ec2VpcCidrBlockAssociationState {
+	return ec2VpcCidrBlockAssociationState{State: a.State, StatusMessage: a.StatusMessage}
 }
 
 // ec2SubnetToXML answers s, its availabilityZoneId from zoneID (ec2Zones).
-func ec2SubnetToXML(account string, s *repository.EC2Subnet, zoneID func(zone string) string) ec2SubnetXML {
-	// availableIpAddressCount derived from CIDR mask: /24 → 251 usable
-	// (256 − 5 reserved by AWS), /25 → 123, etc. Defaults to 251 if
-	// we can't parse the CIDR — close enough for tests that just
-	// assert non-zero.
-	available := 251
-	if i := strings.LastIndexByte(s.CidrBlock, '/'); i >= 0 {
-		var mask int
-		fmt.Sscanf(s.CidrBlock[i+1:], "%d", &mask)
-		if mask >= 16 && mask <= 28 {
-			// 2^(32-mask) - 5 (AWS reserves .0, .1, .2, .3, broadcast)
-			total := 1 << uint(32-mask)
-			available = total - 5
+func ec2SubnetToXML(s *repository.EC2Subnet, zoneID func(zone string) string) ec2SubnetXML {
+	x := ec2SubnetXML{
+		SubnetId:                    s.ID,
+		VpcId:                       s.VPCID,
+		State:                       s.State,
+		CidrBlock:                   s.CidrBlock,
+		AvailabilityZone:            s.AvailabilityZone,
+		AvailabilityZoneId:          zoneID(s.AvailabilityZone),
+		AvailableIpAddressCount:     s.AvailableIPAddressCount,
+		OwnerId:                     s.OwnerID,
+		SubnetArn:                   s.ARN,
+		DefaultForAz:                s.DefaultForAz,
+		MapPublicIpOnLaunch:         s.MapPublicIPOnLaunch,
+		MapCustomerOwnedIpOnLaunch:  s.MapCustomerOwnedIPOnLaunch,
+		AssignIpv6AddressOnCreation: s.AssignIpv6AddressOnCreation,
+		EnableDns64:                 s.EnableDNS64,
+		Ipv6Native:                  s.Ipv6Native,
+		EnableLniAtDeviceIndex:      s.EnableLniAtDeviceIndex,
+		CustomerOwnedIpv4Pool:       s.CustomerOwnedIpv4Pool,
+		OutpostArn:                  s.OutpostARN,
+	}
+	for _, a := range s.Ipv6CidrBlockAssociations {
+		x.Ipv6CidrBlockAssociationSet = append(x.Ipv6CidrBlockAssociationSet, ec2SubnetIpv6BlockAssociation{
+			AssociationId: a.AssociationID, Ipv6CidrBlock: a.CidrBlock, CidrBlockState: ec2CidrBlockState(a),
+		})
+	}
+	if o := s.PrivateDNSNameOptionsOnLaunch; o != nil {
+		x.PrivateDnsNameOptionsOnLaunch = &ec2SubnetPrivateDnsOptionsXML{
+			HostnameType: o.HostnameType, EnableResourceNameDnsARecord: o.EnableResourceNameDNSARecord,
+			EnableResourceNameDnsAAAARecord: o.EnableResourceNameDNSAAAARecord,
 		}
 	}
-	return ec2SubnetXML{
-		SubnetId:                s.ID,
-		VpcId:                   s.VPCID,
-		State:                   s.State,
-		CidrBlock:               s.CidrBlock,
-		AvailabilityZone:        s.AvailabilityZone,
-		AvailabilityZoneId:      zoneID(s.AvailabilityZone),
-		AvailableIpAddressCount: available,
-		OwnerId:                 account,
-		SubnetArn:               s.ARN,
-		MapPublicIpOnLaunch:     s.MapPublicIPOnLaunch,
-		PrivateDnsNameOptionsOnLaunch: &ec2SubnetPrivateDnsOptionsXML{
-			HostnameType:                 "ip-name",
-			EnableResourceNameDnsARecord: false,
-		},
-	}
+	return x
 }
 
 // ----- InternetGateway handlers -----
@@ -812,10 +895,10 @@ type ec2DescribeIgwsResult struct {
 	InternetGatewaySet []ec2IgwXML `xml:"internetGatewaySet>item"`
 }
 
-func ec2IgwToXML(account string, igw *repository.EC2InternetGateway) ec2IgwXML {
-	out := ec2IgwXML{InternetGatewayId: igw.ID, OwnerId: account}
+func ec2IgwToXML(igw *repository.EC2InternetGateway) ec2IgwXML {
+	out := ec2IgwXML{InternetGatewayId: igw.ID, OwnerId: igw.OwnerID}
 	if igw.VPCID != "" {
-		out.Attachments = []ec2IgwAttachmentXML{{VpcId: igw.VPCID, State: "available"}}
+		out.Attachments = []ec2IgwAttachmentXML{{VpcId: igw.VPCID, State: igw.AttachmentState}}
 	}
 	return out
 }
@@ -830,6 +913,7 @@ func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account,
 		ID: id, Region: region,
 		ARN:       awsproto.BuildEC2InternetGatewayARN(region, account, id),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		OwnerID:   account,
 	}
 	err := app.repo.CreateInternetGateway(account, igw)
 	if err == nil {
@@ -840,7 +924,7 @@ func (app *Application) ec2CreateInternetGateway(w http.ResponseWriter, account,
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
-	awsproto.WriteEC2QueryRPCResponse(w, "CreateInternetGateway", &ec2CreateIgwResult{InternetGateway: ec2IgwToXML(account, igw)})
+	awsproto.WriteEC2QueryRPCResponse(w, "CreateInternetGateway", &ec2CreateIgwResult{InternetGateway: ec2IgwToXML(igw)})
 }
 
 // igwFilters are the DescribeInternetGateways filters fakeaws models:
@@ -904,7 +988,7 @@ func (app *Application) ec2DescribeInternetGateways(w http.ResponseWriter, accou
 	}
 	out := ec2DescribeIgwsResult{InternetGatewaySet: make([]ec2IgwXML, 0, len(igws))}
 	for _, igw := range igws {
-		x := ec2IgwToXML(account, igw)
+		x := ec2IgwToXML(igw)
 		x.TagSet = tags[igw.ID]
 		if igwFilters.matches(x, filters, tags) {
 			out.InternetGatewaySet = append(out.InternetGatewaySet, x)
@@ -3312,10 +3396,7 @@ func (app *Application) ec2DescribeAvailabilityZones(w http.ResponseWriter, acco
 	xs := make([]ec2AvailabilityZoneXML, len(zones))
 	zoneNames, zoneIDs := make([]string, len(zones)), make([]string, len(zones))
 	for i, z := range zones {
-		xs[i] = ec2AvailabilityZoneXML{
-			ZoneName: z.ZoneName, ZoneId: zoneID(z.ZoneName), ZoneState: z.State, RegionName: region,
-			OptInStatus: z.OptInStatus, ZoneType: z.ZoneType, GroupName: z.GroupName, NetworkBorderGroup: z.NetworkBorderGroup,
-		}
+		xs[i] = ec2ZoneToXML(z, zoneID(z.ZoneName))
 		zoneNames[i], zoneIDs[i] = xs[i].ZoneName, xs[i].ZoneId
 	}
 	names, ids := queryListValues(req.Params, "ZoneName."), queryListValues(req.Params, "ZoneId.")
@@ -3338,6 +3419,14 @@ func (app *Application) ec2DescribeAvailabilityZones(w http.ResponseWriter, acco
 		markClass(w, classEmptyCollection)
 	}
 	awsproto.WriteEC2QueryRPCResponse(w, req.Action, &out)
+}
+
+// ec2ZoneToXML answers z, whose id is id (ec2Zones' zoneID), in its region.
+func ec2ZoneToXML(z repository.AvailabilityZone, id string) ec2AvailabilityZoneXML {
+	return ec2AvailabilityZoneXML{
+		ZoneName: z.ZoneName, ZoneId: id, ZoneState: z.State, RegionName: z.Region,
+		OptInStatus: z.OptInStatus, ZoneType: z.ZoneType, GroupName: z.GroupName, NetworkBorderGroup: z.NetworkBorderGroup,
+	}
 }
 
 // refuseUnknownZone answers 400 InvalidParameterValue, message msg
