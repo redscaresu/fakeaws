@@ -90,7 +90,7 @@ func TestNewRefusesAnotherSchemaVersion(t *testing.T) {
 		{"older", "state.db", "1", []string{`UPDATE schema_version SET version = 1`}},
 		{"older, rollback journal", "state.db", "1", []string{`PRAGMA journal_mode = DELETE`, `UPDATE schema_version SET version = 1`}},
 		{"older, odd path", "state ?#%.db", "1", []string{`UPDATE schema_version SET version = 1`}},
-		{"previous: route table associations without main", "state.db", fmt.Sprint(dbSchemaVersion - 1), []string{`DROP INDEX ec2_route_table_associations_one_main`, `ALTER TABLE ec2_route_table_associations DROP COLUMN main`, fmt.Sprintf(`UPDATE schema_version SET version = %d`, dbSchemaVersion-1)}},
+		{"previous: security group rules in JSON columns", "state.db", fmt.Sprint(dbSchemaVersion - 1), []string{`DROP TABLE ec2_security_group_rules`, `ALTER TABLE ec2_security_groups ADD COLUMN ingress TEXT NOT NULL DEFAULT '[]'`, `ALTER TABLE ec2_security_groups ADD COLUMN egress TEXT NOT NULL DEFAULT '[]'`, fmt.Sprintf(`UPDATE schema_version SET version = %d`, dbSchemaVersion-1)}},
 		{"newer", "state.db", fmt.Sprint(dbSchemaVersion + 1), []string{fmt.Sprintf(`UPDATE schema_version SET version = %d`, dbSchemaVersion+1)}},
 		{"no row", "state.db", "none", []string{`DELETE FROM schema_version`}},
 		{"two rows", "state.db", fmt.Sprintf("1, %d", dbSchemaVersion), []string{`INSERT INTO schema_version (version) VALUES (1)`}},

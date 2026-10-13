@@ -1,0 +1,1400 @@
+=== no rules (admin_test.go seedSG), revoke of an absent rule, step 1: RevokeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<RevokeSecurityGroupIngressResponse>
+  <requestId>fakeaws-synthetic</requestId>
+</RevokeSecurityGroupIngressResponse>
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupCRUDPlusRules, step 1: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>443</fromPort>
+            <toPort>443</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":443,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":443,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupCRUDPlusRules, step 2: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<AuthorizeSecurityGroupIngressResponse>
+  <requestId>fakeaws-synthetic</requestId>
+</AuthorizeSecurityGroupIngressResponse>
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>443</fromPort>
+            <toPort>443</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":443,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":443,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupCRUDPlusRules, step 3: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<AuthorizeSecurityGroupIngressResponse>
+  <requestId>fakeaws-synthetic</requestId>
+</AuthorizeSecurityGroupIngressResponse>
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>443</fromPort>
+            <toPort>443</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":443,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":443,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupCRUDPlusRules, step 4: RevokeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<RevokeSecurityGroupIngressResponse>
+  <requestId>fakeaws-synthetic</requestId>
+</RevokeSecurityGroupIngressResponse>
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupCRUDPlusRules, step 5: AuthorizeSecurityGroupEgress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress>
+          <item>
+            <ipProtocol>-1</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>0</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[{"from_port":0,"ip_protocol":"-1","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":0,"user_id_group_pairs":[]}],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupFullIpPermissionsShape, step 1: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>22</fromPort>
+            <toPort>22</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges>
+              <item>
+                <cidrIpv6>::/0</cidrIpv6>
+              </item>
+            </ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>443</fromPort>
+            <toPort>443</toPort>
+            <ipRanges></ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups>
+              <item>
+                <groupId>PEER</groupId>
+              </item>
+            </groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>5432</fromPort>
+            <toPort>5432</toPort>
+            <ipRanges></ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds>
+              <item>
+                <prefixListId>pl-0123456789abcdef0</prefixListId>
+              </item>
+            </prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":22,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[{"cidr_ipv6":"::/0","description":""}],"prefix_list_ids":[],"to_port":22,"user_id_group_pairs":[]},{"from_port":443,"ip_protocol":"tcp","ip_ranges":[],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":443,"user_id_group_pairs":[{"description":"","group_id":"PEER","user_id":""}]},{"from_port":5432,"ip_protocol":"tcp","ip_ranges":[],"ipv6_ranges":[],"prefix_list_ids":[{"description":"","prefix_list_id":"pl-0123456789abcdef0"}],"to_port":5432,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupFullIpPermissionsShape, step 2: AuthorizeSecurityGroupEgress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>22</fromPort>
+            <toPort>22</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges>
+              <item>
+                <cidrIpv6>::/0</cidrIpv6>
+              </item>
+            </ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>443</fromPort>
+            <toPort>443</toPort>
+            <ipRanges></ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups>
+              <item>
+                <groupId>PEER</groupId>
+              </item>
+            </groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>5432</fromPort>
+            <toPort>5432</toPort>
+            <ipRanges></ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds>
+              <item>
+                <prefixListId>pl-0123456789abcdef0</prefixListId>
+              </item>
+            </prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress>
+          <item>
+            <ipProtocol>-1</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>0</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":22,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[{"cidr_ipv6":"::/0","description":""}],"prefix_list_ids":[],"to_port":22,"user_id_group_pairs":[]},{"from_port":443,"ip_protocol":"tcp","ip_ranges":[],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":443,"user_id_group_pairs":[{"description":"","group_id":"PEER","user_id":""}]},{"from_port":5432,"ip_protocol":"tcp","ip_ranges":[],"ipv6_ranges":[],"prefix_list_ids":[{"description":"","prefix_list_id":"pl-0123456789abcdef0"}],"to_port":5432,"user_id_group_pairs":[]}],"ip_permissions_egress":[{"from_port":0,"ip_protocol":"-1","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":0,"user_id_group_pairs":[]}],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupFullIpPermissionsShape, step 3: RevokeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<RevokeSecurityGroupIngressResponse>
+  <requestId>fakeaws-synthetic</requestId>
+</RevokeSecurityGroupIngressResponse>
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>22</fromPort>
+            <toPort>22</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>443</fromPort>
+            <toPort>443</toPort>
+            <ipRanges></ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups>
+              <item>
+                <groupId>PEER</groupId>
+              </item>
+            </groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>5432</fromPort>
+            <toPort>5432</toPort>
+            <ipRanges></ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds>
+              <item>
+                <prefixListId>pl-0123456789abcdef0</prefixListId>
+              </item>
+            </prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress>
+          <item>
+            <ipProtocol>-1</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>0</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":22,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":22,"user_id_group_pairs":[]},{"from_port":443,"ip_protocol":"tcp","ip_ranges":[],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":443,"user_id_group_pairs":[{"description":"","group_id":"PEER","user_id":""}]},{"from_port":5432,"ip_protocol":"tcp","ip_ranges":[],"ipv6_ranges":[],"prefix_list_ids":[{"description":"","prefix_list_id":"pl-0123456789abcdef0"}],"to_port":5432,"user_id_group_pairs":[]}],"ip_permissions_egress":[{"from_port":0,"ip_protocol":"-1","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":0,"user_id_group_pairs":[]}],"region":"us-east-1","vpc_id":"VPC"}
+=== authorizeEverySourceKind, step 1: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>22</fromPort>
+            <toPort>22</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+                <description>office</description>
+              </item>
+            </ipRanges>
+            <ipv6Ranges>
+              <item>
+                <cidrIpv6>::/0</cidrIpv6>
+                <description>anywhere v6</description>
+              </item>
+            </ipv6Ranges>
+            <groups>
+              <item>
+                <groupId>PEER</groupId>
+                <userId>111122223333</userId>
+                <description>from lb</description>
+              </item>
+            </groups>
+            <prefixListIds>
+              <item>
+                <prefixListId>pl-0123456789abcdef0</prefixListId>
+                <description>s3</description>
+              </item>
+            </prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":22,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":"office"}],"ipv6_ranges":[{"cidr_ipv6":"::/0","description":"anywhere v6"}],"prefix_list_ids":[{"description":"s3","prefix_list_id":"pl-0123456789abcdef0"}],"to_port":22,"user_id_group_pairs":[{"description":"from lb","group_id":"PEER","user_id":"111122223333"}]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== authorizeEverySourceKind, step 2: AuthorizeSecurityGroupEgress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>22</fromPort>
+            <toPort>22</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+                <description>office</description>
+              </item>
+            </ipRanges>
+            <ipv6Ranges>
+              <item>
+                <cidrIpv6>::/0</cidrIpv6>
+                <description>anywhere v6</description>
+              </item>
+            </ipv6Ranges>
+            <groups>
+              <item>
+                <groupId>PEER</groupId>
+                <userId>111122223333</userId>
+                <description>from lb</description>
+              </item>
+            </groups>
+            <prefixListIds>
+              <item>
+                <prefixListId>pl-0123456789abcdef0</prefixListId>
+                <description>s3</description>
+              </item>
+            </prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress>
+          <item>
+            <ipProtocol>-1</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>0</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+                <description>all out</description>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":22,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":"office"}],"ipv6_ranges":[{"cidr_ipv6":"::/0","description":"anywhere v6"}],"prefix_list_ids":[{"description":"s3","prefix_list_id":"pl-0123456789abcdef0"}],"to_port":22,"user_id_group_pairs":[{"description":"from lb","group_id":"PEER","user_id":"111122223333"}]}],"ip_permissions_egress":[{"from_port":0,"ip_protocol":"-1","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":"all out"}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":0,"user_id_group_pairs":[]}],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 1: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>CIDR block 10.0.0.0/33 is malformed</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 2: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>CIDR block bogus is malformed</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 3: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>CIDR block 2001:db8::/129 is malformed</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 4: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>Invalid port range 80-70 for protocol &#39;tcp&#39;: the from port is greater than the to port</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 5: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>TCP/UDP (to) port (70000) out of range</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 6: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>Invalid value &#39;bogus&#39; for IP protocol. Unknown protocol.</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 7: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>Invalid value &#39;all&#39; for IP protocol. Unknown protocol.</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 8: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>Invalid value &#39;256&#39; for IP protocol. Unknown protocol.</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 9: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>Invalid port range 80-70 for protocol &#39;6&#39;: the from port is greater than the to port</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 10: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>ICMP type (256) out of range</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 11: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>ICMP code (0) must be -1 when the ICMP type is -1 (all types)</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleValidation, step 12: AuthorizeSecurityGroupEgress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidParameterValue</Code>
+      <Message>ICMP code (300) out of range</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRulePositiveControls, step 1: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>-1</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>0</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":0,"ip_protocol":"-1","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":0,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRulePositiveControls, step 2: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>-1</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>0</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>65535</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":0,"ip_protocol":"-1","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":0,"user_id_group_pairs":[]},{"from_port":0,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":65535,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRulePositiveControls, step 3: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>-1</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>0</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>65535</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>icmp</ipProtocol>
+            <fromPort>-1</fromPort>
+            <toPort>-1</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":0,"ip_protocol":"-1","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":0,"user_id_group_pairs":[]},{"from_port":0,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":65535,"user_id_group_pairs":[]},{"from_port":-1,"ip_protocol":"icmp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":-1,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRulePositiveControls, step 4: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>-1</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>0</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>65535</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>icmp</ipProtocol>
+            <fromPort>-1</fromPort>
+            <toPort>-1</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>6</ipProtocol>
+            <fromPort>80</fromPort>
+            <toPort>80</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":0,"ip_protocol":"-1","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":0,"user_id_group_pairs":[]},{"from_port":0,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":65535,"user_id_group_pairs":[]},{"from_port":-1,"ip_protocol":"icmp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":-1,"user_id_group_pairs":[]},{"from_port":80,"ip_protocol":"6","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":80,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRulePositiveControls, step 5: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>-1</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>0</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>0.0.0.0/0</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>0</fromPort>
+            <toPort>65535</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>icmp</ipProtocol>
+            <fromPort>-1</fromPort>
+            <toPort>-1</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>6</ipProtocol>
+            <fromPort>80</fromPort>
+            <toPort>80</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>icmpv6</ipProtocol>
+            <fromPort>-1</fromPort>
+            <toPort>-1</toPort>
+            <ipRanges></ipRanges>
+            <ipv6Ranges>
+              <item>
+                <cidrIpv6>::/0</cidrIpv6>
+              </item>
+            </ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":0,"ip_protocol":"-1","ip_ranges":[{"cidr_ip":"0.0.0.0/0","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":0,"user_id_group_pairs":[]},{"from_port":0,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":65535,"user_id_group_pairs":[]},{"from_port":-1,"ip_protocol":"icmp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":-1,"user_id_group_pairs":[]},{"from_port":80,"ip_protocol":"6","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":80,"user_id_group_pairs":[]},{"from_port":-1,"ip_protocol":"icmpv6","ip_ranges":[],"ipv6_ranges":[{"cidr_ipv6":"::/0","description":""}],"prefix_list_ids":[],"to_port":-1,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleSourceGroupMustExist, step 1: AuthorizeSecurityGroupIngress 400
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Errors>
+    <Error>
+      <Code>InvalidGroup.NotFound</Code>
+      <Message>The security group &#39;sg-0000000000000dead&#39; does not exist</Message>
+    </Error>
+  </Errors>
+  <RequestID>fakeaws-synthetic</RequestID>
+</Response><?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions></ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleSourceGroupMustExist, step 2: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>443</fromPort>
+            <toPort>443</toPort>
+            <ipRanges></ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups>
+              <item>
+                <groupId>PEER</groupId>
+              </item>
+            </groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":443,"ip_protocol":"tcp","ip_ranges":[],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":443,"user_id_group_pairs":[{"description":"","group_id":"PEER","user_id":""}]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== TestEC2_SecurityGroupRuleSourceGroupMustExist, step 3: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>443</fromPort>
+            <toPort>443</toPort>
+            <ipRanges></ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups>
+              <item>
+                <groupId>PEER</groupId>
+              </item>
+            </groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>8443</fromPort>
+            <toPort>8443</toPort>
+            <ipRanges></ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups>
+              <item>
+                <groupId>sg-0000000000000dead</groupId>
+                <userId>111122223333</userId>
+              </item>
+            </groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":443,"ip_protocol":"tcp","ip_ranges":[],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":443,"user_id_group_pairs":[{"description":"","group_id":"PEER","user_id":""}]},{"from_port":8443,"ip_protocol":"tcp","ip_ranges":[],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":8443,"user_id_group_pairs":[{"description":"","group_id":"sg-0000000000000dead","user_id":"111122223333"}]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== revoke a permission's first source, step 1: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>22</fromPort>
+            <toPort>22</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":22,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":22,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== revoke a permission's first source, step 2: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>22</fromPort>
+            <toPort>22</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>80</fromPort>
+            <toPort>80</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.1.0.0/16</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":22,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":22,"user_id_group_pairs":[]},{"from_port":80,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.1.0.0/16","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":80,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== revoke a permission's first source, step 3: AuthorizeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>22</fromPort>
+            <toPort>22</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.0.0.0/8</cidrIp>
+              </item>
+              <item>
+                <cidrIp>10.2.0.0/16</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>80</fromPort>
+            <toPort>80</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.1.0.0/16</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":22,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.0.0.0/8","description":""},{"cidr_ip":"10.2.0.0/16","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":22,"user_id_group_pairs":[]},{"from_port":80,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.1.0.0/16","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":80,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}
+=== revoke a permission's first source, step 4: RevokeSecurityGroupIngress 200
+<?xml version="1.0" encoding="UTF-8"?>
+<RevokeSecurityGroupIngressResponse>
+  <requestId>fakeaws-synthetic</requestId>
+</RevokeSecurityGroupIngressResponse>
+<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <requestId>fakeaws-synthetic</requestId>
+    <securityGroupInfo>
+      <item>
+        <groupId>SG</groupId>
+        <groupName>web</groupName>
+        <groupDescription>web</groupDescription>
+        <vpcId>VPC</vpcId>
+        <ownerId>000000000000</ownerId>
+        <ipPermissions>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>22</fromPort>
+            <toPort>22</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.2.0.0/16</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+          <item>
+            <ipProtocol>tcp</ipProtocol>
+            <fromPort>80</fromPort>
+            <toPort>80</toPort>
+            <ipRanges>
+              <item>
+                <cidrIp>10.1.0.0/16</cidrIp>
+              </item>
+            </ipRanges>
+            <ipv6Ranges></ipv6Ranges>
+            <groups></groups>
+            <prefixListIds></prefixListIds>
+          </item>
+        </ipPermissions>
+        <ipPermissionsEgress></ipPermissionsEgress>
+        <tagSet></tagSet>
+      </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
+{"arn":"arn:aws:ec2:us-east-1:000000000000:security-group/SG","description":"web","group_name":"web","id":"SG","ip_permissions":[{"from_port":22,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.2.0.0/16","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":22,"user_id_group_pairs":[]},{"from_port":80,"ip_protocol":"tcp","ip_ranges":[{"cidr_ip":"10.1.0.0/16","description":""}],"ipv6_ranges":[],"prefix_list_ids":[],"to_port":80,"user_id_group_pairs":[]}],"ip_permissions_egress":[],"region":"us-east-1","vpc_id":"VPC"}

@@ -486,13 +486,13 @@ func TestRegressionServerStampedFieldsNeverTrusted(t *testing.T) {
 // joins on IAM tables); the test flips active when EC2 lands (S44).
 //
 // EC2 expression: the strongest test target is SecurityGroup rules.
-// CreateSecurityGroup writes the JSON `data` blob (containing rule
-// arrays) AND extracted indexed columns (vpc_id, group_name).
-// AuthorizeSecurityGroupIngress mutates the ingress JSON column.
-// The bug we guard against is "JSON updated, indexed scalar lookups
-// stale". Asserted by round-tripping a rule via Authorize then
-// reading it back via DescribeSecurityGroups (which queries via
-// indexed column AND parses the JSON) and confirming the rule is
+// CreateSecurityGroup writes the JSON `data` blob AND extracted
+// indexed columns (vpc_id, group_name). AuthorizeSecurityGroupIngress
+// adds ec2_security_group_rules rows keyed by group_id. The bug we
+// guard against is "a write lands, indexed lookups stale". Asserted
+// by round-tripping a rule via Authorize then reading it back via
+// DescribeSecurityGroups (which looks the group up by its indexed
+// columns AND reads its rule rows) and confirming the rule is
 // present.
 func TestRegressionSQLColumnJSONBlobSyncOnUpdate(t *testing.T) {
 	srv := newTestServerForRegression(t)

@@ -19,6 +19,7 @@ var ec2TaggedTables = []string{
 	"ec2_internet_gateways",
 	"ec2_route_tables",
 	"ec2_security_groups",
+	"ec2_security_group_rules",
 	"ec2_instances",
 	"ec2_network_interfaces",
 }

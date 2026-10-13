@@ -79,8 +79,10 @@ type Cache interface {
 // Nor does a new data-JSON key, unless an old row read without it
 // answers wrongly: 4 adds the VPC DNS attributes, which an older row
 // would answer false. 5 lets a route table association be main or a
-// gateway's, with no subnet, and gives routes their origin and state.
-const dbSchemaVersion = 5
+// gateway's, with no subnet, and gives routes their origin and state. 6
+// moves security group rules from the groups' ingress and egress JSON
+// columns to ec2_security_group_rules rows.
+const dbSchemaVersion = 6
 
 // New opens the SQLite database at dbPath, refuses it with
 // models.ErrConflict unless it is new or at dbSchemaVersion, applies

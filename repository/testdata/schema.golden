@@ -1,4 +1,4 @@
-dbSchemaVersion 5
+dbSchemaVersion 6
 
 === index ec2_route_table_associations_one_main
 CREATE UNIQUE INDEX ec2_route_table_associations_one_main
@@ -191,6 +191,32 @@ CREATE TABLE ec2_routes (
 		FOREIGN KEY (account_id, route_table_id) REFERENCES ec2_route_tables(account_id, id) ON DELETE CASCADE
 	)
 
+=== table ec2_security_group_rules
+CREATE TABLE ec2_security_group_rules (
+		account_id          TEXT NOT NULL,
+		region              TEXT NOT NULL,
+		id                  TEXT NOT NULL,
+		group_id            TEXT NOT NULL,
+		group_owner_id      TEXT NOT NULL,
+		is_egress           INTEGER NOT NULL,
+		perm_ord            INTEGER NOT NULL, -- the permission's position in its direction
+		src_ord             INTEGER NOT NULL, -- the source's position in its permission
+		ip_protocol         TEXT NOT NULL,
+		from_port           INTEGER NOT NULL,
+		to_port             INTEGER NOT NULL,
+		cidr_ipv4           TEXT,
+		cidr_ipv6           TEXT,
+		prefix_list_id      TEXT,
+		referenced_group_id TEXT,
+		referenced_user_id  TEXT,
+		description         TEXT NOT NULL,
+		PRIMARY KEY (account_id, id),
+		FOREIGN KEY (account_id, group_id) REFERENCES ec2_security_groups(account_id, id) ON DELETE CASCADE,
+		UNIQUE (account_id, group_id, is_egress, perm_ord, src_ord),
+		CHECK ((cidr_ipv4 IS NOT NULL) + (cidr_ipv6 IS NOT NULL) + (prefix_list_id IS NOT NULL) + (referenced_group_id IS NOT NULL) = 1),
+		CHECK (referenced_user_id IS NULL OR referenced_group_id IS NOT NULL)
+	)
+
 === table ec2_security_groups
 CREATE TABLE ec2_security_groups (
 		account_id   TEXT NOT NULL,
@@ -199,8 +225,6 @@ CREATE TABLE ec2_security_groups (
 		vpc_id       TEXT NOT NULL,
 		group_name   TEXT NOT NULL,
 		description  TEXT NOT NULL,
-		ingress      TEXT NOT NULL DEFAULT '[]',
-		egress       TEXT NOT NULL DEFAULT '[]',
 		arn          TEXT NOT NULL,
 		data         TEXT NOT NULL,
 		created_at   TEXT NOT NULL,
@@ -701,6 +725,11 @@ CREATE TRIGGER ec2_network_interfaces_drop_tags AFTER DELETE ON ec2_network_inte
 
 === trigger ec2_route_tables_drop_tags
 CREATE TRIGGER ec2_route_tables_drop_tags AFTER DELETE ON ec2_route_tables BEGIN
+				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
+			END
+
+=== trigger ec2_security_group_rules_drop_tags
+CREATE TRIGGER ec2_security_group_rules_drop_tags AFTER DELETE ON ec2_security_group_rules BEGIN
 				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
 			END
 

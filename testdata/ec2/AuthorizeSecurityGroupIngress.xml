@@ -1,0 +1,18 @@
+<!-- Source: AWS EC2 API reference, AuthorizeSecurityGroupIngress (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AuthorizeSecurityGroupIngress.html), Example 3's request (GroupId=sg-112233, tcp 3389 from 192.0.2.0/24, Description "Access from New York office"), whose page shows no response: its Response Elements are requestId, return and securityGroupRuleSet, each item a SecurityGroupRule (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_SecurityGroupRule.html). requestId and return as in AuthorizeSecurityGroupEgress Example 1's response (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_AuthorizeSecurityGroupEgress.html). The item has the members, in their order, that the AWS CLI reference's authorize-security-group-ingress Example 7 output (https://docs.aws.amazon.com/cli/latest/reference/ec2/authorize-security-group-ingress.html) answers for a request of the same shape, tcp 3389 from one IPv4 range with a description: no securityGroupRuleArn, tagSet or referencedGroupInfo. The rule id sgr-0397bbcc01e974db3 and owner 123456789012 are that output's. -->
+<AuthorizeSecurityGroupIngressResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
+   <return>true</return>
+   <securityGroupRuleSet>
+      <item>
+         <securityGroupRuleId>sgr-0397bbcc01e974db3</securityGroupRuleId>
+         <groupId>sg-112233</groupId>
+         <groupOwnerId>123456789012</groupOwnerId>
+         <isEgress>false</isEgress>
+         <ipProtocol>tcp</ipProtocol>
+         <fromPort>3389</fromPort>
+         <toPort>3389</toPort>
+         <cidrIpv4>192.0.2.0/24</cidrIpv4>
+         <description>Access from New York office</description>
+      </item>
+   </securityGroupRuleSet>
+</AuthorizeSecurityGroupIngressResponse>
