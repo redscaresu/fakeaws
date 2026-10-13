@@ -85,6 +85,14 @@ func (lt *LoadTx) Query(query string, args ...any) iter.Seq2[func(dest ...any) e
 	}
 }
 
+// Account reads the account the load stores, which every row it writes
+// is under.
+func (lt *LoadTx) Account() (string, error) {
+	var account string
+	err := lt.QueryRow(`SELECT account_id FROM identity WHERE id = 1`).Scan(&account)
+	return account, err
+}
+
 // Failed reports whether a statement has failed in this transaction.
 func (lt *LoadTx) Failed() bool { return lt.failed }
 

@@ -1,4 +1,4 @@
-dbSchemaVersion 6
+dbSchemaVersion 7
 
 === index ec2_route_table_associations_one_main
 CREATE UNIQUE INDEX ec2_route_table_associations_one_main
@@ -138,7 +138,7 @@ CREATE TABLE ec2_network_interfaces (
 		account_id  TEXT NOT NULL,
 		region      TEXT NOT NULL,
 		id          TEXT NOT NULL,
-		instance_id TEXT NOT NULL,
+		instance_id TEXT,
 		subnet_id   TEXT NOT NULL,
 		private_ip  TEXT NOT NULL,
 		data        TEXT NOT NULL,
