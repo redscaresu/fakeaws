@@ -1046,11 +1046,13 @@ type ec2RouteTableXML struct {
 }
 
 // ec2RouteTableAssociationXML is an associationSet item: a subnet's
-// association, or a main one, which has no subnetId.
+// association, a gateway's (an edge association) or a main one, which
+// has neither subnetId nor gatewayId.
 type ec2RouteTableAssociationXML struct {
 	AssociationId string `xml:"routeTableAssociationId"`
 	RouteTableId  string `xml:"routeTableId"`
 	SubnetId      string `xml:"subnetId,omitempty"`
+	GatewayId     string `xml:"gatewayId,omitempty"`
 	Main          bool   `xml:"main"`
 	// AssociationState is the structured indicator the provider uses
 	// to decide whether the association is ready. AssociateRouteTable
@@ -1064,7 +1066,7 @@ type ec2AssociationStateXML struct {
 }
 
 func ec2AssociationToXML(a *repository.EC2RouteTableAssociation) ec2RouteTableAssociationXML {
-	x := ec2RouteTableAssociationXML{AssociationId: a.ID, RouteTableId: a.RouteTableID, SubnetId: a.SubnetID, Main: a.Main}
+	x := ec2RouteTableAssociationXML{AssociationId: a.ID, RouteTableId: a.RouteTableID, SubnetId: a.SubnetID, GatewayId: a.GatewayID, Main: a.Main}
 	if a.State != "" {
 		x.AssociationState = &ec2AssociationStateXML{State: a.State}
 	}
@@ -4195,7 +4197,8 @@ func (app *Application) gatherEC2StateReal(account string) (map[string]any, erro
 		assocOut = append(assocOut, map[string]any{
 			"id":             a.ID,
 			"route_table_id": a.RouteTableID,
-			"subnet_id":      a.SubnetID, // "" on a main association
+			"subnet_id":      a.SubnetID,  // "" on a main or an edge association
+			"gateway_id":     a.GatewayID, // "" unless an edge association
 			"main":           a.Main,
 			"state":          a.State, // "" when its recording held none
 		})

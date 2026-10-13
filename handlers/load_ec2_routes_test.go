@@ -52,6 +52,46 @@ func netAssociation(id, rt, subnet string) string {
 		link + "<associationState><state>associated</state></associationState></item></associationSet>"
 }
 
+// netEdgeAssociation is an associationSet holding the edge association
+// id of route table rt with gateway gw.
+func netEdgeAssociation(id, rt, gw string) string {
+	return "<associationSet><item><routeTableAssociationId>" + id + "</routeTableAssociationId><routeTableId>" + rt + "</routeTableId>" +
+		"<gatewayId>" + gw + "</gatewayId><main>false</main><associationState><state>associated</state></associationState></item></associationSet>"
+}
+
+// TestLoadEC2Routes_EdgeAssociations: an edge association (a gateway's,
+// no subnet, not main) loads beside its VPC's main association and
+// answers as recorded. Its internet gateway resolves, another gateway is
+// named unresolved, /mock/state names its gateway, and it disassociates.
+func TestLoadEC2Routes_EdgeAssociations(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	edges := netRouteTables(
+		netRouteTable("rtb-0igw", fixtureRTVpc, netEdgeAssociation("rtbassoc-0igw", "rtb-0igw", "igw-0EXAMPLE")),
+		netRouteTable("rtb-0vgw", fixtureRTVpc, netEdgeAssociation("rtbassoc-0vgw", "rtb-0vgw", "vgw-0edge")),
+	)
+	edges.params = map[string]string{"RouteTableId.1": "rtb-0igw", "RouteTableId.2": "rtb-0vgw"}
+	var answer struct{ Unresolved map[string][]string }
+	require.NoError(t, json.Unmarshal([]byte(loadNet(t, srv, append(fixtureRecording(t), routeTablesFixture(t), edges)...)), &answer))
+	assert.Equal(t, []string{"vgw-0edge"}, answer.Unresolved["gateway"])
+	rec, ren := diffAnswer(t, srv, edges)
+	assert.Empty(t, rec)
+	assert.Empty(t, ren)
+
+	var state struct {
+		EC2 struct {
+			Associations []map[string]any `json:"route_table_associations"`
+		} `json:"ec2"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(mockOK(t, srv, http.MethodGet, "/mock/state", "")), &state))
+	assert.Contains(t, state.EC2.Associations, map[string]any{
+		"id": "rtbassoc-0igw", "route_table_id": "rtb-0igw", "subnet_id": "", "gateway_id": "igw-0EXAMPLE", "main": false, "state": "associated"})
+
+	mustOK(t)(ec2Call(t, srv, netRegion, "DisassociateRouteTable", url.Values{"AssociationId": {"rtbassoc-0igw"}}))
+	rec, ren = diffAnswer(t, srv, edges)
+	assert.Equal(t, []string{"routeTableSet/item[0]/associationSet/item[0]"}, rec)
+	assert.Empty(t, ren)
+}
+
 func TestLoadEC2Routes_FixtureAnswersAsRecorded(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	rts := routeTablesFixture(t)
@@ -104,7 +144,7 @@ func TestLoadEC2Routes_StateNamesMainAndOrigin(t *testing.T) {
 		} `json:"ec2"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(mockOK(t, srv, http.MethodGet, "/mock/state", "")), &state))
-	assert.Equal(t, []map[string]any{{"id": fixtureRTAssoc, "route_table_id": fixtureRT, "subnet_id": "", "main": true, "state": ""}},
+	assert.Equal(t, []map[string]any{{"id": fixtureRTAssoc, "route_table_id": fixtureRT, "subnet_id": "", "gateway_id": "", "main": true, "state": ""}},
 		state.EC2.Associations)
 	require.Len(t, state.EC2.Routes, 3)
 	for _, r := range state.EC2.Routes {
@@ -240,6 +280,10 @@ func TestLoadEC2Routes_Refusals(t *testing.T) {
 		"a route to a gateway that was not recorded": {
 			netRouteTables(strings.Replace(netRouteTable("rtb-0a", vpc, ""), "</routeSet>",
 				"<item><destinationCidrBlock>0.0.0.0/0</destinationCidrBlock><gatewayId>igw-0missing</gatewayId><state>active</state><origin>CreateRoute</origin></item></routeSet>", 1)),
+			"exchange 3: ec2 DescribeRouteTables: route-table rtb-0a references internet-gateway igw-0missing, which no exchange loaded",
+		},
+		"an edge association to a gateway that was not recorded": {
+			netRouteTables(netRouteTable("rtb-0a", vpc, netEdgeAssociation("rtbassoc-0a", "rtb-0a", "igw-0missing"))),
 			"exchange 3: ec2 DescribeRouteTables: route-table rtb-0a references internet-gateway igw-0missing, which no exchange loaded",
 		},
 		"a propagating gateway": {

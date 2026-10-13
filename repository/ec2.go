@@ -90,7 +90,8 @@ var ec2NetworkMigrations = []string{
 		id             TEXT NOT NULL,
 		route_table_id TEXT NOT NULL,
 		vpc_id         TEXT NOT NULL, -- the route table's, for the one-main index
-		subnet_id      TEXT,          -- NULL on a main association
+		subnet_id      TEXT,          -- NULL on a main or an edge association
+		gateway_id     TEXT,          -- an edge association's gateway, else NULL
 		main           INTEGER NOT NULL DEFAULT 0,
 		state          TEXT NOT NULL,
 		PRIMARY KEY (account_id, id),
@@ -265,13 +266,15 @@ type EC2RouteTable struct {
 	OwnerID   string `json:"owner_id"`
 }
 
-// EC2RouteTableAssociation links a route table to a subnet, or, when
-// Main, to its VPC: a main association has no subnet. State is the
-// associationState's state, "" for an answer that holds none.
+// EC2RouteTableAssociation links a route table to a subnet; to a
+// gateway (an edge association: GatewayID, no subnet); or, when Main,
+// to its VPC, with no subnet. State is the associationState's state, ""
+// for an answer that holds none.
 type EC2RouteTableAssociation struct {
 	ID           string `json:"association_id"`
 	RouteTableID string `json:"route_table_id"`
 	SubnetID     string `json:"subnet_id"`
+	GatewayID    string `json:"gateway_id"`
 	Main         bool   `json:"main"`
 	State        string `json:"state"`
 }
@@ -908,11 +911,12 @@ func (r *Repository) AssociateRouteTable(account, region string, assoc *EC2Route
 }
 
 // insertAssociation stores a under account, in route table vpcID's VPC,
-// its subnet_id NULL when it has none (a main association).
+// its subnet_id NULL when it has none (a main or an edge association)
+// and its gateway_id NULL when it has none.
 func insertAssociation(ex execer, account, vpcID string, a *EC2RouteTableAssociation) error {
 	_, err := ex.Exec(
-		`INSERT INTO ec2_route_table_associations (account_id, id, route_table_id, vpc_id, subnet_id, main, state) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		account, a.ID, a.RouteTableID, vpcID, nullIfEmpty(a.SubnetID), a.Main, a.State,
+		`INSERT INTO ec2_route_table_associations (account_id, id, route_table_id, vpc_id, subnet_id, gateway_id, main, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		account, a.ID, a.RouteTableID, vpcID, nullIfEmpty(a.SubnetID), nullIfEmpty(a.GatewayID), a.Main, a.State,
 	)
 	return err
 }
@@ -1380,17 +1384,17 @@ func (r *Repository) ListRouteTableAssociations(account string) ([]*EC2RouteTabl
 
 // associationColumns are the ec2_route_table_associations columns
 // scanAssociation reads, in order.
-const associationColumns = `id, route_table_id, subnet_id, main, state`
+const associationColumns = `id, route_table_id, subnet_id, gateway_id, main, state`
 
 // scanAssociation reads one associationColumns row through scan, a
-// NULL subnet_id (a main association's) as "".
+// NULL subnet_id or gateway_id as "".
 func scanAssociation(scan func(dest ...any) error) (*EC2RouteTableAssociation, error) {
 	var a EC2RouteTableAssociation
-	var subnet sql.NullString
-	if err := scan(&a.ID, &a.RouteTableID, &subnet, &a.Main, &a.State); err != nil {
+	var subnet, gateway sql.NullString
+	if err := scan(&a.ID, &a.RouteTableID, &subnet, &gateway, &a.Main, &a.State); err != nil {
 		return nil, err
 	}
-	a.SubnetID = subnet.String
+	a.SubnetID, a.GatewayID = subnet.String, gateway.String
 	return &a, nil
 }
 

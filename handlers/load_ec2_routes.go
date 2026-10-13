@@ -30,21 +30,22 @@ func decodeRouteTables(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) 
 	items := make([]loadItem, len(body.RouteTableSet))
 	for i, x := range body.RouteTableSet {
 		ref := loadRef{"route-table", x.RouteTableId}
-		items[i] = loadItem{loadRef: ref, Path: "routeTableSet/item", Index: i, Refs: routeTargets(x.Routes),
+		items[i] = loadItem{loadRef: ref, Path: "routeTableSet/item", Index: i, Refs: routeTableRefs(x),
 			write: ec2Write(env, ec2TagsFromXML(ref, x.TagSet),
 				func(tx *repository.LoadTx) error { return putRouteTable(tx, env, x) })}
 	}
 	return items, nil
 }
 
-// routeTargets are the rows routes target, each once. An internet
-// gateway must be loaded, unless its route is blackhole: AWS keeps the
-// route of a deleted gateway, which no recording can hold. Every other
-// target is named unresolved, as no loader loads it yet: a blackhole
-// route's gateway, a NAT gateway, instance or network interface, and any
-// other gatewayId (vgw-, vpce-, ...) as a "gateway". The local route's
-// "local" references nothing.
-func routeTargets(routes []ec2RouteXML) []loadReference {
+// routeTableRefs are the rows x's routes target and its edge
+// associations name, each once. An internet gateway must be loaded,
+// unless its route is blackhole: AWS keeps the route of a deleted
+// gateway, which no recording can hold. Every other one is named
+// unresolved, as no loader loads it yet: a blackhole route's gateway, a
+// NAT gateway, instance or network interface, and any other gatewayId
+// (vgw-, vpce-, ...) as a "gateway". The local route's "local"
+// references nothing.
+func routeTableRefs(x ec2RouteTableXML) []loadReference {
 	var refs []loadReference
 	add := func(typ, id string, unread bool) {
 		ref := loadReference{loadRef: loadRef{typ, id}, Unread: unread}
@@ -52,17 +53,23 @@ func routeTargets(routes []ec2RouteXML) []loadReference {
 			refs = append(refs, ref)
 		}
 	}
-	for _, r := range routes {
+	gateway := func(id string, blackhole bool) {
 		switch {
-		case r.GatewayId == "local":
-		case strings.HasPrefix(r.GatewayId, "igw-"):
-			add("internet-gateway", r.GatewayId, r.State == "blackhole")
+		case id == "local":
+		case strings.HasPrefix(id, "igw-"):
+			add("internet-gateway", id, blackhole)
 		default:
-			add("gateway", r.GatewayId, true)
+			add("gateway", id, true)
 		}
+	}
+	for _, r := range x.Routes {
+		gateway(r.GatewayId, r.State == "blackhole")
 		add("nat-gateway", r.NatGatewayId, true)
 		add("instance", r.InstanceId, true)
 		add("network-interface", r.NetworkInterfaceId, true)
+	}
+	for _, a := range x.Associations {
+		gateway(a.GatewayId, false)
 	}
 	return refs
 }
@@ -93,7 +100,7 @@ func putRouteTable(tx *repository.LoadTx, env *loadEnvelope, x ec2RouteTableXML)
 		}
 	}
 	for _, a := range x.Associations {
-		assoc := &repository.EC2RouteTableAssociation{ID: a.AssociationId, RouteTableID: rt.ID, SubnetID: a.SubnetId, Main: a.Main}
+		assoc := &repository.EC2RouteTableAssociation{ID: a.AssociationId, RouteTableID: rt.ID, SubnetID: a.SubnetId, GatewayID: a.GatewayId, Main: a.Main}
 		if a.AssociationState != nil {
 			assoc.State = a.AssociationState.State
 		}

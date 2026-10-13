@@ -153,7 +153,8 @@ CREATE TABLE ec2_route_table_associations (
 		id             TEXT NOT NULL,
 		route_table_id TEXT NOT NULL,
 		vpc_id         TEXT NOT NULL, -- the route table's, for the one-main index
-		subnet_id      TEXT,          -- NULL on a main association
+		subnet_id      TEXT,          -- NULL on a main or an edge association
+		gateway_id     TEXT,          -- an edge association's gateway, else NULL
 		main           INTEGER NOT NULL DEFAULT 0,
 		state          TEXT NOT NULL,
 		PRIMARY KEY (account_id, id),
