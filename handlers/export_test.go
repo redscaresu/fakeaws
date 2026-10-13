@@ -23,6 +23,22 @@ func EC2DeriveAutoIP(eniID string) string { return ec2DerivePublicIP(ec2AutoIPNe
 // instance references.
 var InstanceReadAttributes = ec2InstanceReadAttributes
 
+// For load_read_back_test.go, which re-sends each recorded exchange:
+// the request token a loader's later pages carry, the parse a load gives
+// a body, the error code of a NotFound, and the ends of the refusals
+// naming a path, which it reports.
+func LoadRequestToken(key LoadKey) string { return loaderFor(key).requestToken }
+
+var (
+	ParseLoadBody = parseLoadBody
+	LoadErrorCode = loadErrorCode
+)
+
+const (
+	LoadRecordedOnly = loadRecordedOnly
+	LoadRenderedOnly = loadRenderedOnly
+)
+
 // For recorder_test.go's test routes, which mark a class.
 var MarkClass = markClass
 

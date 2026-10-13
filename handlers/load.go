@@ -653,6 +653,13 @@ func (run *loadRun) agree(row *loadRow, ref loadReference, target *loadRow) erro
 	return nil
 }
 
+// The ends of diff's refusals, each naming the path: TestLoadReadBack
+// reports that path, and nothing else of a refusal.
+const (
+	loadRecordedOnly = "the model cannot hold recorded %s"
+	loadRenderedOnly = "fakeaws would answer %s, which the recording does not hold"
+)
+
 // diff renders row through its loader and refuses each path where the
 // rendering and the recorded subtree differ, naming row's type and id
 // and the path: one only the recording holds is a field the model cannot hold,
@@ -681,10 +688,10 @@ func (run *loadRun) diff(tx *repository.LoadTx, row *loadRow) error {
 	}
 	recordedOnly, renderedOnly := Diff(l.key, recorded, got)
 	for _, p := range recordedOnly {
-		run.refuse(row.exchange, "%s %s: the model cannot hold recorded %s", row.Type, row.ID, p)
+		run.refuse(row.exchange, "%s %s: "+loadRecordedOnly, row.Type, row.ID, p)
 	}
 	for _, p := range renderedOnly {
-		run.refuse(row.exchange, "%s %s: fakeaws would answer %s, which the recording does not hold", row.Type, row.ID, p)
+		run.refuse(row.exchange, "%s %s: "+loadRenderedOnly, row.Type, row.ID, p)
 	}
 	return nil
 }

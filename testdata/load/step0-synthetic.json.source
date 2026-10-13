@@ -1,0 +1,59 @@
+step0-synthetic.json is an ADR-0041 recorded read in the shape of the
+step-0 read: account 111122223333 in us-west-2, the region of the
+testdata/ec2 fixtures. Every body is a testdata fixture, its first-line
+source comment dropped, so its source is that fixture's (the AWS API
+reference); never fakeaws output.
+
+Exchanges, in the order infrafactory's reader sends them (internal/
+harness/aws_reader.go ReadAWSAccount: the read set, then readEC2, then
+readSSM):
+
+The read set (infrafactory internal/e2e/testdata/aws-step0/read-set.json):
+ 0 DescribeVpcs by tag-key infrafactory-run-id: testdata/ec2/DescribeVpcs.xml,
+   only its item vpc-0ee975135dEXAMPLE, with a tagSet added holding
+   infrafactory-run-id = step0-synthetic.
+ 1 DescribeAvailabilityZones, no params: testdata/ec2/DescribeAvailabilityZones.xml.
+ 2 DescribeSecurityGroups by tag-key infrafactory-run-id:
+   testdata/ec2/DescribeSecurityGroups.xml, with the same tagSet added to
+   its group.
+ 3 DescribeSecurityGroups by group-name infrafactory-absent and that
+   tag-key: testdata/ec2/DescribeSecurityGroups.xml with no item (the
+   absent-name lookup finds nothing).
+ 4 GetParameter of the al2023 parameter: testdata/ssm/GetParameter.json,
+   its ARN's region us-east-1 changed to us-west-2.
+
+readEC2VPC's follow-ups for the tagged VPC (infrafactory
+internal/harness/aws_reader_ec2.go:111-189), each filtered as it sends
+them:
+ 5 DescribeSubnets by vpc-id: testdata/ec2/DescribeSubnets.xml, the
+   second subnet's mapPublicIpOnLaunch false changed to true.
+ 6 DescribeSecurityGroups by vpc-id: the body of exchange 2.
+ 7 DescribeSecurityGroupRules by group-id: testdata/ec2/DescribeSecurityGroupRules.xml.
+ 8 DescribeRouteTables by vpc-id: testdata/ec2/DescribeRouteTables.xml.
+ 9 DescribeInternetGateways by attachment.vpc-id:
+   testdata/ec2/DescribeInternetGateways.xml, only its item attached to
+   the VPC (igw-0EXAMPLE).
+10 DescribeNetworkInterfaces by vpc-id:
+   testdata/ec2/DescribeNetworkInterfaces.xml's two items, then
+   testdata/ec2/DescribeNetworkInterfaces-instance.xml's item.
+11 DescribeAddresses by network-interface-id (those three interfaces):
+   testdata/ec2/DescribeAddresses.xml.
+12 DescribeInstances by vpc-id: testdata/ec2/DescribeInstances.xml, its
+   empty blockDeviceMapping holding the root volume of
+   testdata/ec2/DescribeVolumes.xml (/dev/xvda, attached at the
+   instance's launchTime, deleted on termination).
+13 DescribeKeyPairs by key-name my-key-pair: testdata/ec2/DescribeKeyPairs.xml.
+14 DescribeVolumes by attachment.instance-id: testdata/ec2/DescribeVolumes.xml.
+15-16 DescribeVpcAttribute enableDnsSupport, enableDnsHostnames:
+   testdata/ec2/DescribeVpcAttribute-<attribute>.xml.
+17-20 DescribeInstanceAttribute instanceInitiatedShutdownBehavior,
+   disableApiStop, disableApiTermination, userData:
+   testdata/ec2/DescribeInstanceAttribute-<attribute>.xml.
+
+readSSM's follow-up (prod-read-seam-reader-parameter-image):
+21 DescribeImages by ImageId.1, the parameter's value
+   ami-0abcdef1234567890: testdata/ec2/DescribeImages.xml, only that
+   image's item.
+
+The timestamp and duration_ms are illustrative; calls is the number of
+exchanges.

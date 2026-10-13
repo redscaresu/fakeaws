@@ -25,10 +25,15 @@ import (
 
 const al2023Parameter = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 
-// ssmDo POSTs one AmazonSSM.<op> call. It never touches t, so the
-// concurrent-put test can call it off the test goroutine.
+// ssmDo POSTs one AmazonSSM.<op> call in us-east-1, ssmDoIn in region.
+// Neither touches t, so the concurrent-put test can call it off the
+// test goroutine.
 func ssmDo(srv *httptest.Server, op, body string) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/ssm/region/us-east-1", strings.NewReader(body))
+	return ssmDoIn(srv, "us-east-1", op, body)
+}
+
+func ssmDoIn(srv *httptest.Server, region, op, body string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/ssm/region/"+region, strings.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
