@@ -1907,15 +1907,16 @@ type ec2UserIdGroupPairInfo struct {
 	UserId  string `xml:"userId,omitempty"`
 }
 
-// ec2SecurityGroupRuleToXML is r as a SecurityGroupRule item. A rule
-// of a protocol without ports (-1, ESP's 50, GRE's 47: any not in
-// ec2PortProtocols) answers fromPort and toPort -1 as AWS does,
-// whatever ports it was stored with: the provider's
-// aws_vpc_security_group_*_rule read keeps a null port only when it
-// reads -1. DescribeSecurityGroups' ipPermissions answer the stored
-// ports.
+// ec2SecurityGroupRuleToXML is r as a SecurityGroupRule item. An
+// all-traffic rule (ip protocol -1) answers fromPort and toPort -1 as
+// AWS does (testdata/ec2/DescribeSecurityGroupRules.xml), whatever ports
+// it was stored with: the provider's aws_vpc_security_group_*_rule read
+// keeps a null port only when it reads -1. Every other rule answers its
+// stored ports: the legacy aws_security_group_rule sends ports for any
+// protocol but -1 (protocol 50 with 0/0) and matches its rule on them.
+// DescribeSecurityGroups' ipPermissions answer the stored ports.
 func ec2SecurityGroupRuleToXML(r repository.EC2SecurityGroupRule) ec2SecurityGroupRuleXML {
-	if ec2PortProtocols[strings.ToLower(r.IPProtocol)] == nil {
+	if r.IPProtocol == ec2AllProtocols {
 		r.FromPort, r.ToPort = -1, -1
 	}
 	x := ec2SecurityGroupRuleXML{

@@ -1189,16 +1189,17 @@ func TestEC2_DescribeSecurityGroupRules(t *testing.T) {
 		assert.Equal(t, ids[1], one[0].ID, "%v", params)
 	}
 
-	// ESP (50) takes all ports: sent with none, it answers -1/-1 from
-	// Authorize and Describe, as an all-traffic rule does.
-	esp := sgPerm("50", "", "", "10.9.0.0/16")
+	// ESP (50) as the legacy aws_security_group_rule sends it, with
+	// ports 0/0, answers 0/0 from Authorize and Describe: the provider
+	// matches its rule on those ports. Only protocol -1 answers -1/-1.
+	esp := sgPerm("50", "0", "0", "10.9.0.0/16")
 	esp.Set("GroupId", sgID)
 	added := decodeRuleSet(t, mustOK(t)(ec2Call(t, srv, region, "AuthorizeSecurityGroupIngress", esp))).Rules
 	require.Len(t, added, 1)
-	assert.Equal(t, [2]int{-1, -1}, [2]int{added[0].FromPort, added[0].ToPort}, "Authorize: protocol 50 ports")
+	assert.Equal(t, [2]int{0, 0}, [2]int{added[0].FromPort, added[0].ToPort}, "Authorize: protocol 50 ports")
 	_, one := describeRules(t, srv, region, url.Values{"SecurityGroupRuleId.1": {added[0].ID}})
 	require.Len(t, one, 1)
-	assert.Equal(t, [2]int{-1, -1}, [2]int{one[0].FromPort, one[0].ToPort}, "Describe: protocol 50 ports")
+	assert.Equal(t, [2]int{0, 0}, [2]int{one[0].FromPort, one[0].ToPort}, "Describe: protocol 50 ports")
 }
 
 // TestEC2_SecurityGroupRuleTags: CreateTags takes an sgr- id, the
