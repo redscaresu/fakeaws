@@ -78,8 +78,9 @@ type Cache interface {
 // old shape. An added table needs no bump; it is appended to the golden.
 // Nor does a new data-JSON key, unless an old row read without it
 // answers wrongly: 4 adds the VPC DNS attributes, which an older row
-// would answer false.
-const dbSchemaVersion = 4
+// would answer false. 5 lets a route table association be main, with
+// no subnet, and gives routes their origin and state.
+const dbSchemaVersion = 5
 
 // New opens the SQLite database at dbPath, refuses it with
 // models.ErrConflict unless it is new or at dbSchemaVersion, applies

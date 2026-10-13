@@ -1937,6 +1937,7 @@ func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 		"by association": {ec2FilterParams("association.route-table-association-id", assoc), rts[:1]},
 		"by vpc":         {ec2FilterParams("vpc-id", vpcs[1]), rts[1:]},
 		"main of a vpc":  {ec2FilterParams("association.main", "true", "vpc-id", vpcs[0]), nil},
+		"not main":       {ec2FilterParams("association.main", "false"), rts[:1]},
 	} {
 		resp, body := ec2Call(t, srv, tagRegion, "DescribeRouteTables", tc.params)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", name, body)

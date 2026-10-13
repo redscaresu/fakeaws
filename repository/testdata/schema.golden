@@ -1,4 +1,8 @@
-dbSchemaVersion 4
+dbSchemaVersion 5
+
+=== index ec2_route_table_associations_one_main
+CREATE UNIQUE INDEX ec2_route_table_associations_one_main
+		ON ec2_route_table_associations (account_id, vpc_id) WHERE main = 1
 
 === table audit
 CREATE TABLE audit (
@@ -148,7 +152,10 @@ CREATE TABLE ec2_route_table_associations (
 		account_id     TEXT NOT NULL,
 		id             TEXT NOT NULL,
 		route_table_id TEXT NOT NULL,
-		subnet_id      TEXT NOT NULL,
+		vpc_id         TEXT NOT NULL, -- the route table's, for the one-main index
+		subnet_id      TEXT,          -- NULL on a main association
+		main           INTEGER NOT NULL DEFAULT 0,
+		state          TEXT NOT NULL,
 		PRIMARY KEY (account_id, id),
 		FOREIGN KEY (account_id, route_table_id) REFERENCES ec2_route_tables(account_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (account_id, subnet_id)      REFERENCES ec2_subnets(account_id, id)      ON DELETE CASCADE,
@@ -177,6 +184,8 @@ CREATE TABLE ec2_routes (
 		nat_gateway_id          TEXT,
 		instance_id             TEXT,
 		network_interface_id    TEXT,
+		origin                  TEXT NOT NULL,
+		state                   TEXT NOT NULL,
 		PRIMARY KEY (account_id, route_table_id, destination_cidr_block),
 		FOREIGN KEY (account_id, route_table_id) REFERENCES ec2_route_tables(account_id, id) ON DELETE CASCADE
 	)

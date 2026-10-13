@@ -89,12 +89,17 @@ var ec2NetworkMigrations = []string{
 		account_id     TEXT NOT NULL,
 		id             TEXT NOT NULL,
 		route_table_id TEXT NOT NULL,
-		subnet_id      TEXT NOT NULL,
+		vpc_id         TEXT NOT NULL, -- the route table's, for the one-main index
+		subnet_id      TEXT,          -- NULL on a main association
+		main           INTEGER NOT NULL DEFAULT 0,
+		state          TEXT NOT NULL,
 		PRIMARY KEY (account_id, id),
 		FOREIGN KEY (account_id, route_table_id) REFERENCES ec2_route_tables(account_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (account_id, subnet_id)      REFERENCES ec2_subnets(account_id, id)      ON DELETE CASCADE,
 		UNIQUE (account_id, subnet_id) -- one association per subnet (real EC2 contract)
 	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS ec2_route_table_associations_one_main
+		ON ec2_route_table_associations (account_id, vpc_id) WHERE main = 1`,
 	`CREATE TABLE IF NOT EXISTS ec2_routes (
 		account_id              TEXT NOT NULL,
 		route_table_id          TEXT NOT NULL,
@@ -103,6 +108,8 @@ var ec2NetworkMigrations = []string{
 		nat_gateway_id          TEXT,
 		instance_id             TEXT,
 		network_interface_id    TEXT,
+		origin                  TEXT NOT NULL,
+		state                   TEXT NOT NULL,
 		PRIMARY KEY (account_id, route_table_id, destination_cidr_block),
 		FOREIGN KEY (account_id, route_table_id) REFERENCES ec2_route_tables(account_id, id) ON DELETE CASCADE
 	)`,
@@ -255,14 +262,23 @@ type EC2RouteTable struct {
 	Region    string `json:"region"`
 	ARN       string `json:"arn"`
 	CreatedAt string `json:"created_at"`
+	OwnerID   string `json:"owner_id"`
 }
 
+// EC2RouteTableAssociation links a route table to a subnet, or, when
+// Main, to its VPC: a main association has no subnet. State is the
+// associationState's state, "" for an answer that holds none.
 type EC2RouteTableAssociation struct {
 	ID           string `json:"association_id"`
 	RouteTableID string `json:"route_table_id"`
 	SubnetID     string `json:"subnet_id"`
+	Main         bool   `json:"main"`
+	State        string `json:"state"`
 }
 
+// EC2Route is one route. Origin is how it was made (CreateRouteTable
+// for a table's local route, CreateRoute) and State active or
+// blackhole.
 type EC2Route struct {
 	RouteTableID         string `json:"route_table_id"`
 	DestinationCidrBlock string `json:"destination_cidr_block"`
@@ -270,6 +286,8 @@ type EC2Route struct {
 	NatGatewayID         string `json:"nat_gateway_id,omitempty"`
 	InstanceID           string `json:"instance_id,omitempty"`
 	NetworkInterfaceID   string `json:"network_interface_id,omitempty"`
+	Origin               string `json:"origin"`
+	State                string `json:"state"`
 }
 
 type EC2SecurityGroup struct {
@@ -812,12 +830,16 @@ func (r *Repository) CreateRouteTable(account string, rt *EC2RouteTable) error {
 	if _, err := r.GetVPC(account, rt.Region, rt.VPCID); err != nil {
 		return err
 	}
+	return mapInsertError(insertRouteTable(r.db, account, rt))
+}
+
+func insertRouteTable(ex execer, account string, rt *EC2RouteTable) error {
 	body, _ := json.Marshal(rt)
-	_, err := r.db.Exec(
+	_, err := ex.Exec(
 		`INSERT INTO ec2_route_tables (account_id, region, id, vpc_id, arn, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		account, rt.Region, rt.ID, rt.VPCID, rt.ARN, string(body), rt.CreatedAt,
 	)
-	return mapInsertError(err)
+	return err
 }
 
 // GetRouteTable looks up a route table by id, optionally scoped to a
@@ -864,32 +886,47 @@ func (r *Repository) DeleteRouteTable(account, region, id string) error {
 // AssociateRouteTable links a route table to a subnet. Both must
 // exist in the request's region (Codex pass 7 BLOCKING #1).
 func (r *Repository) AssociateRouteTable(account, region string, assoc *EC2RouteTableAssociation) error {
-	if _, err := r.GetRouteTable(account, region, assoc.RouteTableID); err != nil {
+	rt, err := r.GetRouteTable(account, region, assoc.RouteTableID)
+	if err != nil {
 		return err
 	}
 	if _, err := r.GetSubnet(account, region, assoc.SubnetID); err != nil {
 		return err
 	}
-	_, err := r.db.Exec(
-		`INSERT INTO ec2_route_table_associations (account_id, id, route_table_id, subnet_id) VALUES (?, ?, ?, ?)`,
-		account, assoc.ID, assoc.RouteTableID, assoc.SubnetID,
-	)
-	return mapInsertError(err)
+	return mapInsertError(insertAssociation(r.db, account, rt.VPCID, assoc))
 }
 
-func (r *Repository) DisassociateRouteTable(account, associationID string) error {
-	res, err := r.db.Exec(
-		`DELETE FROM ec2_route_table_associations WHERE account_id = ? AND id = ?`,
-		account, associationID,
+// insertAssociation stores a under account, in route table vpcID's VPC,
+// its subnet_id NULL when it has none (a main association).
+func insertAssociation(ex execer, account, vpcID string, a *EC2RouteTableAssociation) error {
+	_, err := ex.Exec(
+		`INSERT INTO ec2_route_table_associations (account_id, id, route_table_id, vpc_id, subnet_id, main, state) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		account, a.ID, a.RouteTableID, vpcID, nullIfEmpty(a.SubnetID), a.Main, a.State,
 	)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	return err
+}
+
+// ErrMainAssociation refuses disassociating a VPC's main association:
+// AWS moves it with ReplaceRouteTableAssociation, never drops it.
+var ErrMainAssociation = errors.New("cannot disassociate the main route table association")
+
+// DisassociateRouteTable deletes association associationID, answering
+// models.ErrNotFound when there is none and ErrMainAssociation, deleting
+// nothing, when it is a main association.
+func (r *Repository) DisassociateRouteTable(account, associationID string) error {
+	var main bool
+	err := r.db.QueryRow(`SELECT main FROM ec2_route_table_associations WHERE account_id = ? AND id = ?`,
+		account, associationID).Scan(&main)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
 		return models.ErrNotFound
+	case err != nil:
+		return err
+	case main:
+		return ErrMainAssociation
 	}
-	return nil
+	_, err = r.db.Exec(`DELETE FROM ec2_route_table_associations WHERE account_id = ? AND id = ?`, account, associationID)
+	return err
 }
 
 // CreateRoute inserts a route into the parent route table; the
@@ -899,13 +936,17 @@ func (r *Repository) CreateRoute(account, region string, rt *EC2Route) error {
 	if _, err := r.GetRouteTable(account, region, rt.RouteTableID); err != nil {
 		return err
 	}
-	_, err := r.db.Exec(
-		`INSERT INTO ec2_routes (account_id, route_table_id, destination_cidr_block, gateway_id, nat_gateway_id, instance_id, network_interface_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	return mapInsertError(insertRoute(r.db, account, rt))
+}
+
+func insertRoute(ex execer, account string, rt *EC2Route) error {
+	_, err := ex.Exec(
+		`INSERT INTO ec2_routes (account_id, route_table_id, destination_cidr_block, gateway_id, nat_gateway_id, instance_id, network_interface_id, origin, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		account, rt.RouteTableID, rt.DestinationCidrBlock,
 		nullIfEmpty(rt.GatewayID), nullIfEmpty(rt.NatGatewayID),
-		nullIfEmpty(rt.InstanceID), nullIfEmpty(rt.NetworkInterfaceID),
+		nullIfEmpty(rt.InstanceID), nullIfEmpty(rt.NetworkInterfaceID), rt.Origin, rt.State,
 	)
-	return mapInsertError(err)
+	return err
 }
 
 // DeleteRoute removes a single route from a route table. The route
@@ -1271,9 +1312,7 @@ func (r *Repository) ListRouteTables(account, region string) ([]*EC2RouteTable, 
 // Account-wide; routes are not region-scoped at this layer (the parent
 // route_table is, and the FK propagates).
 func (r *Repository) ListRoutes(account string) ([]*EC2Route, error) {
-	rows, err := r.db.Query(
-		`SELECT route_table_id, destination_cidr_block, gateway_id, nat_gateway_id, instance_id, network_interface_id
-		   FROM ec2_routes WHERE account_id = ?
+	rows, err := r.db.Query(`SELECT `+routeColumns+` FROM ec2_routes WHERE account_id = ?
 		   ORDER BY route_table_id, destination_cidr_block`,
 		account,
 	)
@@ -1283,25 +1322,33 @@ func (r *Repository) ListRoutes(account string) ([]*EC2Route, error) {
 	defer rows.Close()
 	var out []*EC2Route
 	for rows.Next() {
-		var rt EC2Route
-		var gw, nat, inst, eni sql.NullString
-		if err := rows.Scan(&rt.RouteTableID, &rt.DestinationCidrBlock, &gw, &nat, &inst, &eni); err != nil {
+		rt, err := scanRoute(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
-		rt.GatewayID = gw.String
-		rt.NatGatewayID = nat.String
-		rt.InstanceID = inst.String
-		rt.NetworkInterfaceID = eni.String
-		out = append(out, &rt)
+		out = append(out, rt)
 	}
 	return out, rows.Err()
+}
+
+// routeColumns are the ec2_routes columns scanRoute reads, in order.
+const routeColumns = `route_table_id, destination_cidr_block, gateway_id, nat_gateway_id, instance_id, network_interface_id, origin, state`
+
+// scanRoute reads one routeColumns row through scan.
+func scanRoute(scan func(dest ...any) error) (*EC2Route, error) {
+	var rt EC2Route
+	var gw, nat, inst, eni sql.NullString
+	if err := scan(&rt.RouteTableID, &rt.DestinationCidrBlock, &gw, &nat, &inst, &eni, &rt.Origin, &rt.State); err != nil {
+		return nil, err
+	}
+	rt.GatewayID, rt.NatGatewayID, rt.InstanceID, rt.NetworkInterfaceID = gw.String, nat.String, inst.String, eni.String
+	return &rt, nil
 }
 
 // ListRouteTableAssociations returns every route-table association for
 // the account. Used by /mock/state (Codex pass 10 BLOCKING #2 fix).
 func (r *Repository) ListRouteTableAssociations(account string) ([]*EC2RouteTableAssociation, error) {
-	rows, err := r.db.Query(
-		`SELECT id, route_table_id, subnet_id FROM ec2_route_table_associations
+	rows, err := r.db.Query(`SELECT `+associationColumns+` FROM ec2_route_table_associations
 		   WHERE account_id = ? ORDER BY id`,
 		account,
 	)
@@ -1311,13 +1358,29 @@ func (r *Repository) ListRouteTableAssociations(account string) ([]*EC2RouteTabl
 	defer rows.Close()
 	var out []*EC2RouteTableAssociation
 	for rows.Next() {
-		var a EC2RouteTableAssociation
-		if err := rows.Scan(&a.ID, &a.RouteTableID, &a.SubnetID); err != nil {
+		a, err := scanAssociation(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, &a)
+		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// associationColumns are the ec2_route_table_associations columns
+// scanAssociation reads, in order.
+const associationColumns = `id, route_table_id, subnet_id, main, state`
+
+// scanAssociation reads one associationColumns row through scan, a
+// NULL subnet_id (a main association's) as "".
+func scanAssociation(scan func(dest ...any) error) (*EC2RouteTableAssociation, error) {
+	var a EC2RouteTableAssociation
+	var subnet sql.NullString
+	if err := scan(&a.ID, &a.RouteTableID, &subnet, &a.Main, &a.State); err != nil {
+		return nil, err
+	}
+	a.SubnetID = subnet.String
+	return &a, nil
 }
 
 // ListEIPs returns every EIP for the account, optionally scoped to a

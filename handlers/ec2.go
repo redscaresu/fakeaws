@@ -1045,16 +1045,30 @@ type ec2RouteTableXML struct {
 	TagSet       []ec2ResourceTagXML           `xml:"tagSet>item,omitempty"`
 }
 
+// ec2RouteTableAssociationXML is an associationSet item: a subnet's
+// association, or a main one, which has no subnetId.
 type ec2RouteTableAssociationXML struct {
 	AssociationId string `xml:"routeTableAssociationId"`
 	RouteTableId  string `xml:"routeTableId"`
-	SubnetId      string `xml:"subnetId"`
+	SubnetId      string `xml:"subnetId,omitempty"`
+	Main          bool   `xml:"main"`
 	// AssociationState is the structured indicator the provider uses
-	// to decide whether the association is ready. "associated" is the
-	// terminal state; nothing else exists in our model.
-	AssociationState struct {
-		State string `xml:"state"`
-	} `xml:"associationState"`
+	// to decide whether the association is ready. AssociateRouteTable
+	// stores "associated", the terminal state; a loaded association
+	// answers its recorded state, or none when the recording held none.
+	AssociationState *ec2AssociationStateXML `xml:"associationState"`
+}
+
+type ec2AssociationStateXML struct {
+	State string `xml:"state"`
+}
+
+func ec2AssociationToXML(a *repository.EC2RouteTableAssociation) ec2RouteTableAssociationXML {
+	x := ec2RouteTableAssociationXML{AssociationId: a.ID, RouteTableId: a.RouteTableID, SubnetId: a.SubnetID, Main: a.Main}
+	if a.State != "" {
+		x.AssociationState = &ec2AssociationStateXML{State: a.State}
+	}
+	return x
 }
 
 type ec2CreateRouteTableResult struct {
@@ -1064,9 +1078,10 @@ type ec2CreateRouteTableResult struct {
 // ec2RouteXML mirrors the per-route entry under <routeSet><item>. The
 // provider's CreateRoute wait-loop polls DescribeRouteTables and looks
 // for its destination CIDR in this set; without it, the wait times
-// out after 5 minutes per iteration. Real EC2 also includes a State
-// field ("active" once the route is installed) — we always emit
-// "active" because there's no async install step in the mock.
+// out after 5 minutes per iteration. CreateRoute stores State "active"
+// (there's no async install step in the mock) and Origin
+// "CreateRoute"; a loaded route answers its recorded ones, a table's
+// local route origin CreateRouteTable.
 type ec2RouteXML struct {
 	DestinationCidrBlock string `xml:"destinationCidrBlock"`
 	GatewayId            string `xml:"gatewayId,omitempty"`
@@ -1075,6 +1090,13 @@ type ec2RouteXML struct {
 	NetworkInterfaceId   string `xml:"networkInterfaceId,omitempty"`
 	State                string `xml:"state"`
 	Origin               string `xml:"origin"`
+}
+
+func ec2RouteToXML(r *repository.EC2Route) ec2RouteXML {
+	return ec2RouteXML{
+		DestinationCidrBlock: r.DestinationCidrBlock, GatewayId: r.GatewayID, NatGatewayId: r.NatGatewayID,
+		InstanceId: r.InstanceID, NetworkInterfaceId: r.NetworkInterfaceID, State: r.State, Origin: r.Origin,
+	}
 }
 
 type ec2AssociateRouteTableResult struct {
@@ -1098,7 +1120,7 @@ func (app *Application) ec2CreateRouteTable(w http.ResponseWriter, account, regi
 	}
 	id := "rtb-" + ec2RandID()
 	rt := &repository.EC2RouteTable{
-		ID: id, VPCID: vpcID, Region: region,
+		ID: id, VPCID: vpcID, Region: region, OwnerID: account,
 		ARN:       awsproto.BuildEC2RouteTableARN(region, account, id),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -1135,8 +1157,8 @@ type ec2DescribeRouteTablesResult struct {
 
 // rtFilterValues are the DescribeRouteTables filters fakeaws models:
 // the ones the provider's lookups by VPC, by association id and
-// data.aws_route_table send. fakeaws models no main route table, so
-// every association is main=false.
+// data.aws_route_table send. CreateVpc makes no main route table, so
+// only a loaded one answers association.main=true.
 var rtFilterValues = map[string]func(rt ec2RouteTableXML) []string{
 	"route-table-id": func(rt ec2RouteTableXML) []string { return []string{rt.RouteTableId} },
 	"vpc-id":         func(rt ec2RouteTableXML) []string { return []string{rt.VpcId} },
@@ -1155,10 +1177,11 @@ var rtFilterValues = map[string]func(rt ec2RouteTableXML) []string{
 		return ids
 	},
 	"association.main": func(rt ec2RouteTableXML) []string {
-		if len(rt.Associations) == 0 {
-			return nil
+		var mains []string
+		for _, a := range rt.Associations {
+			mains = append(mains, strconv.FormatBool(a.Main))
 		}
-		return []string{"false"}
+		return mains
 	},
 }
 
@@ -1183,15 +1206,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 	}
 	routesByRT := make(map[string][]ec2RouteXML, len(allRoutes))
 	for _, rt := range allRoutes {
-		routesByRT[rt.RouteTableID] = append(routesByRT[rt.RouteTableID], ec2RouteXML{
-			DestinationCidrBlock: rt.DestinationCidrBlock,
-			GatewayId:            rt.GatewayID,
-			NatGatewayId:         rt.NatGatewayID,
-			InstanceId:           rt.InstanceID,
-			NetworkInterfaceId:   rt.NetworkInterfaceID,
-			State:                "active",
-			Origin:               "CreateRoute",
-		})
+		routesByRT[rt.RouteTableID] = append(routesByRT[rt.RouteTableID], ec2RouteToXML(rt))
 	}
 	// Same trick for associations — populate <associationSet> so the
 	// CreateAssociation wait-loop terminates.
@@ -1202,11 +1217,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 	}
 	assocsByRT := make(map[string][]ec2RouteTableAssociationXML, len(allAssocs))
 	for _, a := range allAssocs {
-		x := ec2RouteTableAssociationXML{
-			AssociationId: a.ID, RouteTableId: a.RouteTableID, SubnetId: a.SubnetID,
-		}
-		x.AssociationState.State = "associated"
-		assocsByRT[a.RouteTableID] = append(assocsByRT[a.RouteTableID], x)
+		assocsByRT[a.RouteTableID] = append(assocsByRT[a.RouteTableID], ec2AssociationToXML(a))
 	}
 	tags, ok := app.tagSets(w, account)
 	if !ok {
@@ -1221,7 +1232,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 		}
 		for _, rt := range rts {
 			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableXML{
-				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: account,
+				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: rt.OwnerID,
 				Routes:       routesByRT[rt.ID],
 				Associations: assocsByRT[rt.ID],
 				TagSet:       tags[rt.ID],
@@ -1244,7 +1255,7 @@ func (app *Application) ec2DescribeRouteTables(w http.ResponseWriter, account, r
 				return
 			}
 			out.RouteTableSet = append(out.RouteTableSet, ec2RouteTableXML{
-				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: account,
+				RouteTableId: rt.ID, VpcId: rt.VPCID, OwnerId: rt.OwnerID,
 				Routes:       routesByRT[rt.ID],
 				Associations: assocsByRT[rt.ID],
 				TagSet:       tags[rt.ID],
@@ -1273,7 +1284,7 @@ func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account, r
 		return
 	}
 	assoc := &repository.EC2RouteTableAssociation{
-		ID: "rtbassoc-" + ec2RandID(), RouteTableID: rtID, SubnetID: subnetID,
+		ID: "rtbassoc-" + ec2RandID(), RouteTableID: rtID, SubnetID: subnetID, State: "associated",
 	}
 	if err := app.repo.AssociateRouteTable(account, region, assoc); err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
@@ -1283,8 +1294,20 @@ func (app *Application) ec2AssociateRouteTable(w http.ResponseWriter, account, r
 		&ec2AssociateRouteTableResult{AssociationId: assoc.ID})
 }
 
+// ec2DisassociateRouteTable refuses a main association with 400
+// InvalidParameterValue and keeps it: AWS moves a VPC's main
+// association (ReplaceRouteTableAssociation), never drops it.
+//
+// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func (app *Application) ec2DisassociateRouteTable(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DisassociateRouteTable(account, req.Params.Get("AssociationId")); err != nil {
+	id := req.Params.Get("AssociationId")
+	err := app.repo.DisassociateRouteTable(account, id)
+	if errors.Is(err, repository.ErrMainAssociation) {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue",
+			fmt.Sprintf("cannot disassociate the main route table association %s", id))
+		return
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}
@@ -1299,6 +1322,8 @@ func (app *Application) ec2CreateRoute(w http.ResponseWriter, account, region st
 		NatGatewayID:         req.Params.Get("NatGatewayId"),
 		InstanceID:           req.Params.Get("InstanceId"),
 		NetworkInterfaceID:   req.Params.Get("NetworkInterfaceId"),
+		Origin:               "CreateRoute",
+		State:                "active",
 	}
 	if rt.RouteTableID == "" || rt.DestinationCidrBlock == "" {
 		ec2Refuse(w, req.Action, "no RouteTableId or DestinationCidrBlock") // AWS also takes DestinationIpv6CidrBlock or DestinationPrefixListId
