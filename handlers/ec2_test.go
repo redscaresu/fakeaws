@@ -1937,6 +1937,7 @@ func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 		"by association": {ec2FilterParams("association.route-table-association-id", assoc), rts[:1]},
 		"by vpc":         {ec2FilterParams("vpc-id", vpcs[1]), rts[1:]},
 		"main of a vpc":  {ec2FilterParams("association.main", "true", "vpc-id", vpcs[0]), nil},
+		"not main":       {ec2FilterParams("association.main", "false"), rts[:1]},
 	} {
 		resp, body := ec2Call(t, srv, tagRegion, "DescribeRouteTables", tc.params)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", name, body)
@@ -1947,6 +1948,22 @@ func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 
 	resp, _ := ec2Call(t, srv, tagRegion, "DescribeRouteTables", ec2FilterParams("route.gateway-id", "igw-1"))
 	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "an unmodelled filter is refused, not ignored")
+}
+
+// TestEC2_CreatedRouteAnswersOriginAndState: a route CreateRoute adds
+// answers in its table's routeSet with origin CreateRoute and state
+// active, through the encoder the loader renders with too.
+func TestEC2_CreatedRouteAnswersOriginAndState(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	rt := createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {tagVPC(t, srv)}})
+	createOK(t, srv, "CreateRoute", "return", url.Values{"RouteTableId": {rt}, "DestinationCidrBlock": {"0.0.0.0/0"}, "GatewayId": {"igw-1"}})
+
+	body := mustOK(t)(ec2Call(t, srv, tagRegion, "DescribeRouteTables", url.Values{"RouteTableId.1": {rt}}))
+	route := []byte(extractEC2Tag(body, "routeSet"))
+	assert.Equal(t, "0.0.0.0/0", extractEC2Tag(route, "destinationCidrBlock"), "%s", body)
+	assert.Equal(t, "igw-1", extractEC2Tag(route, "gatewayId"))
+	assert.Equal(t, "CreateRoute", extractEC2Tag(route, "origin"))
+	assert.Equal(t, "active", extractEC2Tag(route, "state"))
 }
 
 // ec2DescribeArms are the Describe names in handleEC2's case arms,

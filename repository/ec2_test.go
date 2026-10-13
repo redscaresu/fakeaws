@@ -125,6 +125,30 @@ func TestRouteTableAssociationOnePerSubnet(t *testing.T) {
 	}
 }
 
+// TestMainRouteTableAssociation: a main association has no subnet, its
+// VPC holds one at most (the partial unique index), DisassociateRouteTable
+// refuses it and keeps it, and DeleteSubnet leaves it.
+func TestMainRouteTableAssociation(t *testing.T) {
+	r := setupRepo(t)
+	require.NoError(t, createVPC(r, &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
+	require.NoError(t, r.CreateSubnet(testAccount, &EC2Subnet{ID: "subnet-1", VPCID: "vpc-1", CidrBlock: "10.0.1.0/24", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
+	for _, id := range []string{"rtb-1", "rtb-2"} {
+		require.NoError(t, r.CreateRouteTable(testAccount, &EC2RouteTable{ID: id, VPCID: "vpc-1", Region: testRegion, ARN: "arn", CreatedAt: "t"}))
+	}
+	require.NoError(t, insertAssociation(r.db, testAccount, "vpc-1", &EC2RouteTableAssociation{ID: "rtbassoc-main", RouteTableID: "rtb-1", Main: true}))
+	require.NoError(t, r.AssociateRouteTable(testAccount, testRegion, &EC2RouteTableAssociation{ID: "rtbassoc-1", RouteTableID: "rtb-2", SubnetID: "subnet-1", State: "associated"}))
+
+	err := mapInsertError(insertAssociation(r.db, testAccount, "vpc-1", &EC2RouteTableAssociation{ID: "rtbassoc-main2", RouteTableID: "rtb-2", Main: true}))
+	assert.ErrorIs(t, err, models.ErrConflict, "a second main association of one VPC")
+	assert.ErrorIs(t, r.DisassociateRouteTable(testAccount, "rtbassoc-main"), ErrMainAssociation)
+	require.NoError(t, r.DeleteSubnet(testAccount, testRegion, "subnet-1"))
+
+	assocs, err := r.ListRouteTableAssociations(testAccount)
+	require.NoError(t, err)
+	assert.Equal(t, []*EC2RouteTableAssociation{{ID: "rtbassoc-main", RouteTableID: "rtb-1", Main: true}}, assocs)
+	assert.ErrorIs(t, r.DisassociateRouteTable(testAccount, "rtbassoc-1"), models.ErrNotFound, "DeleteSubnet dropped it")
+}
+
 func TestSecurityGroupCRUDPlusRules(t *testing.T) {
 	r := setupRepo(t)
 	v := &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}

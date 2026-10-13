@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/redscaresu/fakeaws/models"
 )
@@ -18,20 +19,64 @@ func (lt *LoadTx) PutVPC(account string, v *EC2VPC) error { return insertVPC(lt,
 // PutSubnet stores s under account, or answers models.ErrNotFound when
 // its VPC is not stored, which the subnet's foreign key would refuse.
 func (lt *LoadTx) PutSubnet(account string, s *EC2Subnet) error {
-	var one int
-	err := lt.QueryRow(`SELECT 1 FROM ec2_vpcs WHERE account_id = ? AND id = ?`, account, s.VPCID).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return models.ErrNotFound
-	}
-	if err != nil {
+	if err := lt.exists(`SELECT 1 FROM ec2_vpcs WHERE account_id = ? AND id = ?`, account, s.VPCID); err != nil {
 		return err
 	}
 	return insertSubnet(lt, account, s)
 }
 
+// exists answers nil when query selects a row, else models.ErrNotFound
+// or the query's failure.
+func (lt *LoadTx) exists(query string, args ...any) error {
+	var one int
+	err := lt.QueryRow(query, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return models.ErrNotFound
+	}
+	return err
+}
+
 // PutInternetGateway stores igw under account.
 func (lt *LoadTx) PutInternetGateway(account string, igw *EC2InternetGateway) error {
 	return insertInternetGateway(lt, account, igw)
+}
+
+// PutRouteTable stores rt under account, or answers models.ErrNotFound
+// when its VPC is not stored, which its foreign key would refuse.
+func (lt *LoadTx) PutRouteTable(account string, rt *EC2RouteTable) error {
+	if err := lt.exists(`SELECT 1 FROM ec2_vpcs WHERE account_id = ? AND id = ?`, account, rt.VPCID); err != nil {
+		return err
+	}
+	return insertRouteTable(lt, account, rt)
+}
+
+// PutRoute stores r under account; its route table must be stored.
+func (lt *LoadTx) PutRoute(account string, r *EC2Route) error { return insertRoute(lt, account, r) }
+
+// ErrSecondMain refuses a main association of a VPC that has one.
+var ErrSecondMain = fmt.Errorf("%w: the VPC already has a main route table association", models.ErrConflict)
+
+// PutRouteTableAssociation stores a under account, in route table
+// vpcID's VPC, whose row must be stored. It answers models.ErrNotFound
+// when a's subnet is not stored, and ErrSecondMain when a is main and
+// the VPC has a main association, which the subnet's foreign key and
+// the one-main index would refuse.
+func (lt *LoadTx) PutRouteTableAssociation(account, vpcID string, a *EC2RouteTableAssociation) error {
+	if a.SubnetID != "" {
+		if err := lt.exists(`SELECT 1 FROM ec2_subnets WHERE account_id = ? AND id = ?`, account, a.SubnetID); err != nil {
+			return err
+		}
+	}
+	if a.Main {
+		err := lt.exists(`SELECT 1 FROM ec2_route_table_associations WHERE account_id = ? AND vpc_id = ? AND main = 1`, account, vpcID)
+		switch {
+		case err == nil:
+			return ErrSecondMain
+		case !errors.Is(err, models.ErrNotFound):
+			return err
+		}
+	}
+	return insertAssociation(lt, account, vpcID, a)
 }
 
 // PutAvailabilityZone stores z under account.
@@ -93,6 +138,49 @@ func (lt *LoadTx) InternetGateway(id string) (*EC2InternetGateway, error) {
 	}
 	igw.VPCID = vpcID.String
 	return &igw, nil
+}
+
+// RouteTable reads the stored route table id.
+func (lt *LoadTx) RouteTable(id string) (*EC2RouteTable, error) {
+	var rt EC2RouteTable
+	if err := lt.data(&rt, `SELECT data FROM ec2_route_tables WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	return &rt, nil
+}
+
+// Routes reads the stored routes of route table id, as ListRoutes
+// orders them.
+func (lt *LoadTx) Routes(id string) ([]*EC2Route, error) {
+	var out []*EC2Route
+	for scan, err := range lt.Query(`SELECT `+routeColumns+` FROM ec2_routes WHERE route_table_id = ? ORDER BY destination_cidr_block`, id) {
+		if err != nil {
+			return nil, err
+		}
+		r, err := scanRoute(scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// RouteTableAssociations reads the stored associations of route table
+// id, as ListRouteTableAssociations orders them.
+func (lt *LoadTx) RouteTableAssociations(id string) ([]*EC2RouteTableAssociation, error) {
+	var out []*EC2RouteTableAssociation
+	for scan, err := range lt.Query(`SELECT `+associationColumns+` FROM ec2_route_table_associations WHERE route_table_id = ? ORDER BY id`, id) {
+		if err != nil {
+			return nil, err
+		}
+		a, err := scanAssociation(scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 // AvailabilityZone reads the stored zone named name.
