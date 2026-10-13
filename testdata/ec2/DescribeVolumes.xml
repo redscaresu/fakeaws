@@ -1,0 +1,36 @@
+<!-- Source: AWS EC2 API reference, DescribeVolumes, Example 1 (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeVolumes.html), with edits so the volume is the root volume of DescribeInstances.xml's instance: availabilityZone us-east-1a is that instance's us-west-2c; instanceId is i-1234567890abcdef0 and device /dev/sdh its rootDeviceName /dev/xvda; size 80 is 8; the createTime and attachTime placeholders are its launchTime 2018-05-08T16:46:19.000Z; deleteOnTermination false is true, as a root volume's default; the empty snapshotId is snap-0abc1234567890def, the volume type standard is gp3, and multiAttachEnabled stays false. Added, as the Volume data type's members of those names (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_Volume.html), which the example lacks: iops and throughput (gp3's baselines, 3000 and 125), kmsKeyId (the KMS reference's example key ARN, https://docs.aws.amazon.com/kms/latest/developerguide/concepts.html#key-id-key-ARN, in us-west-2 under 111122223333) and a tagSet. -->
+<DescribeVolumesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
+   <volumeSet>
+      <item>
+         <volumeId>vol-1234567890abcdef0</volumeId>
+         <size>8</size>
+         <snapshotId>snap-0abc1234567890def</snapshotId>
+         <availabilityZone>us-west-2c</availabilityZone>
+         <status>in-use</status>
+         <createTime>2018-05-08T16:46:19.000Z</createTime>
+         <attachmentSet>
+            <item>
+               <volumeId>vol-1234567890abcdef0</volumeId>
+               <instanceId>i-1234567890abcdef0</instanceId>
+               <device>/dev/xvda</device>
+               <status>attached</status>
+               <attachTime>2018-05-08T16:46:19.000Z</attachTime>
+               <deleteOnTermination>true</deleteOnTermination>
+            </item>
+         </attachmentSet>
+         <volumeType>gp3</volumeType>
+         <iops>3000</iops>
+         <throughput>125</throughput>
+         <encrypted>true</encrypted>
+         <kmsKeyId>arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab</kmsKeyId>
+         <multiAttachEnabled>false</multiAttachEnabled>
+         <tagSet>
+            <item>
+               <key>Name</key>
+               <value>Server_1-root</value>
+            </item>
+         </tagSet>
+      </item>
+   </volumeSet>
+</DescribeVolumesResponse>

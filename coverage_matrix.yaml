@@ -330,12 +330,12 @@ entries:
   - aws_service: ec2
     aws_resource_type: aws_ebs_volume
     working_exempt: true
-    working_exempt_reason: "Describe-only: fakeaws creates no volumes, so DescribeVolumes answers an empty set (TestRegressionSweepDescribesNeverCreated)."
+    working_exempt_reason: "Read and terminate only: fakeaws has no CreateVolume and RunInstances makes no root volume, so only a load stores one (TestLoadEC2Volumes_AnswerAsRecorded); DescribeVolumes answers the loaded rows, and TerminateInstances deletes or detaches them."
     misconfigured_exempt: true
-    misconfigured_exempt_reason: "No create path to misconfigure; an unmodelled Filter.N is refused 501 (TestRegressionSweepDescribesNeverCreated)."
+    misconfigured_exempt_reason: "No create path to misconfigure; an unmodelled Filter.N is refused 501 (TestLoadEC2Volumes_Filters)."
     updates_exempt: true
     updates_exempt_reason: "No create path, so nothing to update."
-    integration_test_func_name: "^TestRegressionSweepDescribesNeverCreated$"
+    integration_test_func_name: "^(TestLoadEC2Volumes_AnswerAsRecorded|TestLoadEC2Volumes_Filters|TestRegressionSweepDescribesNeverCreated)$"
   - aws_service: ec2
     aws_resource_type: aws_nat_gateway
     working_exempt: true

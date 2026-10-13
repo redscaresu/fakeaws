@@ -260,6 +260,15 @@ CREATE TABLE ec2_tags (
 		PRIMARY KEY (account_id, resource_id, key)
 	)
 
+=== table ec2_volumes
+CREATE TABLE ec2_volumes (
+		account_id TEXT NOT NULL,
+		region     TEXT NOT NULL,
+		id         TEXT NOT NULL,
+		data       TEXT NOT NULL,
+		PRIMARY KEY (account_id, id)
+	)
+
 === table ec2_vpcs
 CREATE TABLE ec2_vpcs (
 		account_id TEXT NOT NULL,
@@ -741,6 +750,11 @@ CREATE TRIGGER ec2_security_groups_drop_tags AFTER DELETE ON ec2_security_groups
 
 === trigger ec2_subnets_drop_tags
 CREATE TRIGGER ec2_subnets_drop_tags AFTER DELETE ON ec2_subnets BEGIN
+				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
+			END
+
+=== trigger ec2_volumes_drop_tags
+CREATE TRIGGER ec2_volumes_drop_tags AFTER DELETE ON ec2_volumes BEGIN
 				DELETE FROM ec2_tags WHERE account_id = OLD.account_id AND resource_id = OLD.id;
 			END
 

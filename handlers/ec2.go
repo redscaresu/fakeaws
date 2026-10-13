@@ -160,8 +160,12 @@ func (app *Application) handleEC2(w http.ResponseWriter, r *http.Request) {
 	case "DescribeAvailabilityZones":
 		app.ec2DescribeAvailabilityZones(w, account, region, req)
 
+	// ----- Volume (loaded only: fakeaws creates none) -----
+	case "DescribeVolumes":
+		app.ec2DescribeVolumes(w, account, region, req)
+
 	// ----- Resources fakeaws never creates (the scope sweep lists them) -----
-	case "DescribeVolumes", "DescribeNatGateways", "DescribeSnapshots", "DescribeLaunchTemplates":
+	case "DescribeNatGateways", "DescribeSnapshots", "DescribeLaunchTemplates":
 		ec2DescribeNone(w, req)
 
 	// ----- InstanceType (read-only fixture) -----
@@ -3053,7 +3057,8 @@ func (app *Application) ec2RunInstances(w http.ResponseWriter, account, region s
 		return
 	}
 	// The provider adds a volume spec whenever default_tags is set;
-	// fakeaws has no volumes, so those tags are accepted and dropped.
+	// RunInstances makes no root volume, so those tags are accepted and
+	// dropped.
 	specs, refusedType := tagSpecifications(req.Params, "instance", "network-interface", "volume")
 	if specs == nil {
 		// AWS also tags spot-instances-request, elastic-gpu, ...
@@ -3607,6 +3612,98 @@ func (app *Application) ec2TerminateInstances(w http.ResponseWriter, account, re
 	awsproto.WriteEC2QueryRPCResponse(w, "TerminateInstances", &out)
 }
 
+// ----- Volume handlers -----
+
+// ec2VolumeXML is a DescribeVolumes item: the stored volume, as
+// recorded, and its tags.
+type ec2VolumeXML struct {
+	repository.EC2Volume
+	TagSet []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
+}
+
+type ec2DescribeVolumesResult struct {
+	VolumeSet []ec2VolumeXML `xml:"volumeSet>item"`
+}
+
+// ec2VolumeNotFound is EC2's code for a volume id it does not have.
+const ec2VolumeNotFound = "InvalidVolume.NotFound"
+
+// volumeAttachments reads field off each of v's attachments.
+func volumeAttachments(v ec2VolumeXML, field func(repository.EC2VolumeAttachment) string) []string {
+	var out []string
+	for _, a := range v.Attachments {
+		out = append(out, field(a))
+	}
+	return out
+}
+
+// volumeFilters are the DescribeVolumes filters fakeaws models.
+var volumeFilters = ec2FilterTable[ec2VolumeXML]{
+	values: map[string]func(ec2VolumeXML) []string{
+		"volume-id":         func(v ec2VolumeXML) []string { return []string{v.ID} },
+		"status":            func(v ec2VolumeXML) []string { return []string{v.State} },
+		"availability-zone": func(v ec2VolumeXML) []string { return []string{v.AvailabilityZone} },
+		"attachment.instance-id": func(v ec2VolumeXML) []string {
+			return volumeAttachments(v, func(a repository.EC2VolumeAttachment) string { return a.InstanceID })
+		},
+		"attachment.delete-on-termination": func(v ec2VolumeXML) []string {
+			return volumeAttachments(v, func(a repository.EC2VolumeAttachment) string { return a.DeleteOnTermination })
+		},
+	},
+	tagID: func(v ec2VolumeXML) string { return v.ID },
+}
+
+// ec2DescribeVolumes answers the region's volumes, each with its tags,
+// narrowed by VolumeId.N and volumeFilters. An unknown VolumeId.N is
+// 400 InvalidVolume.NotFound, which the provider reads as gone. Only a
+// load stores a volume, so on an unloaded database the answer is
+// always empty, or that NotFound, and either is classed
+// empty-collection.
+//
+// UNVERIFIED(aws-code): InvalidVolume.NotFound from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
+func (app *Application) ec2DescribeVolumes(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
+	filters, ok := volumeFilters.read(w, req, "VolumeId.N")
+	if !ok {
+		return
+	}
+	loaded, err := app.repo.Loaded()
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	vols, err := app.repo.ListVolumes(account, region)
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	ids := queryListValues(req.Params, "VolumeId.")
+	for _, id := range ids {
+		if !slices.ContainsFunc(vols, func(v *repository.EC2Volume) bool { return v.ID == id }) {
+			if !loaded {
+				markClass(w, classEmptyCollection)
+			}
+			awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest,
+				ec2VolumeNotFound, fmt.Sprintf("The volume '%s' does not exist.", id))
+			return
+		}
+	}
+	tags, ok := app.tagSets(w, account)
+	if !ok {
+		return
+	}
+	out := ec2DescribeVolumesResult{VolumeSet: []ec2VolumeXML{}}
+	for _, v := range vols {
+		x := ec2VolumeXML{EC2Volume: *v, TagSet: tags[v.ID]}
+		if (len(ids) == 0 || slices.Contains(ids, v.ID)) && volumeFilters.matches(x, filters, tags) {
+			out.VolumeSet = append(out.VolumeSet, x)
+		}
+	}
+	if !loaded {
+		markClass(w, classEmptyCollection)
+	}
+	awsproto.WriteEC2QueryRPCResponse(w, "DescribeVolumes", &out)
+}
+
 // ----- KeyPair handlers -----
 
 type ec2KeyPairXML struct {
@@ -4087,7 +4184,6 @@ func refuseUnknownZone(w http.ResponseWriter, wanted, known []string, msg string
 // ec2NoneSets names the result set of each Describe for a resource
 // fakeaws never creates.
 var ec2NoneSets = map[string]string{
-	"DescribeVolumes":         "volumeSet",
 	"DescribeNatGateways":     "natGatewaySet",
 	"DescribeSnapshots":       "snapshotSet",
 	"DescribeLaunchTemplates": "launchTemplates",
@@ -4103,7 +4199,7 @@ type ec2DescribeNoneResult struct {
 
 // ec2DescribeNone answers a Describe in ec2NoneSets with its real
 // result, an empty set, and refuses every other param, an id lookup
-// (VolumeId.N, ...) and Filter.N included. DescribeSnapshots reads
+// (NatGatewayId.N, ...) and Filter.N included. DescribeSnapshots reads
 // Owner.N (the SDK's OwnerIds), which the scope sweep sends: an empty
 // set has no owner to tell apart.
 func ec2DescribeNone(w http.ResponseWriter, req awsproto.QueryRPCRequest) {
@@ -4381,6 +4477,10 @@ var ec2TaggedKinds = []ec2TaggedKind{
 		_, err := app.repo.GetEIP(account, region, id)
 		return err
 	}},
+	{"vol-", "volume", ec2VolumeNotFound, func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetVolume(account, region, id)
+		return err
+	}},
 }
 
 // parseTags reads a flattened <prefix>N.Key / <prefix>N.Value list.
@@ -4632,6 +4732,7 @@ func (app *Application) gatherEC2StateReal(account string) (map[string]any, erro
 		"route_table_associations": []any{},
 		"eips":                     []any{},
 		"network_interfaces":       []any{},
+		"volumes":                  []any{},
 	}
 
 	vpcs, err := app.repo.ListVPCs(account, "")
@@ -4707,6 +4808,23 @@ func (app *Application) gatherEC2StateReal(account string) (map[string]any, erro
 		})
 	}
 	out["network_interfaces"] = eniOut
+
+	vols, err := app.repo.ListVolumes(account, "")
+	if err != nil {
+		return nil, err
+	}
+	volOut := make([]map[string]any, 0, len(vols))
+	for _, v := range vols {
+		instances := []string{}
+		for _, a := range v.Attachments {
+			instances = append(instances, a.InstanceID)
+		}
+		volOut = append(volOut, map[string]any{
+			"id": v.ID, "availability_zone": v.AvailabilityZone, "state": v.State,
+			"instance_ids": instances, "region": v.Region,
+		})
+	}
+	out["volumes"] = volOut
 
 	// Security groups — every SG, exactly once. Codex pass 4 BLOCKING
 	// #1 fix: previous version inferred from instance.VPCSecurityGroupIDs

@@ -68,6 +68,14 @@ var ec2ComputeMigrations = []string{
 		FOREIGN KEY (account_id, instance_id) REFERENCES ec2_instances(account_id, id) ON DELETE CASCADE,
 		FOREIGN KEY (account_id, subnet_id) REFERENCES ec2_subnets(account_id, id) ON DELETE RESTRICT
 	)`,
+	// ec2_volumes (ec2_volumes.go) holds its attachments in data.
+	`CREATE TABLE IF NOT EXISTS ec2_volumes (
+		account_id TEXT NOT NULL,
+		region     TEXT NOT NULL,
+		id         TEXT NOT NULL,
+		data       TEXT NOT NULL,
+		PRIMARY KEY (account_id, id)
+	)`,
 	// ec2_key_pairs is keyed by name (the AWS contract — names are
 	// per-account-per-region unique).
 	`CREATE TABLE IF NOT EXISTS ec2_key_pairs (
@@ -95,7 +103,10 @@ var ec2ComputeMigrations = []string{
 
 func init() {
 	registeredMigrations = append(registeredMigrations, ec2ComputeMigrations...)
+	// ec2_volumes before ec2_instances: a load writes volumes after the
+	// instances their attachments name (LoadRank).
 	prependResetTables([]string{
+		"ec2_volumes",
 		"ec2_network_interfaces",
 		"ec2_instances",
 		"ec2_key_pairs",
@@ -554,7 +565,9 @@ func (e *InstanceError) Unwrap() error { return e.Err }
 // refused too, each as an *InstanceError, moving none. Terminating
 // deletes the instance's ENIs, but for one a load kept on termination,
 // which it detaches, and clears the associations of its EIPs on the
-// ENIs it deletes.
+// ENIs it deletes; it detaches its volumes, deleting one it was the
+// last instance of when attached with deleteOnTermination true
+// (terminateVolumesTx).
 func (r *Repository) SetInstanceState(account, region, state string, ids ...string) ([]string, error) {
 	previous := make([]string, len(ids))
 	err := r.inTx(func(tx *sql.Tx) error {
@@ -597,6 +610,9 @@ func setInstanceStateTx(tx *sql.Tx, account, region, id, state string) (string, 
 	}
 	if state != "terminated" {
 		return was, nil
+	}
+	if err := terminateVolumesTx(tx, account, id); err != nil {
+		return "", err
 	}
 	// An ENI attached with deleteOnTermination false stays, detached and
 	// available, as on EC2, and so does an Elastic IP's association with

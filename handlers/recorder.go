@@ -45,10 +45,13 @@ const (
 	classFilterRefused requestClass = "filter-refused"
 
 	// CRITICAL[request-log-empty-collection]: only ec2DescribeNone, the
-	// Describe of a resource fakeaws never creates, and
+	// Describe of a resource fakeaws never creates, DescribeVolumes on an
+	// unloaded database (only a load stores a volume), its empty answer
+	// and its InvalidVolume.NotFound alike, and
 	// DescribeAvailabilityZones on a loaded database with no zone rows
 	// for the region mark empty-collection. Other always-empty answers,
-	// and an empty answer read from rows, stay answered-from-rows.
+	// and an empty answer read from rows (DescribeVolumes on a loaded
+	// database included), stay answered-from-rows.
 	classEmptyCollection requestClass = "empty-collection"
 )
 

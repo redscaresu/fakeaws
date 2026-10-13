@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -531,6 +533,235 @@ func TestLoadEC2Instances_Refusals(t *testing.T) {
 			for _, r := range refusals {
 				assert.NotContains(t, r, "the load stopped there", "a refusal, never an abort")
 			}
+			assert.Equal(t, before, loadedState(t, app, srv), "a refused load stored something")
+		})
+	}
+}
+
+// DescribeVolumes.xml's volume, the root volume of DescribeInstances.xml's
+// instance, its snapshot and its KMS key.
+const (
+	fixtureVolume   = "vol-1234567890abcdef0"
+	fixtureSnapshot = "snap-0abc1234567890def"
+	fixtureKMSKey   = "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+)
+
+// volumeFixtures are DescribeVolumes.xml, through edit, as the answer
+// to a read by VolumeId.1 and to one by attachment.instance-id.
+func volumeFixtures(t *testing.T, edit *strings.Replacer) (byID, byInstance netRecorded) {
+	t.Helper()
+	body := edit.Replace(ec2Fixture(t, "DescribeVolumes"))
+	return netRecorded{"DescribeVolumes", map[string]string{"VolumeId.1": fixtureVolume}, body},
+		netRecorded{"DescribeVolumes", map[string]string{"Filter.1.Name": "attachment.instance-id", "Filter.1.Value.1": fixtureInstance}, body}
+}
+
+// deleteOnTermination sets DescribeVolumes.xml's attachment's
+// deleteOnTermination to v.
+func deleteOnTermination(v string) *strings.Replacer {
+	return strings.NewReplacer("<deleteOnTermination>true<", "<deleteOnTermination>"+v+"<")
+}
+
+// volumeRecording is instanceRecording with the instance's root volume
+// in its blockDeviceMapping, deleted on termination as onTermination
+// says, and both volumeFixtures reads.
+func volumeRecording(t *testing.T, onTermination string) []netRecorded {
+	t.Helper()
+	_, _, keys := computeFixtures(t)
+	byID, byVpc, attrs, eni := instanceFixtures(t)
+	root := strings.NewReplacer("<blockDeviceMapping/>", "<blockDeviceMapping><item><deviceName>/dev/xvda</deviceName><ebs>"+
+		"<volumeId>"+fixtureVolume+"</volumeId><status>attached</status><attachTime>2018-05-08T16:46:19.000Z</attachTime>"+
+		"<deleteOnTermination>"+onTermination+"</deleteOnTermination></ebs></item></blockDeviceMapping>")
+	byID.body, byVpc.body = root.Replace(byID.body), root.Replace(byVpc.body)
+	vols, volsByInstance := volumeFixtures(t, deleteOnTermination(onTermination))
+	return sgRecording(t, append([]netRecorded{keys, byID, byVpc, eni, vols, volsByInstance}, attrs...)...)
+}
+
+// TestLoadEC2Volumes_AnswerAsRecorded: an instance loaded with its
+// root volume loads, the volume once though read by id and by
+// attachment.instance-id; every read answers as recorded, and the
+// volume's snapshot and KMS key are unresolved.
+func TestLoadEC2Volumes_AnswerAsRecorded(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	recording := volumeRecording(t, "true")
+	var answer struct {
+		Loaded     map[string]int
+		Unresolved map[string][]string
+	}
+	require.NoError(t, json.Unmarshal([]byte(loadNet(t, srv, recording...)), &answer))
+	assert.Equal(t, 1, answer.Loaded["instance"])
+	assert.Equal(t, 1, answer.Loaded["volume"])
+	assert.Equal(t, []string{fixtureSnapshot}, answer.Unresolved["snapshot"])
+	assert.Equal(t, []string{fixtureKMSKey}, answer.Unresolved["kms-key"])
+	for _, r := range recording {
+		rec, ren := diffAnswer(t, srv, r)
+		assert.Empty(t, rec, "%s %v: recorded only", r.action, r.params)
+		assert.Empty(t, ren, "%s %v: answered only", r.action, r.params)
+	}
+}
+
+// ec2VolumesState is /mock/state's ec2.volumes ids.
+func ec2VolumesState(t *testing.T, srv *httptest.Server) []string {
+	t.Helper()
+	var state struct {
+		EC2 struct {
+			Volumes []struct{ ID string } `json:"volumes"`
+		} `json:"ec2"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(mockOK(t, srv, http.MethodGet, "/mock/state", "")), &state))
+	ids := []string{}
+	for _, v := range state.EC2.Volumes {
+		ids = append(ids, v.ID)
+	}
+	return ids
+}
+
+// TestLoadEC2Volumes_TerminateDeletesRootVolume: /mock/state lists the
+// loaded volume; terminating its instance deletes it, as its
+// deleteOnTermination says, so VolumeId.1 answers InvalidVolume.NotFound
+// and /mock/state lists none.
+func TestLoadEC2Volumes_TerminateDeletesRootVolume(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	loadNet(t, srv, volumeRecording(t, "true")...)
+	assert.Equal(t, []string{fixtureVolume}, ec2VolumesState(t, srv))
+
+	mustOK(t)(ec2Call(t, srv, netRegion, "TerminateInstances", url.Values{"InstanceId.1": {fixtureInstance}}))
+	resp, body := ec2Call(t, srv, netRegion, "DescribeVolumes", url.Values{"VolumeId.1": {fixtureVolume}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, "InvalidVolume.NotFound", extractEC2Tag(body, "Code"))
+	assert.Empty(t, ec2VolumesState(t, srv))
+}
+
+// TestLoadEC2Volumes_MutateOnce: a volume attached with
+// deleteOnTermination false stays after its instance terminates, and
+// answers the recording but for its status, available, and its
+// attachment, which is gone.
+func TestLoadEC2Volumes_MutateOnce(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	loadNet(t, srv, volumeRecording(t, "false")...)
+	mustOK(t)(ec2Call(t, srv, netRegion, "TerminateInstances", url.Values{"InstanceId.1": {fixtureInstance}}))
+
+	byID, byInstance := volumeFixtures(t, deleteOnTermination("false"))
+	rec, ren := diffAnswer(t, srv, byID)
+	assert.Equal(t, []string{"volumeSet/item[0]/attachmentSet/item[0]", "volumeSet/item[0]/status"}, rec)
+	assert.Equal(t, []string{"volumeSet/item[0]/status"}, ren)
+	assert.Equal(t, "available", extractEC2Tag([]byte(resend(t, srv, byID)), "status"))
+	assert.NotContains(t, resend(t, srv, byInstance), "<volumeId>", "detached, it matches no attachment.instance-id")
+	assert.Equal(t, []string{fixtureVolume}, ec2VolumesState(t, srv))
+}
+
+// TestLoadEC2Volumes_Filters: each modelled filter selects the loaded
+// volume by its value and drops it by another; an unmodelled one is
+// refused.
+func TestLoadEC2Volumes_Filters(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	loadNet(t, srv, volumeRecording(t, "true")...)
+	for name, values := range map[string][2]string{
+		"volume-id":                        {fixtureVolume, "vol-0other"},
+		"attachment.instance-id":           {fixtureInstance, "i-0other"},
+		"attachment.delete-on-termination": {"true", "false"},
+		"status":                           {"in-use", "available"},
+		"availability-zone":                {"us-west-2c", "us-west-2a"},
+		"tag:Name":                         {"Server_1-root", "other"},
+	} {
+		body := mustOK(t)(ec2Call(t, srv, netRegion, "DescribeVolumes", ec2FilterParams(name, values[0])))
+		assert.Equal(t, fixtureVolume, extractEC2Tag(body, "volumeId"), name)
+		body = mustOK(t)(ec2Call(t, srv, netRegion, "DescribeVolumes", ec2FilterParams(name, values[1])))
+		assert.NotContains(t, string(body), "<volumeId>", name)
+	}
+	resp, body := ec2Call(t, srv, netRegion, "DescribeVolumes", ec2FilterParams("volume-type", "gp3"))
+	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s", body)
+	assert.Contains(t, string(body), "volume-type")
+}
+
+// TestLoadEC2Volumes_AttachedToAnInstanceNotRecorded: a volume attached
+// to an instance no exchange loaded is refused naming both, and the
+// load stores nothing.
+func TestLoadEC2Volumes_AttachedToAnInstanceNotRecorded(t *testing.T) {
+	app, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	seedLoadRows(t, srv)
+	before := loadedState(t, app, srv)
+	vols, _ := volumeFixtures(t, strings.NewReplacer("<instanceId>"+fixtureInstance, "<instanceId>i-0missing"))
+	var exchanges []string
+	for _, r := range sgRecording(t, vols) {
+		exchanges = append(exchanges, r.exchange())
+	}
+	status, body := postLoad(t, srv, loadEnvelope(loadAccount, netRegion, exchanges...))
+	require.Equal(t, http.StatusBadRequest, status, body)
+	assert.Contains(t, loadRefusals(t, body), fmt.Sprintf("exchange %d: ec2 DescribeVolumes: volume %s is attached to instance i-0missing, which no exchange loaded",
+		len(sgRecording(t)), fixtureVolume))
+	assert.Equal(t, before, loadedState(t, app, srv), "a refused load stored something")
+}
+
+// TestLoadEC2Volumes_Tags: CreateTags and DeleteTags take a loaded
+// volume's id, and DescribeVolumes answers the change.
+func TestLoadEC2Volumes_Tags(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	loadNet(t, srv, volumeRecording(t, "true")...)
+	mustOK(t)(ec2Call(t, srv, netRegion, "CreateTags", url.Values{"ResourceId.1": {fixtureVolume}, "Tag.1.Key": {"Env"}, "Tag.1.Value": {"prod"}}))
+	body := mustOK(t)(ec2Call(t, srv, netRegion, "DescribeVolumes", ec2FilterParams("tag:Env", "prod")))
+	assert.Equal(t, fixtureVolume, extractEC2Tag(body, "volumeId"))
+
+	mustOK(t)(ec2Call(t, srv, netRegion, "DeleteTags", url.Values{"ResourceId.1": {fixtureVolume}, "Tag.1.Key": {"Name"}}))
+	byID, _ := volumeFixtures(t, deleteOnTermination("true"))
+	answered := resend(t, srv, byID)
+	assert.Contains(t, answered, "<key>Env</key>")
+	assert.NotContains(t, answered, "<key>Name</key>")
+}
+
+// TestLoadEC2Volumes_AttachmentDisagreesWithBlockDeviceMapping: a volume
+// whose attachment differs from its instance's blockDeviceMapping item,
+// or which that blockDeviceMapping does not name, is refused naming
+// both; so is an instance whose blockDeviceMapping names a volume not
+// attached to it. The load stores nothing.
+func TestLoadEC2Volumes_AttachmentDisagreesWithBlockDeviceMapping(t *testing.T) {
+	for name, c := range map[string]struct {
+		recording func(t *testing.T) []netRecorded
+		want      string
+	}{
+		"deleteOnTermination false in the instance, true in the volume": {
+			func(t *testing.T) []netRecorded {
+				recording := volumeRecording(t, "false")
+				for i, r := range recording {
+					if r.action == "DescribeVolumes" {
+						recording[i].body = strings.ReplaceAll(r.body, "<deleteOnTermination>false<", "<deleteOnTermination>true<")
+					}
+				}
+				return recording
+			},
+			"volume " + fixtureVolume + ": its attachment to instance " + fixtureInstance + " differs from the instance's blockDeviceMapping at deleteOnTermination",
+		},
+		"a blockDeviceMapping volume recorded available, with no attachment": {
+			func(t *testing.T) []netRecorded {
+				recording := volumeRecording(t, "true")
+				detached := regexp.MustCompile(`(?s)<attachmentSet>.*</attachmentSet>`)
+				for i, r := range recording {
+					if r.action == "DescribeVolumes" {
+						recording[i].body = strings.Replace(detached.ReplaceAllString(r.body, "<attachmentSet/>"), "<status>in-use<", "<status>available<", 1)
+					}
+				}
+				return recording
+			},
+			"instance " + fixtureInstance + ": its blockDeviceMapping names volume " + fixtureVolume + ", which is not attached to it",
+		},
+		"an instance with no block device": {
+			func(t *testing.T) []netRecorded {
+				vols, _ := volumeFixtures(t, deleteOnTermination("true"))
+				return append(instanceRecording(t), vols)
+			},
+			"volume " + fixtureVolume + " is attached to instance " + fixtureInstance + ", whose blockDeviceMapping does not name it",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			app, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+			seedLoadRows(t, srv)
+			before := loadedState(t, app, srv)
+			var exchanges []string
+			for _, r := range c.recording(t) {
+				exchanges = append(exchanges, r.exchange())
+			}
+			status, body := postLoad(t, srv, loadEnvelope(loadAccount, netRegion, exchanges...))
+			require.Equal(t, http.StatusBadRequest, status, body)
+			assert.True(t, slices.ContainsFunc(loadRefusals(t, body), func(r string) bool { return strings.HasSuffix(r, ": "+c.want) }), body)
 			assert.Equal(t, before, loadedState(t, app, srv), "a refused load stored something")
 		})
 	}
