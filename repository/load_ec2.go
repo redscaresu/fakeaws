@@ -79,6 +79,40 @@ func (lt *LoadTx) PutRouteTableAssociation(account, vpcID string, a *EC2RouteTab
 	return insertAssociation(lt, account, vpcID, a)
 }
 
+// PutSecurityGroup stores sg under account, or answers
+// models.ErrNotFound when its VPC is not stored, which its foreign key
+// would refuse.
+func (lt *LoadTx) PutSecurityGroup(account string, sg *EC2SecurityGroup) error {
+	if err := lt.exists(`SELECT 1 FROM ec2_vpcs WHERE account_id = ? AND id = ?`, account, sg.VPCID); err != nil {
+		return err
+	}
+	return insertSecurityGroup(lt, account, sg)
+}
+
+// ErrSourceHeld refuses a rule whose source its permission already
+// holds under another rule.
+var ErrSourceHeld = fmt.Errorf("%w: the permission already holds the rule's source", models.ErrConflict)
+
+// PutSecurityGroupRule stores rule under account and region after the
+// group's rules stored before it, as AuthorizeSecurityGroupRules places
+// one (ruleOrdinals), so rules stored in their recorded order keep it.
+// It answers models.ErrNotFound when the rule's group is not stored,
+// which its foreign key would refuse, and ErrSourceHeld when a stored
+// rule of its permission holds its source, which AWS never answers.
+func (lt *LoadTx) PutSecurityGroupRule(account, region string, rule EC2SecurityGroupRule) error {
+	if err := lt.exists(`SELECT 1 FROM ec2_security_groups WHERE account_id = ? AND id = ?`, account, rule.GroupID); err != nil {
+		return err
+	}
+	var held bool
+	if err := lt.QueryRow(ruleOrdinals, ruleMatchArgs(account, rule)...).Scan(&rule.PermOrd, &rule.SrcOrd, &held); err != nil {
+		return err
+	}
+	if held {
+		return ErrSourceHeld
+	}
+	return insertRule(lt, account, region, rule)
+}
+
 // PutAvailabilityZone stores z under account.
 func (lt *LoadTx) PutAvailabilityZone(account string, z AvailabilityZone) error {
 	return putAvailabilityZone(lt, account, z)
@@ -181,6 +215,41 @@ func (lt *LoadTx) RouteTableAssociations(id string) ([]*EC2RouteTableAssociation
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// SecurityGroup reads the stored security group id.
+func (lt *LoadTx) SecurityGroup(id string) (*EC2SecurityGroup, error) {
+	var sg EC2SecurityGroup
+	if err := lt.data(&sg, `SELECT data FROM ec2_security_groups WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	return &sg, nil
+}
+
+// SecurityGroupRules reads the stored rules of security group id, as
+// ListSecurityGroupRules orders them.
+func (lt *LoadTx) SecurityGroupRules(id string) ([]EC2SecurityGroupRule, error) {
+	var out []EC2SecurityGroupRule
+	for scan, err := range lt.Query(`SELECT `+ruleColumns+` FROM ec2_security_group_rules WHERE group_id = ? ORDER BY is_egress, perm_ord, src_ord`, id) {
+		if err != nil {
+			return nil, err
+		}
+		r, err := scanRule(scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// SecurityGroupRule reads the stored rule id.
+func (lt *LoadTx) SecurityGroupRule(id string) (EC2SecurityGroupRule, error) {
+	rule, err := scanRule(lt.QueryRow(`SELECT `+ruleColumns+` FROM ec2_security_group_rules WHERE id = ?`, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return rule, models.ErrNotFound
+	}
+	return rule, err
 }
 
 // AvailabilityZone reads the stored zone named name.

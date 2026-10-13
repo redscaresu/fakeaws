@@ -174,7 +174,7 @@ func TestLoadIAM_UnknownRoleElementRefuses(t *testing.T) {
 	}
 	status, body := postLoad(t, srv, iamReadEnvelope(t, iamRoleRead, plant))
 	require.Equal(t, http.StatusBadRequest, status, body)
-	assert.Equal(t, []string{"exchange 0: iam GetRole: role: the model cannot hold recorded GetRoleResult/Role/AccessAudit"}, loadRefusals(t, body))
+	assert.Equal(t, []string{"exchange 0: iam GetRole: role S3Access: the model cannot hold recorded GetRoleResult/Role/AccessAudit"}, loadRefusals(t, body))
 }
 
 // TestLoadIAM_TagCallsFindAPathedRoleAndProfile: a loaded role and

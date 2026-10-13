@@ -328,6 +328,10 @@ type EC2SecurityGroup struct {
 	Region      string `json:"region"`
 	ARN         string `json:"arn"`
 	CreatedAt   string `json:"created_at"`
+	// OwnerID is the account DescribeSecurityGroups answers: the stored
+	// account for a created group and the recorded one for a loaded
+	// group. A row stored before it was kept has none.
+	OwnerID string `json:"owner_id"`
 }
 
 // EC2SecurityGroupRule is one source of one permission of a security
@@ -1134,6 +1138,17 @@ const (
 	ruleSourceMatch = `cidr_ipv4 IS ?7 AND cidr_ipv6 IS ?8 AND prefix_list_id IS ?9 AND referenced_group_id IS ?10`
 )
 
+// ruleOrdinals selects, by ruleMatchArgs, where a rule goes: its
+// permission's perm_ord (after the direction's last permission when it
+// has none), the src_ord after the permission's last source, and
+// whether the permission already holds the rule's source.
+const ruleOrdinals = `SELECT
+	COALESCE(MIN(perm_ord), (SELECT COALESCE(MAX(perm_ord) + 1, 0) FROM ec2_security_group_rules
+	                         WHERE account_id = ?1 AND group_id = ?2 AND is_egress = ?3)),
+	COALESCE(MAX(src_ord) + 1, 0),
+	COALESCE(MAX(` + ruleSourceMatch + `), 0)
+	FROM ec2_security_group_rules WHERE ` + ruleMatch
+
 // ruleMatchArgs are ruleMatch's and ruleSourceMatch's args for rule.
 func ruleMatchArgs(account string, rule EC2SecurityGroupRule) []any {
 	return []any{account, rule.GroupID, rule.IsEgress, rule.IPProtocol, rule.FromPort, rule.ToPort,
@@ -1230,13 +1245,7 @@ func (r *Repository) AuthorizeSecurityGroupRules(account, region, id string, rul
 		for _, rule := range rules {
 			rule.GroupID = id
 			var held bool
-			if err := tx.QueryRow(`SELECT
-				COALESCE(MIN(perm_ord), (SELECT COALESCE(MAX(perm_ord) + 1, 0) FROM ec2_security_group_rules
-				                         WHERE account_id = ?1 AND group_id = ?2 AND is_egress = ?3)),
-				COALESCE(MAX(src_ord) + 1, 0),
-				COALESCE(MAX(`+ruleSourceMatch+`), 0)
-				FROM ec2_security_group_rules WHERE `+ruleMatch,
-				ruleMatchArgs(account, rule)...).Scan(&rule.PermOrd, &rule.SrcOrd, &held); err != nil {
+			if err := tx.QueryRow(ruleOrdinals, ruleMatchArgs(account, rule)...).Scan(&rule.PermOrd, &rule.SrcOrd, &held); err != nil {
 				return err
 			}
 			if held {

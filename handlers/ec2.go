@@ -800,7 +800,7 @@ func newEC2SecurityGroup(account, region, vpcID, name, desc string) *repository.
 	id := "sg-" + ec2RandID()
 	return &repository.EC2SecurityGroup{
 		ID: id, VPCID: vpcID, GroupName: name, Description: desc,
-		Region:    region,
+		Region: region, OwnerID: account,
 		ARN:       awsproto.BuildEC2SecurityGroupARN(region, account, id),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -1751,9 +1751,29 @@ type ec2PrefixListId struct {
 }
 
 type ec2IpPermission struct {
-	IpProtocol       string               `xml:"ipProtocol"`
-	FromPort         int                  `xml:"fromPort"`
-	ToPort           int                  `xml:"toPort"`
+	IpProtocol string `xml:"ipProtocol"`
+	FromPort   int    `xml:"fromPort"`
+	ToPort     int    `xml:"toPort"`
+	ec2PermissionSources
+}
+
+// MarshalXML answers an all-traffic permission (ip protocol -1) with no
+// fromPort or toPort, as AWS does (testdata/ec2/DescribeSecurityGroups.xml),
+// whatever ports it was stored with. terraform-provider-aws reads an
+// absent port as 0, the port its aws_security_group sends for -1.
+func (p ec2IpPermission) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	type plain ec2IpPermission // without this method
+	if p.IpProtocol != ec2AllProtocols {
+		return e.EncodeElement(plain(p), start)
+	}
+	return e.EncodeElement(struct {
+		IpProtocol string `xml:"ipProtocol"`
+		ec2PermissionSources
+	}{p.IpProtocol, p.ec2PermissionSources}, start)
+}
+
+// ec2PermissionSources are a permission's sources, each kind's list.
+type ec2PermissionSources struct {
 	IpRanges         []ec2IpRange         `xml:"ipRanges>item,omitempty"`
 	Ipv6Ranges       []ec2Ipv6Range       `xml:"ipv6Ranges>item,omitempty"`
 	UserIdGroupPairs []ec2UserIdGroupPair `xml:"groups>item,omitempty"`
@@ -1847,15 +1867,27 @@ func sgPermissions(rules []repository.EC2SecurityGroupRule) (ingress, egress []e
 	return ingress, egress
 }
 
+// ec2SecurityGroupToXML is sg as a securityGroupInfo item with tags;
+// its caller adds its permissions (sgPermissions). It answers
+// securityGroupArn when sg has one: a created group's, or a loaded
+// group's recorded one.
+func ec2SecurityGroupToXML(sg *repository.EC2SecurityGroup, tags []ec2ResourceTagXML) ec2SecurityGroupXML {
+	return ec2SecurityGroupXML{
+		GroupId: sg.ID, GroupName: sg.GroupName, GroupDesc: sg.Description, VpcId: sg.VPCID,
+		OwnerId: sg.OwnerID, SecurityGroupArn: sg.ARN, TagSet: tags,
+	}
+}
+
 type ec2SecurityGroupXML struct {
-	GroupId       string              `xml:"groupId"`
-	GroupName     string              `xml:"groupName"`
-	GroupDesc     string              `xml:"groupDescription"`
-	VpcId         string              `xml:"vpcId"`
-	OwnerId       string              `xml:"ownerId"`
-	IpPermissions []ec2IpPermission   `xml:"ipPermissions>item,omitempty"`
-	IpPermsEgress []ec2IpPermission   `xml:"ipPermissionsEgress>item,omitempty"`
-	TagSet        []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
+	GroupId          string              `xml:"groupId"`
+	GroupName        string              `xml:"groupName"`
+	GroupDesc        string              `xml:"groupDescription"`
+	VpcId            string              `xml:"vpcId"`
+	OwnerId          string              `xml:"ownerId"`
+	SecurityGroupArn string              `xml:"securityGroupArn,omitempty"`
+	IpPermissions    []ec2IpPermission   `xml:"ipPermissions>item,omitempty"`
+	IpPermsEgress    []ec2IpPermission   `xml:"ipPermissionsEgress>item,omitempty"`
+	TagSet           []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
 }
 
 type ec2CreateSecurityGroupResult struct {
@@ -1914,7 +1946,8 @@ type ec2UserIdGroupPairInfo struct {
 // keeps a null port only when it reads -1. Every other rule answers its
 // stored ports: the legacy aws_security_group_rule sends ports for any
 // protocol but -1 (protocol 50 with 0/0) and matches its rule on them.
-// DescribeSecurityGroups' ipPermissions answer the stored ports.
+// DescribeSecurityGroups' ipPermissions answer the stored ports, but
+// none for -1 (ec2IpPermission.MarshalXML).
 func ec2SecurityGroupRuleToXML(r repository.EC2SecurityGroupRule) ec2SecurityGroupRuleXML {
 	if r.IPProtocol == ec2AllProtocols {
 		r.FromPort, r.ToPort = -1, -1
@@ -2171,11 +2204,10 @@ func (app *Application) ec2DescribeSecurityGroups(w http.ResponseWriter, account
 	}
 	out := ec2DescribeSecurityGroupsResult{SecurityGroupSet: make([]ec2SecurityGroupXML, 0, len(sgs))}
 	for _, sg := range sgs {
-		x := ec2SecurityGroupXML{
-			GroupId: sg.ID, GroupName: sg.GroupName, GroupDesc: sg.Description, VpcId: sg.VPCID,
-			OwnerId: account,
-			TagSet:  tags[sg.ID],
+		if sg.OwnerID == "" {
+			sg.OwnerID = account // a row stored before groups kept their owner
 		}
+		x := ec2SecurityGroupToXML(sg, tags[sg.ID])
 		if !sgFilters.matches(x, filters, tags) {
 			continue
 		}

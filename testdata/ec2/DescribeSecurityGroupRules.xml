@@ -1,9 +1,10 @@
-<!-- Source: AWS EC2 API reference, DescribeSecurityGroupRules (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSecurityGroupRules.html), whose page shows no example: its Response Elements are requestId, nextToken and securityGroupRuleSet, each item a SecurityGroupRule (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_SecurityGroupRule.html), whose member names are these elements. The items are composed, not recorded: the answer to the AWS CLI reference's describe-security-group-rules Example 1 request (https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-security-group-rules.html, Filter group-id) for a group with one ingress permission of two IPv4 CIDRs and one egress rule. Each item has the members, in their order, that the same page's Example 2 output answers for a rule with one IPv4 CIDR and no description: no securityGroupRuleArn or referencedGroupInfo, and an empty tagSet ("Tags": []). Group sg-1234567890abcdef0, owner 111122223333, the three rule ids and the egress rule are Example 1's; the ingress CIDRs are documentation ranges; requestId as in AuthorizeSecurityGroupIngress.xml. -->
+<!-- Source: AWS EC2 API reference, DescribeSecurityGroupRules (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSecurityGroupRules.html), whose page shows no example: its Response Elements are requestId, nextToken and securityGroupRuleSet, each item a SecurityGroupRule (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_SecurityGroupRule.html), whose member names are these elements. The items are composed, not recorded: the answer to the AWS CLI reference's describe-security-group-rules Example 1 request (https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-security-group-rules.html, Filter group-id) for a group with one ingress permission of two IPv4 CIDRs and one egress rule. Each item has the members, in their order, that the same page's Example 2 output answers for a rule with one IPv4 CIDR and no description: no securityGroupRuleArn or referencedGroupInfo, and an empty tagSet ("Tags": []). Group sg-1234567890abcdef0, owner 111122223333, the three rule ids and the egress rule are Example 1's; the ingress CIDRs are documentation ranges; requestId as in AuthorizeSecurityGroupIngress.xml. Each item also carries securityGroupRuleArn, the SecurityGroupRule data type's member of that name (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_SecurityGroupRule.html), which a current answer holds: the rule's ARN in the fixtures' region us-west-2. -->
 <DescribeSecurityGroupRulesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
    <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
    <securityGroupRuleSet>
       <item>
          <securityGroupRuleId>sgr-abcdef01234567890</securityGroupRuleId>
+         <securityGroupRuleArn>arn:aws:ec2:us-west-2:111122223333:security-group-rule/sgr-abcdef01234567890</securityGroupRuleArn>
          <groupId>sg-1234567890abcdef0</groupId>
          <groupOwnerId>111122223333</groupOwnerId>
          <isEgress>false</isEgress>
@@ -15,6 +16,7 @@
       </item>
       <item>
          <securityGroupRuleId>sgr-bcdef01234567890a</securityGroupRuleId>
+         <securityGroupRuleArn>arn:aws:ec2:us-west-2:111122223333:security-group-rule/sgr-bcdef01234567890a</securityGroupRuleArn>
          <groupId>sg-1234567890abcdef0</groupId>
          <groupOwnerId>111122223333</groupOwnerId>
          <isEgress>false</isEgress>
@@ -26,6 +28,7 @@
       </item>
       <item>
          <securityGroupRuleId>sgr-cdef01234567890ab</securityGroupRuleId>
+         <securityGroupRuleArn>arn:aws:ec2:us-west-2:111122223333:security-group-rule/sgr-cdef01234567890ab</securityGroupRuleArn>
          <groupId>sg-1234567890abcdef0</groupId>
          <groupOwnerId>111122223333</groupOwnerId>
          <isEgress>true</isEgress>

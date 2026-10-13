@@ -288,7 +288,7 @@ func TestLoadEC2Routes_Refusals(t *testing.T) {
 		},
 		"a propagating gateway": {
 			netRouteTables(netRouteTable("rtb-0a", vpc, "<propagatingVgwSet><item><gatewayId>vgw-0a</gatewayId></item></propagatingVgwSet>")),
-			"exchange 3: ec2 DescribeRouteTables: route-table: the model cannot hold recorded routeTableSet/item[0]/propagatingVgwSet/item[0]",
+			"exchange 3: ec2 DescribeRouteTables: route-table rtb-0a: the model cannot hold recorded routeTableSet/item[0]/propagatingVgwSet/item[0]",
 		},
 	}
 	for name, c := range cases {

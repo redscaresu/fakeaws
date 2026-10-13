@@ -1,0 +1,45 @@
+<!-- Source: AWS EC2 API reference, DescribeSecurityGroups, Example 2 (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSecurityGroups.html), request GroupId.1, with edits so it is the group DescribeSecurityGroupRules.xml answers the rules of: groupId sg-9bf6ceff and ownerId 123456789012 are that fixture's sg-1234567890abcdef0 and 111122223333, vpcId vpc-31896b55 is DescribeVpcs.xml's vpc-0ee975135dEXAMPLE, the ingress ipRanges item 0.0.0.0/0 is that fixture's two ranges, and both ipv6Ranges items are dropped, leaving the empty element Example 3 answers. The securityGroupArn element is added, as the SecurityGroup data type's member of that name (https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_SecurityGroup.html), which the example predates: the group's ARN in the fixtures' region us-west-2. -->
+<DescribeSecurityGroupsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+    <requestId>1d62eae0-acdd-481d-88c9-example</requestId>
+    <securityGroupInfo>
+        <item>
+            <ownerId>111122223333</ownerId>
+            <groupId>sg-1234567890abcdef0</groupId>
+            <groupName>SSHAccess</groupName>
+            <groupDescription>Security group for SSH access</groupDescription>
+            <vpcId>vpc-0ee975135dEXAMPLE</vpcId>
+            <securityGroupArn>arn:aws:ec2:us-west-2:111122223333:security-group/sg-1234567890abcdef0</securityGroupArn>
+            <ipPermissions>
+                <item>
+                    <ipProtocol>tcp</ipProtocol>
+                    <fromPort>22</fromPort>
+                    <toPort>22</toPort>
+                    <groups/>
+                    <ipRanges>
+                        <item>
+                            <cidrIp>203.0.113.0/24</cidrIp>
+                        </item>
+                        <item>
+                            <cidrIp>198.51.100.0/24</cidrIp>
+                        </item>
+                    </ipRanges>
+                    <ipv6Ranges/>
+                    <prefixListIds/>
+                </item>
+            </ipPermissions>
+            <ipPermissionsEgress>
+                <item>
+                    <ipProtocol>-1</ipProtocol>
+                    <groups/>
+                    <ipRanges>
+                        <item>
+                            <cidrIp>0.0.0.0/0</cidrIp>
+                        </item>
+                    </ipRanges>
+                    <ipv6Ranges/>
+                    <prefixListIds/>
+                </item>
+            </ipPermissionsEgress>
+        </item>
+    </securityGroupInfo>
+</DescribeSecurityGroupsResponse>
