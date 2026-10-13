@@ -92,6 +92,7 @@ func TestLoadEC2Groups_FixturesAnswerAsRecorded(t *testing.T) {
 		assert.Empty(t, ren, "%s answered only", r.action)
 	}
 	body := resend(t, srv, groups)
+	assert.Equal(t, "arn:aws:ec2:"+netRegion+":"+loadAccount+":security-group/"+fixtureSG, extractEC2Tag([]byte(body), "securityGroupArn"))
 	assert.Less(t, strings.Index(body, "203.0.113.0/24"), strings.Index(body, "198.51.100.0/24"), "sources out of recorded order: %s", body)
 }
 
@@ -108,7 +109,8 @@ func TestLoadEC2Groups_GroupStoredWithoutOwnerAnswersTheAccount(t *testing.T) {
 
 // TestLoadEC2Groups_SameGroupInTwoReadsLoadsOnce: a group the step-0
 // read answers both to a tag-key and to a vpc-id DescribeSecurityGroups
-// loads once and counts once.
+// loads once and counts once. It holds no securityGroupArn, and answers
+// none: a loaded group's ARN is never minted.
 func TestLoadEC2Groups_SameGroupInTwoReadsLoadsOnce(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	group := netGroup("sg-0tagged", fixtureSGVpc, "tagged", netTags("infrafactory-run-id", "r1"))
@@ -234,7 +236,16 @@ func TestLoadEC2Groups_Refusals(t *testing.T) {
 		},
 		"a rule whose group was not recorded": {
 			[]netRecorded{groups, rules, netRules(netRule("sgr-0orphan", "sg-0missing", "443", "<cidrIpv4>10.0.0.0/8</cidrIpv4>"))},
-			at(2, "DescribeSecurityGroupRules") + "security-group-rule sgr-0orphan names security-group sg-0missing, which no exchange loaded",
+			at(2, "DescribeSecurityGroupRules") + "security-group-rule sgr-0orphan names security-group sg-0missing, which did not load",
+		},
+		"a rule repeating a source of its permission": {
+			[]netRecorded{groups, rules, netRules(netRule("sgr-0dup", fixtureSG, "22", "<cidrIpv4>203.0.113.0/24</cidrIpv4>"))},
+			at(2, "DescribeSecurityGroupRules") + "security-group-rule sgr-0dup repeats a source another rule of security-group " + fixtureSG + " holds",
+		},
+		"a rule whose group was refused": {
+			[]netRecorded{netGroups(map[string]string{}, netGroup("sg-0a", "vpc-0missing", "a", "")),
+				netRules(netRule("sgr-0a", "sg-0a", "443", "<cidrIpv4>10.0.0.0/8</cidrIpv4>"))},
+			at(1, "DescribeSecurityGroupRules") + "security-group-rule sgr-0a names security-group sg-0a, which did not load",
 		},
 		"a group whose VPC was not recorded": {
 			[]netRecorded{netGroups(map[string]string{}, netGroup("sg-0a", "vpc-0missing", "a", ""))},

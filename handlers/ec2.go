@@ -1868,23 +1868,26 @@ func sgPermissions(rules []repository.EC2SecurityGroupRule) (ingress, egress []e
 }
 
 // ec2SecurityGroupToXML is sg as a securityGroupInfo item with tags;
-// its caller adds its permissions (sgPermissions).
+// its caller adds its permissions (sgPermissions). It answers
+// securityGroupArn when sg has one: a created group's, or a loaded
+// group's recorded one.
 func ec2SecurityGroupToXML(sg *repository.EC2SecurityGroup, tags []ec2ResourceTagXML) ec2SecurityGroupXML {
 	return ec2SecurityGroupXML{
 		GroupId: sg.ID, GroupName: sg.GroupName, GroupDesc: sg.Description, VpcId: sg.VPCID,
-		OwnerId: sg.OwnerID, TagSet: tags,
+		OwnerId: sg.OwnerID, SecurityGroupArn: sg.ARN, TagSet: tags,
 	}
 }
 
 type ec2SecurityGroupXML struct {
-	GroupId       string              `xml:"groupId"`
-	GroupName     string              `xml:"groupName"`
-	GroupDesc     string              `xml:"groupDescription"`
-	VpcId         string              `xml:"vpcId"`
-	OwnerId       string              `xml:"ownerId"`
-	IpPermissions []ec2IpPermission   `xml:"ipPermissions>item,omitempty"`
-	IpPermsEgress []ec2IpPermission   `xml:"ipPermissionsEgress>item,omitempty"`
-	TagSet        []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
+	GroupId          string              `xml:"groupId"`
+	GroupName        string              `xml:"groupName"`
+	GroupDesc        string              `xml:"groupDescription"`
+	VpcId            string              `xml:"vpcId"`
+	OwnerId          string              `xml:"ownerId"`
+	SecurityGroupArn string              `xml:"securityGroupArn,omitempty"`
+	IpPermissions    []ec2IpPermission   `xml:"ipPermissions>item,omitempty"`
+	IpPermsEgress    []ec2IpPermission   `xml:"ipPermissionsEgress>item,omitempty"`
+	TagSet           []ec2ResourceTagXML `xml:"tagSet>item,omitempty"`
 }
 
 type ec2CreateSecurityGroupResult struct {

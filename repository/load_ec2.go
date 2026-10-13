@@ -89,11 +89,16 @@ func (lt *LoadTx) PutSecurityGroup(account string, sg *EC2SecurityGroup) error {
 	return insertSecurityGroup(lt, account, sg)
 }
 
+// ErrSourceHeld refuses a rule whose source its permission already
+// holds under another rule.
+var ErrSourceHeld = fmt.Errorf("%w: the permission already holds the rule's source", models.ErrConflict)
+
 // PutSecurityGroupRule stores rule under account and region after the
 // group's rules stored before it, as AuthorizeSecurityGroupRules places
 // one (ruleOrdinals), so rules stored in their recorded order keep it.
 // It answers models.ErrNotFound when the rule's group is not stored,
-// which its foreign key would refuse.
+// which its foreign key would refuse, and ErrSourceHeld when a stored
+// rule of its permission holds its source, which AWS never answers.
 func (lt *LoadTx) PutSecurityGroupRule(account, region string, rule EC2SecurityGroupRule) error {
 	if err := lt.exists(`SELECT 1 FROM ec2_security_groups WHERE account_id = ? AND id = ?`, account, rule.GroupID); err != nil {
 		return err
@@ -101,6 +106,9 @@ func (lt *LoadTx) PutSecurityGroupRule(account, region string, rule EC2SecurityG
 	var held bool
 	if err := lt.QueryRow(ruleOrdinals, ruleMatchArgs(account, rule)...).Scan(&rule.PermOrd, &rule.SrcOrd, &held); err != nil {
 		return err
+	}
+	if held {
+		return ErrSourceHeld
 	}
 	return insertRule(lt, account, region, rule)
 }
