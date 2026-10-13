@@ -466,9 +466,10 @@ func renderKeyPairs(tx *repository.LoadTx, names []string) ([]byte, error) {
 // decodeVolumes loads each volume with its tags and its attachments,
 // as recorded. Its snapshot and KMS key are references the reader never
 // reads: snapshots are not modelled, and KMS keys live in kmsStore, not
-// rows. One attached to an instance no exchange loaded is refused
-// naming both: instances load first (ec2_volumes ranks after
-// ec2_instances).
+// rows. One attached to an instance no exchange loaded, or whose
+// attachment disagrees with the instance's blockDeviceMapping, is refused
+// naming both (checkVolumeAttachment): instances load first (ec2_volumes
+// ranks after ec2_instances).
 func decodeVolumes(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 	var body ec2DescribeVolumesResult
 	if err := decodeEC2(ex, &body); err != nil {
@@ -489,11 +490,7 @@ func decodeVolumes(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 		items[i] = loadItem{loadRef: ref, Path: "volumeSet/item", Index: i, Refs: refs,
 			write: ec2Write(env, ec2TagsFromXML(ref, x.TagSet), func(tx *repository.LoadTx) error {
 				for _, a := range vol.Attachments {
-					_, err := tx.Instance(a.InstanceID)
-					if errors.Is(err, models.ErrNotFound) {
-						return loadRefusal(fmt.Sprintf("volume %s is attached to instance %s, which no exchange loaded", vol.ID, a.InstanceID))
-					}
-					if err != nil {
+					if err := checkVolumeAttachment(tx, vol.ID, a); err != nil {
 						return err
 					}
 				}
@@ -501,6 +498,50 @@ func decodeVolumes(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 			})}
 	}
 	return items, nil
+}
+
+// checkVolumeAttachment refuses volume id's attachment a when its
+// instance no exchange loaded, or when that instance's recorded
+// blockDeviceMapping names no such volume, or names it with another
+// device, status, attachTime or deleteOnTermination: terminate acts on
+// the volume's copy, so the two must agree. loadReference.Path cannot
+// compare them: the volume's copy sits in its attachmentSet, under
+// other names.
+func checkVolumeAttachment(tx *repository.LoadTx, id string, a repository.EC2VolumeAttachment) error {
+	inst, err := tx.Instance(a.InstanceID)
+	if errors.Is(err, models.ErrNotFound) {
+		return loadRefusal(fmt.Sprintf("volume %s is attached to instance %s, which no exchange loaded", id, a.InstanceID))
+	}
+	if err != nil {
+		return err
+	}
+	var recorded ec2InstanceRecordedXML
+	if len(inst.Recorded) > 0 {
+		if err := json.Unmarshal(inst.Recorded, &recorded); err != nil {
+			return err
+		}
+	}
+	i := slices.IndexFunc(recorded.BlockDeviceMapping, func(b ec2InstanceBlockDeviceXML) bool { return b.Ebs != nil && b.Ebs.VolumeId == id })
+	if i < 0 {
+		return loadRefusal(fmt.Sprintf("volume %s is attached to instance %s, whose blockDeviceMapping does not name it", id, a.InstanceID))
+	}
+	b := recorded.BlockDeviceMapping[i]
+	var differ []string
+	for _, f := range []struct{ name, volume, instance string }{
+		{"device", a.Device, b.DeviceName},
+		{"status", a.State, b.Ebs.Status},
+		{"attachTime", a.AttachTime, b.Ebs.AttachTime},
+		{"deleteOnTermination", a.DeleteOnTermination, b.Ebs.DeleteOnTermination},
+	} {
+		if f.volume != f.instance {
+			differ = append(differ, f.name)
+		}
+	}
+	if len(differ) > 0 {
+		return loadRefusal(fmt.Sprintf("volume %s: its attachment to instance %s differs from the instance's blockDeviceMapping at %s",
+			id, a.InstanceID, strings.Join(differ, ", ")))
+	}
+	return nil
 }
 
 func renderVolumes(tx *repository.LoadTx, ids []string) ([]byte, error) {

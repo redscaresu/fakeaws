@@ -417,7 +417,7 @@ func TestContract_request_log_filter_refused(t *testing.T) {
 		{"AuthorizeSecurityGroupIngress", url.Values{"GroupName": {"web"}, "IpPermissions.1.IpProtocol": {"tcp"}}},
 		{"AuthorizeSecurityGroupIngress", url.Values{"GroupId": {"sg-x"}, "IpProtocol": {"tcp"}, "FromPort": {"22"}, "ToPort": {"22"}, "CidrIp": {"0.0.0.0/0"}}},
 		{"RevokeSecurityGroupIngress", url.Values{"GroupName": {"web"}}},
-		{"CreateTags", url.Values{"ResourceId.1": {"vol-x"}, "Tag.1.Key": {"k"}}},
+		{"CreateTags", url.Values{"ResourceId.1": {"snap-x"}, "Tag.1.Key": {"k"}}},
 	} {
 		resp, body := ec2Call(t, srv, region, c.action, c.params)
 		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%v: %s", c.params, body)

@@ -565,7 +565,8 @@ func (e *InstanceError) Unwrap() error { return e.Err }
 // refused too, each as an *InstanceError, moving none. Terminating
 // deletes the instance's ENIs, but for one a load kept on termination,
 // which it detaches, and clears the associations of its EIPs on the
-// ENIs it deletes; it deletes or detaches its volumes the same way
+// ENIs it deletes; it detaches its volumes, deleting one it was the
+// last instance of when attached with deleteOnTermination true
 // (terminateVolumesTx).
 func (r *Repository) SetInstanceState(account, region, state string, ids ...string) ([]string, error) {
 	previous := make([]string, len(ids))

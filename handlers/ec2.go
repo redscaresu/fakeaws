@@ -4473,6 +4473,10 @@ var ec2TaggedKinds = []ec2TaggedKind{
 		_, err := app.repo.GetEIP(account, region, id)
 		return err
 	}},
+	{"vol-", "volume", ec2VolumeNotFound, func(app *Application, account, region, id string) error {
+		_, err := app.repo.GetVolume(account, region, id)
+		return err
+	}},
 }
 
 // parseTags reads a flattened <prefix>N.Key / <prefix>N.Value list.

@@ -1,8 +1,9 @@
 // Package repository — EC2 volumes.
 //
 // fakeaws creates no volume: a load stores one (LoadTx.PutVolume), and
-// terminating an instance deletes the volumes attached to it with
-// deleteOnTermination true and detaches the rest (terminateVolumesTx).
+// terminating an instance deletes a volume it was the last instance of
+// when attached with deleteOnTermination true, and detaches the rest
+// (terminateVolumesTx).
 // A volume's attachments live in its data, not a foreign key, since a
 // multi-attach volume has several instances; its loader checks each.
 // Its table is ec2_compute.go's, created before ec2_tags.go's triggers.
@@ -11,7 +12,10 @@ package repository
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"slices"
+
+	"github.com/redscaresu/fakeaws/models"
 )
 
 // EC2Volume is a loaded volume, each field as DescribeVolumes recorded
@@ -72,6 +76,15 @@ func (r *Repository) ListVolumes(account, region string) ([]*EC2Volume, error) {
 	return out, rows.Err()
 }
 
+// GetVolume reads volume id in region, or answers models.ErrNotFound.
+func (r *Repository) GetVolume(account, region, id string) (*EC2Volume, error) {
+	v, err := scanVolume(r.db.QueryRow(`SELECT data FROM ec2_volumes WHERE account_id = ? AND region = ? AND id = ?`, account, region, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, models.ErrNotFound
+	}
+	return v, err
+}
+
 func scanVolume(scan func(...any) error) (*EC2Volume, error) {
 	var data string
 	if err := scan(&data); err != nil {
@@ -81,9 +94,11 @@ func scanVolume(scan func(...any) error) (*EC2Volume, error) {
 	return &v, json.Unmarshal([]byte(data), &v)
 }
 
-// terminateVolumesTx deletes each volume whose attachment to instance
-// id has deleteOnTermination true, and detaches the others from it:
-// one left with no attachment is available.
+// terminateVolumesTx detaches instance id from each volume attached to
+// it. A volume id was the last instance of is deleted when its
+// attachment to id has deleteOnTermination true, as EC2 deletes a
+// Multi-Attach volume only when its last instance terminates; else it is
+// left available.
 func terminateVolumesTx(tx *sql.Tx, account, id string) error {
 	rows, err := tx.Query(`SELECT data FROM ec2_volumes WHERE account_id = ? AND EXISTS
 		(SELECT 1 FROM json_each(data, '$.attachments') a WHERE json_extract(a.value, '$.instance_id') = ?)`, account, id)
@@ -99,6 +114,10 @@ func terminateVolumesTx(tx *sql.Tx, account, id string) error {
 		}
 		vols = append(vols, v)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
@@ -111,12 +130,11 @@ func terminateVolumesTx(tx *sql.Tx, account, id string) error {
 }
 
 func terminateVolumeTx(tx *sql.Tx, account, id string, v *EC2Volume) error {
-	mine := func(a EC2VolumeAttachment) bool { return a.InstanceID == id }
-	if slices.ContainsFunc(v.Attachments, func(a EC2VolumeAttachment) bool { return mine(a) && a.DeleteOnTermination == "true" }) {
+	if len(v.Attachments) == 1 && v.Attachments[0].DeleteOnTermination == "true" {
 		_, err := tx.Exec(`DELETE FROM ec2_volumes WHERE account_id = ? AND id = ?`, account, v.ID)
 		return err
 	}
-	v.Attachments = slices.DeleteFunc(v.Attachments, mine)
+	v.Attachments = slices.DeleteFunc(v.Attachments, func(a EC2VolumeAttachment) bool { return a.InstanceID == id })
 	if len(v.Attachments) == 0 {
 		v.State = "available"
 	}

@@ -2351,6 +2351,7 @@ func TestEC2_TagsUnknownResource(t *testing.T) {
 		"sg-doesnotexist":     "InvalidGroup.NotFound",
 		"i-doesnotexist":      "InvalidInstanceID.NotFound",
 		"eni-doesnotexist":    "InvalidNetworkInterfaceID.NotFound",
+		"vol-doesnotexist":    "InvalidVolume.NotFound",
 	} {
 		for _, action := range []string{"CreateTags", "DeleteTags"} {
 			resp, body := ec2Call(t, srv, tagRegion, action, tagParams(url.Values{"ResourceId.1": {id}}, "Tag.", "k", "v"))
@@ -2359,9 +2360,9 @@ func TestEC2_TagsUnknownResource(t *testing.T) {
 		}
 	}
 	for _, action := range []string{"CreateTags", "DeleteTags"} {
-		resp, body := ec2Call(t, srv, tagRegion, action, tagParams(url.Values{"ResourceId.1": {"vol-0123"}}, "Tag.", "k", "v"))
+		resp, body := ec2Call(t, srv, tagRegion, action, tagParams(url.Values{"ResourceId.1": {"snap-0123"}}, "Tag.", "k", "v"))
 		assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s on a type fakeaws does not tag: %s", action, body)
-		assert.Equal(t, action+": not modelled by fakeaws: tags on vol-0123", extractEC2Tag(body, "Message"), action)
+		assert.Equal(t, action+": not modelled by fakeaws: tags on snap-0123", extractEC2Tag(body, "Message"), action)
 	}
 
 	// A known VPC alongside an unknown one tags neither.

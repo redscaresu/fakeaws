@@ -690,3 +690,66 @@ func TestLoadEC2Volumes_AttachedToAnInstanceNotRecorded(t *testing.T) {
 		len(sgRecording(t)), fixtureVolume))
 	assert.Equal(t, before, loadedState(t, app, srv), "a refused load stored something")
 }
+
+// TestLoadEC2Volumes_Tags: CreateTags and DeleteTags take a loaded
+// volume's id, and DescribeVolumes answers the change.
+func TestLoadEC2Volumes_Tags(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	loadNet(t, srv, volumeRecording(t, "true")...)
+	mustOK(t)(ec2Call(t, srv, netRegion, "CreateTags", url.Values{"ResourceId.1": {fixtureVolume}, "Tag.1.Key": {"Env"}, "Tag.1.Value": {"prod"}}))
+	body := mustOK(t)(ec2Call(t, srv, netRegion, "DescribeVolumes", ec2FilterParams("tag:Env", "prod")))
+	assert.Equal(t, fixtureVolume, extractEC2Tag(body, "volumeId"))
+
+	mustOK(t)(ec2Call(t, srv, netRegion, "DeleteTags", url.Values{"ResourceId.1": {fixtureVolume}, "Tag.1.Key": {"Name"}}))
+	byID, _ := volumeFixtures(t, deleteOnTermination("true"))
+	answered := resend(t, srv, byID)
+	assert.Contains(t, answered, "<key>Env</key>")
+	assert.NotContains(t, answered, "<key>Name</key>")
+}
+
+// TestLoadEC2Volumes_AttachmentDisagreesWithBlockDeviceMapping: a volume
+// whose attachment differs from its instance's blockDeviceMapping item,
+// or which that blockDeviceMapping does not name, is refused naming
+// both, and the load stores nothing.
+func TestLoadEC2Volumes_AttachmentDisagreesWithBlockDeviceMapping(t *testing.T) {
+	for name, c := range map[string]struct {
+		recording func(t *testing.T) []netRecorded
+		want      string
+	}{
+		"deleteOnTermination false in the instance, true in the volume": {
+			func(t *testing.T) []netRecorded {
+				recording := volumeRecording(t, "false")
+				for i, r := range recording {
+					if r.action == "DescribeVolumes" {
+						recording[i].body = strings.ReplaceAll(r.body, "<deleteOnTermination>false<", "<deleteOnTermination>true<")
+					}
+				}
+				return recording
+			},
+			"volume " + fixtureVolume + ": its attachment to instance " + fixtureInstance + " differs from the instance's blockDeviceMapping at deleteOnTermination",
+		},
+		"an instance with no block device": {
+			func(t *testing.T) []netRecorded {
+				vols, _ := volumeFixtures(t, deleteOnTermination("true"))
+				return append(instanceRecording(t), vols)
+			},
+			"volume " + fixtureVolume + " is attached to instance " + fixtureInstance + ", whose blockDeviceMapping does not name it",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			app, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+			seedLoadRows(t, srv)
+			before := loadedState(t, app, srv)
+			var exchanges []string
+			for _, r := range c.recording(t) {
+				exchanges = append(exchanges, r.exchange())
+			}
+			status, body := postLoad(t, srv, loadEnvelope(loadAccount, netRegion, exchanges...))
+			require.Equal(t, http.StatusBadRequest, status, body)
+			assert.True(t, slices.ContainsFunc(loadRefusals(t, body), func(r string) bool {
+				return strings.HasSuffix(r, "ec2 DescribeVolumes: "+c.want)
+			}), body)
+			assert.Equal(t, before, loadedState(t, app, srv), "a refused load stored something")
+		})
+	}
+}
