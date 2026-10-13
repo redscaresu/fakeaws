@@ -249,7 +249,7 @@ func TestLoadEC2Network_TagFiltersSelectLoadedRows(t *testing.T) {
 	assert.Equal(t, "subnet-0tagged", extractEC2Tag(body, "subnetId"))
 }
 
-func TestLoadEC2Network_Refusals(t *testing.T) {
+func TestContract_mock_load_refuses_dangling_reference(t *testing.T) {
 	vpc := netVpcs(netVpc("vpc-0a", "<isDefault>false</isDefault>"))
 	dns := netDNS("vpc-0a", true)
 	cases := map[string]struct {

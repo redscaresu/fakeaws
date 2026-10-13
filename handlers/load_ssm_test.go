@@ -103,7 +103,7 @@ func TestLoadSSM_PublicParameterLoadsByteExact(t *testing.T) {
 	assert.NotContains(t, got.Parameter.ARN, loadAccount, "the ARN holds the loaded account")
 }
 
-func TestLoadSSM_NotFoundLoadsNothing(t *testing.T) {
+func TestContract_mock_load_not_found_loads_nothing(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	status, answer := loadSSM(t, srv, ssmGetParameterExchange(http.StatusBadRequest, `{"__type":"ParameterNotFound","message":"x"}`))
 	require.Equal(t, http.StatusOK, status, answer)
@@ -181,7 +181,7 @@ func TestLoadSSM_PutParameterOnTheLoadedParameterIsRefused(t *testing.T) {
 	ssmGetEqual(t, srv, al2023Parameter, fixture)
 }
 
-func TestLoadSSM_UnmodelledFieldRefusesTheLoad(t *testing.T) {
+func TestContract_mock_load_refuses_unheld_field(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	fixture := strings.Replace(ssmFixture(t), `"Version": 61`, `"Version": 61, "Foo": "bar"`, 1)
 	status, body := loadSSM(t, srv, ssmGetParameterExchange(http.StatusOK, fixture))

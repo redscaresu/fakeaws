@@ -199,7 +199,7 @@ func seedLoadRows(t *testing.T, srv *httptest.Server) string {
 	return vpcID
 }
 
-func TestMockLoad_UnroutedWithoutTheFlag(t *testing.T) {
+func TestContract_mock_load_off_by_default(t *testing.T) {
 	_, srv := newTestApp(t, ":memory:")
 	unknown, unknownBody := doPost(t, srv, "/mock/no-such-path")
 	status, body := mockRequest(t, srv, http.MethodPost, "/mock/load", nil, loadEnvelope(loadAccount, loadRegion))
@@ -242,7 +242,7 @@ func TestMockLoad_GuardedAndCapped(t *testing.T) {
 	assert.Equal(t, http.StatusOK, status, "a body at the limit loads: %s", body)
 }
 
-func TestMockLoad_EmptyLoadReplacesEveryRowAndKeepsTheSnapshot(t *testing.T) {
+func TestContract_mock_load_keeps_snapshot(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "load.db")
 	app, srv := newLoadApp(t, handlers.Options{DBPath: dbPath})
 	vpcID := seedLoadRows(t, srv)
@@ -496,7 +496,7 @@ func TestMockLoad_FailureLogsOnlyTheExchange(t *testing.T) {
 	assert.NotContains(t, body, "no such table")
 }
 
-func TestMockLoad_SecondLoadReplacesTheFirst(t *testing.T) {
+func TestContract_mock_load_replaces_every_row_atomically(t *testing.T) {
 	app, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	status, body := postLoad(t, srv, loadEnvelope(loadAccount, loadRegion,
 		putVpc("vpc-0first"), putSubnet("subnet-0first", "vpc-0first")))

@@ -126,10 +126,10 @@ func TestLoadEC2Groups_SameGroupInTwoReadsLoadsOnce(t *testing.T) {
 	}
 }
 
-// TestLoadEC2Groups_DefaultGroupNeverMinted: a VPC's recorded default
+// TestContract_mock_load_never_mints: a VPC's recorded default
 // group answers under its recorded id, with its rule allowing itself, and a VPC whose recording holds
 // none has none, after the load and after a snapshot and restore.
-func TestLoadEC2Groups_DefaultGroupNeverMinted(t *testing.T) {
+func TestContract_mock_load_never_mints(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: filepath.Join(t.TempDir(), "state.db")})
 	self := netGroups(map[string]string{"GroupId.1": "sg-0default"}, netGroup("sg-0default", fixtureVpcs[0], "default",
 		"<ipPermissions><item><ipProtocol>-1</ipProtocol><groups><item><userId>"+loadAccount+"</userId><groupId>sg-0default</groupId></item></groups></item></ipPermissions>"))

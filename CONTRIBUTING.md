@@ -30,13 +30,13 @@ When you add a new AWS service to fakeaws, the SAME PR must include:
 2. **Handler tests**: `handlers/<service>_test.go` covering CRUD + FK + cascade + state-machine transitions where applicable.
 3. **Examples**: `examples/working/<service>/`, `examples/misconfigured/<service>_*/` (where the misconfigured example demonstrates a real fakeaws-only error that `terraform validate` cannot catch), and `examples/updates/update_<service>/`.
 4. **Scenario anchor**: a `cloud: aws` training scenario in InfraFactory's `scenarios/training/` that exercises the new service end-to-end.
-5. **coverage_matrix.yaml entry**: documents the integration test + example dirs + scenario anchor for the new service.
+5. **coverage_matrix.yaml entry**: documents the integration test + example dirs + scenario anchor for the new service, and exactly one of `loadable: true` (a `POST /mock/load` of a recorded read gives a fresh fakeaws the type; at least one working example declaring it is round-tripped by `examples/load_round_trip_test.go`) or `loadable_exempt_reason`.
 6. **`LandedServices` flip**: add `<service>` to `handlers/regression_manifest.go::LandedServices` so the regression test suite stops skipping its standing patterns.
 
 The two CI-enforced audits prevent partial bundles from sneaking past review:
 
 - `TestRegressionSeedAuditManifestMatchesHandlers` (handlers/regression_audit_test.go): every service prefix in `handlers/` must appear in `LandedServices`.
-- `TestFullCoverageAudit` (internal/audit/audit_test.go): every `coverage_matrix.yaml` entry must have an integration test, example dirs (or documented exemption), and ≥1 scenario anchor.
+- `TestFullCoverageAudit` (internal/audit/audit_test.go): every `coverage_matrix.yaml` entry must have an integration test, example dirs (or documented exemption), ≥1 scenario anchor, and exactly one of `loadable: true` and `loadable_exempt_reason`.
 
 ## Wire formats
 

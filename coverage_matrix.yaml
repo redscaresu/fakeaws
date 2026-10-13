@@ -76,10 +76,10 @@ entries:
     loadable: true
     working_dir_name: iam_role_inline_policy
     misconfigured_exempt: true
-    misconfigured_exempt_reason: "The one FK gate, PutRolePolicy on a missing role answering NoSuchEntity naming the role, is pinned by TestIAM_RoleInlinePolicyLifecycle's missing-role case."
+    misconfigured_exempt_reason: "The one FK gate, PutRolePolicy on a missing role answering NoSuchEntity naming the role, is pinned by TestContract_iam_role_inline_policies_stored's missing-role case."
     updates_exempt: true
-    updates_exempt_reason: "A changed document is the same PutRolePolicy as Create (a second Put replaces it), pinned in TestIAM_RoleInlinePolicyLifecycle; a v1→v2 example would repeat the working one."
-    integration_test_func_name: "^TestIAM_RoleInlinePolicyLifecycle$"
+    updates_exempt_reason: "A changed document is the same PutRolePolicy as Create (a second Put replaces it), pinned in TestContract_iam_role_inline_policies_stored; a v1→v2 example would repeat the working one."
+    integration_test_func_name: "^TestContract_iam_role_inline_policies_stored$"
 
   # S3 (S43-T8 handlers, S43-T14 e2e + this matrix entry).
   # Per concepts.md "Resolved decisions" item / examples/README.md:

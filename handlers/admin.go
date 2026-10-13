@@ -430,6 +430,10 @@ func (app *Application) handleMockSnapshot(w http.ResponseWriter, _ *http.Reques
 	writeJSONStatus(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
+// CRITICAL[restore-refuses-other-schema-version]: a snapshot at another
+// db schema version is refused 409 naming both versions, and the live
+// state is as it was: a mock db is never migrated.
+//
 // handleMockRestore swaps in the snapshot's identity and db handle, so
 // it holds identityMu exclusively, as setIdentity does. The copy of the
 // snapshot that goes live first gets the default security group of each

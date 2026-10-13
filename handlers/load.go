@@ -193,6 +193,34 @@ func (a *loadAbort) Error() string {
 // logged or answered either.
 var errLoadTransaction = errors.New("the load's transaction failed and wrote nothing")
 
+// CRITICAL[mock-load-off-by-default]: without Options.LoadMaxBytes the
+// route is not registered, so POST /mock/load answers as any unknown
+// /mock path, and NewApplication refuses LoadMaxBytes without an admin
+// token: a load deletes every row.
+//
+// CRITICAL[mock-load-replaces-every-row-atomically]: a load deletes
+// every row, stores the identity and writes the recorded rows in one
+// transaction, so a second load replaces the first whole and a refusal
+// or failure leaves the database as it was.
+//
+// CRITICAL[mock-load-keeps-snapshot]: a load never touches the
+// snapshot, so /mock/restore after a load returns to the snapshot.
+//
+// CRITICAL[mock-load-refuses-unheld-field]: a field of a recorded body
+// that the model cannot hold refuses the load, naming the row and the
+// field's path, whatever the handler's own decoder would drop.
+//
+// CRITICAL[mock-load-never-mints]: a row loads with the id, ARN, owner,
+// default group and name the body held; a load never generates one the
+// body lacks.
+//
+// CRITICAL[mock-load-refuses-dangling-reference]: a row referencing a
+// row no exchange loaded is refused, unless the reader never reads that
+// type (loadReference.Unread), which loads as unresolved.
+//
+// CRITICAL[mock-load-not-found-loads-nothing]: a non-2xx answering its
+// loader's NotFound code loads no row and counts under absent.
+//
 // handleMockLoad replaces every row with a recorded read of at most
 // loadMaxBytes (413 over it): 200 with a loadAnswer; 400 listing every
 // refusal, and where the load stopped when a loader failed after them;

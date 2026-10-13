@@ -1194,6 +1194,10 @@ type iamGetUserPolicyResult struct {
 	PolicyDocument string `xml:"PolicyDocument"`
 }
 
+// CRITICAL[iam-role-inline-policies-stored]: PutRolePolicy,
+// GetRolePolicy and ListRolePolicies answer from a stored row, not a
+// no-op and an empty list: the provider reads back what it put.
+//
 // iamPutRolePolicy stores a role's inline policy verbatim; a second
 // Put of the same name replaces it.
 func (app *Application) iamPutRolePolicy(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
