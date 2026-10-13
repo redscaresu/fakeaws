@@ -108,6 +108,33 @@ func TestLoadEC2Compute_MutateOnce(t *testing.T) {
 	assert.Equal(t, []string{"keySet/item[0]/tagSet/item[0]"}, ren)
 }
 
+// TestLoadEC2Compute_AttachedWithoutInstanceRefusedByItsAttachment: an
+// interface attached at device index 1 with no instance (a NAT gateway's
+// or a load balancer's) is refused as before instances loaded, by the
+// rendering diff naming its attachment, which no row holds; never as an
+// instance's secondary interface.
+func TestLoadEC2Compute_AttachedWithoutInstanceRefusedByItsAttachment(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	enis, eips, _ := computeFixtures(t)
+	const tags = "</groupSet>\n         <tagSet>\n           <item>"
+	require.Contains(t, enis.body, tags)
+	enis.body = strings.Replace(enis.body, tags, "</groupSet><attachment><attachmentId>ela-attach-0abc</attachmentId>"+
+		"<instanceOwnerId>amazon-elb</instanceOwnerId><deviceIndex>1</deviceIndex><networkCardIndex>0</networkCardIndex>"+
+		"<status>attached</status><deleteOnTermination>false</deleteOnTermination></attachment><tagSet><item>", 1)
+	var exchanges []string
+	for _, r := range sgRecording(t, enis, eips) {
+		exchanges = append(exchanges, r.exchange())
+	}
+	status, body := postLoad(t, srv, loadEnvelope(loadAccount, netRegion, exchanges...))
+	require.Equal(t, http.StatusBadRequest, status, body)
+	refusals := loadRefusals(t, body)
+	assert.Contains(t, refusals, fmt.Sprintf("exchange %d: ec2 DescribeNetworkInterfaces: network-interface %s: the model cannot hold recorded networkInterfaceSet/item[1]/attachment/deviceIndex",
+		len(sgRecording(t)), fixtureENI2))
+	for _, r := range refusals {
+		assert.NotContains(t, r, "device index", "refused as a secondary interface")
+	}
+}
+
 // TestLoadEC2Compute_ModifyENIOneAttributePerCall: an attribute fakeaws
 // does not model beside Description.Value, or Groups and Description in
 // one call, which EC2 refuses, is refused 501 naming each, and the
@@ -227,9 +254,32 @@ func TestLoadEC2Compute_Refusals(t *testing.T) {
 			}
 			status, body := postLoad(t, srv, loadEnvelope(loadAccount, netRegion, exchanges...))
 			require.Equal(t, http.StatusBadRequest, status, body)
-			assert.Contains(t, loadRefusals(t, body), c.want)
+			refusals := loadRefusals(t, body)
+			assert.Contains(t, refusals, c.want)
+			for _, r := range refusals {
+				assert.NotContains(t, r, "the load stopped there", "a refusal, never an abort")
+			}
 			assert.Equal(t, before, loadedState(t, app, srv), "a refused load stored something")
 		})
+	}
+}
+
+// TestLoadEC2Instances_InterfaceKeptOnTermination: an instance whose
+// primary interface was attached with deleteOnTermination false (a
+// network_interface block naming an existing interface) loads, and
+// both the instance and the interface answer false.
+func TestLoadEC2Instances_InterfaceKeptOnTermination(t *testing.T) {
+	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
+	_, _, keys := computeFixtures(t)
+	byID, _, attrs, eni := instanceFixtures(t)
+	keep := strings.NewReplacer("<deleteOnTermination>true</deleteOnTermination>", "<deleteOnTermination>false</deleteOnTermination>")
+	byID.body, eni.body = keep.Replace(byID.body), keep.Replace(eni.body)
+	loadNet(t, srv, sgRecording(t, append([]netRecorded{keys, byID, eni}, attrs...)...)...)
+	for _, r := range []netRecorded{byID, eni} {
+		rec, ren := diffAnswer(t, srv, r)
+		assert.Empty(t, rec, "%s: recorded only", r.action)
+		assert.Empty(t, ren, "%s: answered only", r.action)
+		assert.Equal(t, "false", extractEC2Tag([]byte(resend(t, srv, r)), "deleteOnTermination"), r.action)
 	}
 }
 
@@ -420,6 +470,10 @@ func TestLoadEC2Instances_Refusals(t *testing.T) {
 			at(3, "DescribeNetworkInterfaces") + "network-interface eni-0secondary is attached to instance " + fixtureInstance +
 				" at device index 1: only an instance's primary interface (device index 0) is modelled",
 		},
+		"a primary interface naming a group not recorded": {
+			append([]netRecorded{keys, {eni.action, eni.params, strings.ReplaceAll(eni.body, fixtureSG, "sg-0missing")}, byID}, attrs...),
+			at(1, "DescribeNetworkInterfaces") + "network-interface " + fixtureInstanceENI + " references security-group sg-0missing, which no exchange loaded",
+		},
 		"a key pair not recorded": {
 			append([]netRecorded{eni, byID}, attrs...),
 			at(1, "DescribeInstances") + instance + " references key-pair my-key-pair, which no exchange loaded",
@@ -449,7 +503,11 @@ func TestLoadEC2Instances_Refusals(t *testing.T) {
 			}
 			status, body := postLoad(t, srv, loadEnvelope(loadAccount, netRegion, exchanges...))
 			require.Equal(t, http.StatusBadRequest, status, body)
-			assert.Contains(t, loadRefusals(t, body), c.want)
+			refusals := loadRefusals(t, body)
+			assert.Contains(t, refusals, c.want)
+			for _, r := range refusals {
+				assert.NotContains(t, r, "the load stopped there", "a refusal, never an abort")
+			}
 			assert.Equal(t, before, loadedState(t, app, srv), "a refused load stored something")
 		})
 	}

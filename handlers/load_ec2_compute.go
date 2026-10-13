@@ -196,7 +196,10 @@ func renderInstances(tx *repository.LoadTx, ids []string) ([]byte, error) {
 }
 
 // ec2LoadedInstanceNet reads back what an instance on eni answers
-// besides its row: eni's Elastic IP and its groups' names.
+// besides its row: eni's Elastic IP and its groups' names. A group no
+// exchange loaded answers no name, as DescribeInstances' groupNames
+// does: resolve has refused the interface naming it, so the render
+// must not abort the load on top of that.
 func ec2LoadedInstanceNet(tx *repository.LoadTx, eni *repository.EC2NetworkInterface) (ec2InstanceNet, error) {
 	net := ec2InstanceNet{eni: eni, groupNames: map[string]string{}}
 	if eni == nil {
@@ -208,10 +211,13 @@ func ec2LoadedInstanceNet(tx *repository.LoadTx, eni *repository.EC2NetworkInter
 	}
 	for _, g := range eni.SecurityGroupIDs {
 		sg, err := tx.SecurityGroup(g)
-		if err != nil {
+		switch {
+		case errors.Is(err, models.ErrNotFound):
+		case err != nil:
 			return net, err
+		default:
+			net.groupNames[g] = sg.GroupName
 		}
-		net.groupNames[g] = sg.GroupName
 	}
 	return net, nil
 }
@@ -280,8 +286,8 @@ func renderInstanceAttribute(tx *repository.LoadTx, ids []string) ([]byte, error
 // names; an amazon-owned public IP is held as the interface's own. One
 // whose subnet, or the instance it is attached to, no exchange loaded is
 // refused naming both: instances load first (ec2_instances is the
-// parent table). One attached at a device index other than 0 is
-// refused: an instance has only its primary interface.
+// parent table). One attached to an instance at a device index other
+// than 0 is refused: an instance has only its primary interface.
 func decodeNetworkInterfaces(env *loadEnvelope, ex *loadExchange) ([]loadItem, error) {
 	var body ec2DescribeNetworkInterfacesResult
 	if err := decodeEC2(ex, &body); err != nil {
@@ -300,7 +306,7 @@ func decodeNetworkInterfaces(env *loadEnvelope, ex *loadExchange) ([]loadItem, e
 		ref := loadRef{"network-interface", x.NetworkInterfaceId}
 		items[i] = loadItem{loadRef: ref, Path: "networkInterfaceSet/item", Index: i, Refs: refs,
 			write: ec2Write(env, ec2TagsFromXML(ref, x.TagSet), func(tx *repository.LoadTx) error {
-				if a := x.Attachment; a != nil && a.DeviceIndex != 0 {
+				if a := x.Attachment; a != nil && a.InstanceId != "" && a.DeviceIndex != 0 {
 					return loadRefusal(fmt.Sprintf("network-interface %s is attached to instance %s at device index %d: only an instance's primary interface (device index 0) is modelled",
 						eni.ID, eni.InstanceID, a.DeviceIndex))
 				}
@@ -330,7 +336,7 @@ func ec2ENIFromXML(x ec2NetworkInterfaceXML, region string) *repository.EC2Netwo
 		eni.SecurityGroupIDs = append(eni.SecurityGroupIDs, g.GroupId)
 	}
 	if a := x.Attachment; a != nil {
-		eni.InstanceID, eni.AttachmentID = a.InstanceId, a.AttachmentId
+		eni.InstanceID, eni.AttachmentID, eni.KeepOnTermination = a.InstanceId, a.AttachmentId, !a.DeleteOnTermination
 	}
 	if a := x.Association; a != nil {
 		eni.PublicIP = a.PublicIp

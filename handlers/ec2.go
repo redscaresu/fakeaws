@@ -2882,7 +2882,7 @@ func ec2InstanceENIToXML(account string, eni *repository.EC2NetworkInterface, ei
 // ec2ENIToXML renders eni; eip is the address associated with it, nil
 // for none. An ENI with no instance has no attachment. A
 // launched ENI, which stores no owner, status or type, answers account,
-// in-use and interface.
+// in-use and interface, and is deleted on termination.
 func ec2ENIToXML(account string, eni *repository.EC2NetworkInterface, eip *repository.EC2EIP) ec2NetworkInterfaceXML {
 	x := ec2NetworkInterfaceXML{
 		NetworkInterfaceId: eni.ID,
@@ -2906,7 +2906,7 @@ func ec2ENIToXML(account string, eni *repository.EC2NetworkInterface, eip *repos
 			InstanceId:          eni.InstanceID,
 			InstanceOwnerId:     account,
 			Status:              "attached",
-			DeleteOnTermination: true,
+			DeleteOnTermination: !eni.KeepOnTermination,
 		}
 	}
 	for _, sgID := range eni.SecurityGroupIDs {

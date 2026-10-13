@@ -171,6 +171,10 @@ type EC2NetworkInterface struct {
 	OwnerID            string                `json:"owner_id,omitempty"`
 	Status             string                `json:"status,omitempty"`
 	PrivateIPAddresses []EC2PrivateIPAddress `json:"private_ip_addresses,omitempty"`
+	// KeepOnTermination is a loaded attached ENI's recorded
+	// deleteOnTermination false; a launched ENI is deleted with its
+	// instance.
+	KeepOnTermination bool `json:"keep_on_termination,omitempty"`
 }
 
 // EC2PrivateIPAddress is one of a loaded ENI's private IPv4 addresses.
