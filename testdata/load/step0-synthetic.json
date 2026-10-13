@@ -1,0 +1,250 @@
+{
+  "account": "111122223333",
+  "region": "us-west-2",
+  "timestamp": "2026-10-13T09:00:00Z",
+  "duration_ms": 1834,
+  "calls": 22,
+  "exchanges": [
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeVpcs",
+      "params": {
+        "Filter.1.Name": "tag-key",
+        "Filter.1.Value.1": "infrafactory-run-id"
+      },
+      "status": 200,
+      "body": "<DescribeVpcsResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n    <requestId>8b67ac77-886c-4027-8f0e-d351f7fc9971</requestId>\n    <vpcSet><item>\n            <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n            <ownerId>111122223333</ownerId>\n            <state>available</state>\n            <cidrBlock>10.0.0.0/16</cidrBlock>\n            <cidrBlockAssociationSet>\n                <item>\n                    <cidrBlock>10.0.0.0/16</cidrBlock>\n                    <associationId>vpc-cidr-assoc-067c3a0a1fEXAMPLE</associationId>\n                    <cidrBlockState>\n                        <state>associated</state>\n                    </cidrBlockState>\n                </item>\n            </cidrBlockAssociationSet>\n            <dhcpOptionsId>dopt-f30d649a</dhcpOptionsId><tagSet><item><key>infrafactory-run-id</key><value>step0-synthetic</value></item></tagSet>\n            <instanceTenancy>default</instanceTenancy>\n            <isDefault>false</isDefault>\n        </item></vpcSet>\n</DescribeVpcsResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeAvailabilityZones",
+      "params": {},
+      "status": 200,
+      "body": "<DescribeAvailabilityZonesResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n    <requestId>e23c5a54-a29c-43ee-8b55-0c13c26e9e01</requestId>\n    <availabilityZoneInfo>\n        <item>\n            <groupName>us-west-2-zg-1</groupName>\n            <optInStatus>opt-in-not-required</optInStatus>\n            <zoneName>us-west-2a</zoneName>\n            <zoneId>usw2-az1</zoneId>\n            <zoneState>available</zoneState>\n            <zoneType>availability-zone</zoneType>\n            <regionName>us-west-2</regionName>\n            <messageSet/>\n            <networkBorderGroup>us-west-2</networkBorderGroup>\n            <groupLongName>US West (Oregon) 1</groupLongName>\n            <geographySet>\n                <item>\n                    <name>United States of America</name>\n                </item>\n            </geographySet>\n            <subGeographySet>\n                <item>\n                    <name>Oregon</name>\n                </item>\n            </subGeographySet>\n        </item>\n        <item>\n            <groupName>us-west-2-zg-1</groupName>\n            <optInStatus>opt-in-not-required</optInStatus>\n            <zoneName>us-west-2b</zoneName>\n            <zoneId>usw2-az2</zoneId>\n            <zoneState>available</zoneState>\n            <zoneType>availability-zone</zoneType>\n            <regionName>us-west-2</regionName>\n            <messageSet/>\n            <networkBorderGroup>us-west-2</networkBorderGroup>\n            <groupLongName>US West (Oregon) 1</groupLongName>\n            <geographySet>\n                <item>\n                    <name>United States of America</name>\n                </item>\n            </geographySet>\n            <subGeographySet>\n                <item>\n                    <name>Oregon</name>\n                </item>\n            </subGeographySet>\n        </item>\n        <item>\n            <groupName>us-west-2-zg-1</groupName>\n            <optInStatus>opt-in-not-required</optInStatus>\n            <zoneName>us-west-2c</zoneName>\n            <zoneId>usw2-az3</zoneId>\n            <zoneState>available</zoneState>\n            <zoneType>availability-zone</zoneType>\n            <regionName>us-west-2</regionName>\n            <messageSet/>\n            <networkBorderGroup>us-west-2</networkBorderGroup>\n            <groupLongName>US West (Oregon) 1</groupLongName>\n            <geographySet>\n                <item>\n                    <name>United States of America</name>\n                </item>\n            </geographySet>\n            <subGeographySet>\n                <item>\n                    <name>Oregon</name>\n                </item>\n            </subGeographySet>\n        </item>\n        <item>\n            <groupName>us-west-2-zg-1</groupName>\n            <optInStatus>opt-in-not-required</optInStatus>\n            <zoneName>us-west-2d</zoneName>\n            <zoneId>usw2-az4</zoneId>\n            <zoneState>available</zoneState>\n            <zoneType>availability-zone</zoneType>\n            <regionName>us-west-2</regionName>\n            <messageSet/>\n            <networkBorderGroup>us-west-2</networkBorderGroup>\n            <groupLongName>US West (Oregon) 1</groupLongName>\n            <geographySet>\n                <item>\n                    <name>United States of America</name>\n                </item>\n            </geographySet>\n            <subGeographySet>\n                <item>\n                    <name>Oregon</name>\n                </item>\n            </subGeographySet>\n        </item>\n    </availabilityZoneInfo>\n</DescribeAvailabilityZonesResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeSecurityGroups",
+      "params": {
+        "Filter.1.Name": "tag-key",
+        "Filter.1.Value.1": "infrafactory-run-id"
+      },
+      "status": 200,
+      "body": "<DescribeSecurityGroupsResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n    <requestId>1d62eae0-acdd-481d-88c9-example</requestId>\n    <securityGroupInfo>\n        <item>\n            <ownerId>111122223333</ownerId>\n            <groupId>sg-1234567890abcdef0</groupId>\n            <groupName>SSHAccess</groupName>\n            <groupDescription>Security group for SSH access</groupDescription>\n            <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n            <securityGroupArn>arn:aws:ec2:us-west-2:111122223333:security-group/sg-1234567890abcdef0</securityGroupArn><tagSet><item><key>infrafactory-run-id</key><value>step0-synthetic</value></item></tagSet>\n            <ipPermissions>\n                <item>\n                    <ipProtocol>tcp</ipProtocol>\n                    <fromPort>22</fromPort>\n                    <toPort>22</toPort>\n                    <groups/>\n                    <ipRanges>\n                        <item>\n                            <cidrIp>203.0.113.0/24</cidrIp>\n                        </item>\n                        <item>\n                            <cidrIp>198.51.100.0/24</cidrIp>\n                        </item>\n                    </ipRanges>\n                    <ipv6Ranges/>\n                    <prefixListIds/>\n                </item>\n            </ipPermissions>\n            <ipPermissionsEgress>\n                <item>\n                    <ipProtocol>-1</ipProtocol>\n                    <groups/>\n                    <ipRanges>\n                        <item>\n                            <cidrIp>0.0.0.0/0</cidrIp>\n                        </item>\n                    </ipRanges>\n                    <ipv6Ranges/>\n                    <prefixListIds/>\n                </item>\n            </ipPermissionsEgress>\n        </item>\n    </securityGroupInfo>\n</DescribeSecurityGroupsResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeSecurityGroups",
+      "params": {
+        "Filter.1.Name": "group-name",
+        "Filter.1.Value.1": "infrafactory-absent",
+        "Filter.2.Name": "tag-key",
+        "Filter.2.Value.1": "infrafactory-run-id"
+      },
+      "status": 200,
+      "body": "<DescribeSecurityGroupsResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n    <requestId>1d62eae0-acdd-481d-88c9-example</requestId>\n    <securityGroupInfo></securityGroupInfo>\n</DescribeSecurityGroupsResponse>\n"
+    },
+    {
+      "service": "ssm",
+      "protocol": "json",
+      "action": "GetParameter",
+      "params": {
+        "Name": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+      },
+      "status": 200,
+      "body": "{\n    \"Parameter\": {\n        \"ARN\": \"arn:aws:ssm:us-west-2::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64\",\n        \"DataType\": \"text\",\n        \"LastModifiedDate\": 1727130213.462,\n        \"Name\": \"/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64\",\n        \"Type\": \"String\",\n        \"Value\": \"ami-0abcdef1234567890\",\n        \"Version\": 61\n    }\n}\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeSubnets",
+      "params": {
+        "Filter.1.Name": "vpc-id",
+        "Filter.1.Value.1": "vpc-0ee975135dEXAMPLE"
+      },
+      "status": 200,
+      "body": "<DescribeSubnetsResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n    <requestId>1927e20c-0ed0-4a02-a6d7-d955fbd2d13c</requestId>\n    <subnetSet>\n        <item>\n            <subnetId>subnet-0bb1c79de301436ee</subnetId>\n            <subnetArn>arn:aws:ec2:us-west-2:111122223333:subnet/subnet-0bb1c79de3EXAMPLE</subnetArn>\n            <state>available</state>\n            <ownerId>111122223333</ownerId>\n            <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n            <cidrBlock>10.0.2.0/24</cidrBlock>\n            <ipv6CidrBlockAssociationSet/>\n            <availableIpAddressCount>251</availableIpAddressCount>\n            <availabilityZone>us-west-2c</availabilityZone>\n            <availabilityZoneId>usw2-az3</availabilityZoneId>\n            <defaultForAz>false</defaultForAz>\n            <mapPublicIpOnLaunch>false</mapPublicIpOnLaunch>\n            <assignIpv6AddressOnCreation>false</assignIpv6AddressOnCreation>\n        </item>\n        <item>\n            <subnetId>subnet-02bf4c428bf44ebce</subnetId>\n            <subnetArn>arn:aws:ec2:us-west-2:111122223333:subnet/subnet-02bf4c428bEXAMPLE</subnetArn>\n            <state>available</state>\n            <ownerId>111122223333</ownerId>\n            <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n            <cidrBlock>10.0.0.0/24</cidrBlock>\n            <ipv6CidrBlockAssociationSet>\n                <item>\n                    <ipv6CidrBlock>2600:1f16:115:200::/64</ipv6CidrBlock>\n                    <associationId>subnet-cidr-assoc-002afb9f3cEXAMPLE</associationId>\n                    <ipv6CidrBlockState>\n                        <state>associated</state>\n                    </ipv6CidrBlockState>\n                </item>\n            </ipv6CidrBlockAssociationSet>\n            <availableIpAddressCount>251</availableIpAddressCount>\n            <availabilityZone>us-west-2b</availabilityZone>\n            <availabilityZoneId>usw2-az2</availabilityZoneId>\n            <defaultForAz>false</defaultForAz>\n            <mapPublicIpOnLaunch>true</mapPublicIpOnLaunch>\n            <assignIpv6AddressOnCreation>false</assignIpv6AddressOnCreation>\n        </item>\n    </subnetSet>\n</DescribeSubnetsResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeSecurityGroups",
+      "params": {
+        "Filter.1.Name": "vpc-id",
+        "Filter.1.Value.1": "vpc-0ee975135dEXAMPLE"
+      },
+      "status": 200,
+      "body": "<DescribeSecurityGroupsResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n    <requestId>1d62eae0-acdd-481d-88c9-example</requestId>\n    <securityGroupInfo>\n        <item>\n            <ownerId>111122223333</ownerId>\n            <groupId>sg-1234567890abcdef0</groupId>\n            <groupName>SSHAccess</groupName>\n            <groupDescription>Security group for SSH access</groupDescription>\n            <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n            <securityGroupArn>arn:aws:ec2:us-west-2:111122223333:security-group/sg-1234567890abcdef0</securityGroupArn><tagSet><item><key>infrafactory-run-id</key><value>step0-synthetic</value></item></tagSet>\n            <ipPermissions>\n                <item>\n                    <ipProtocol>tcp</ipProtocol>\n                    <fromPort>22</fromPort>\n                    <toPort>22</toPort>\n                    <groups/>\n                    <ipRanges>\n                        <item>\n                            <cidrIp>203.0.113.0/24</cidrIp>\n                        </item>\n                        <item>\n                            <cidrIp>198.51.100.0/24</cidrIp>\n                        </item>\n                    </ipRanges>\n                    <ipv6Ranges/>\n                    <prefixListIds/>\n                </item>\n            </ipPermissions>\n            <ipPermissionsEgress>\n                <item>\n                    <ipProtocol>-1</ipProtocol>\n                    <groups/>\n                    <ipRanges>\n                        <item>\n                            <cidrIp>0.0.0.0/0</cidrIp>\n                        </item>\n                    </ipRanges>\n                    <ipv6Ranges/>\n                    <prefixListIds/>\n                </item>\n            </ipPermissionsEgress>\n        </item>\n    </securityGroupInfo>\n</DescribeSecurityGroupsResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeSecurityGroupRules",
+      "params": {
+        "Filter.1.Name": "group-id",
+        "Filter.1.Value.1": "sg-1234567890abcdef0"
+      },
+      "status": 200,
+      "body": "<DescribeSecurityGroupRulesResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>\n   <securityGroupRuleSet>\n      <item>\n         <securityGroupRuleId>sgr-abcdef01234567890</securityGroupRuleId>\n         <securityGroupRuleArn>arn:aws:ec2:us-west-2:111122223333:security-group-rule/sgr-abcdef01234567890</securityGroupRuleArn>\n         <groupId>sg-1234567890abcdef0</groupId>\n         <groupOwnerId>111122223333</groupOwnerId>\n         <isEgress>false</isEgress>\n         <ipProtocol>tcp</ipProtocol>\n         <fromPort>22</fromPort>\n         <toPort>22</toPort>\n         <cidrIpv4>203.0.113.0/24</cidrIpv4>\n         <tagSet/>\n      </item>\n      <item>\n         <securityGroupRuleId>sgr-bcdef01234567890a</securityGroupRuleId>\n         <securityGroupRuleArn>arn:aws:ec2:us-west-2:111122223333:security-group-rule/sgr-bcdef01234567890a</securityGroupRuleArn>\n         <groupId>sg-1234567890abcdef0</groupId>\n         <groupOwnerId>111122223333</groupOwnerId>\n         <isEgress>false</isEgress>\n         <ipProtocol>tcp</ipProtocol>\n         <fromPort>22</fromPort>\n         <toPort>22</toPort>\n         <cidrIpv4>198.51.100.0/24</cidrIpv4>\n         <tagSet/>\n      </item>\n      <item>\n         <securityGroupRuleId>sgr-cdef01234567890ab</securityGroupRuleId>\n         <securityGroupRuleArn>arn:aws:ec2:us-west-2:111122223333:security-group-rule/sgr-cdef01234567890ab</securityGroupRuleArn>\n         <groupId>sg-1234567890abcdef0</groupId>\n         <groupOwnerId>111122223333</groupOwnerId>\n         <isEgress>true</isEgress>\n         <ipProtocol>-1</ipProtocol>\n         <fromPort>-1</fromPort>\n         <toPort>-1</toPort>\n         <cidrIpv4>0.0.0.0/0</cidrIpv4>\n         <tagSet/>\n      </item>\n   </securityGroupRuleSet>\n</DescribeSecurityGroupRulesResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeRouteTables",
+      "params": {
+        "Filter.1.Name": "vpc-id",
+        "Filter.1.Value.1": "vpc-0ee975135dEXAMPLE"
+      },
+      "status": 200,
+      "body": "<DescribeRouteTablesResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n    <requestId>fe876446-c8c0-4f2d-a6df-ed506example</requestId>\n    <routeTableSet>\n        <item>\n            <routeTableId>rtb-1122334455667788a</routeTableId>\n            <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n            <ownerId>111122223333</ownerId>\n            <routeSet>\n                <item>\n                    <destinationCidrBlock>10.0.1.0/32</destinationCidrBlock>\n                    <gatewayId>igw-0EXAMPLE</gatewayId>\n                    <state>active</state>\n                    <origin>CreateRoute</origin>\n                </item>\n                <item>\n                    <destinationCidrBlock>172.31.0.0/16</destinationCidrBlock>\n                    <gatewayId>local</gatewayId>\n                    <state>active</state>\n                    <origin>CreateRouteTable</origin>\n                </item>\n                <item>\n                    <destinationCidrBlock>0.0.0.0/0</destinationCidrBlock>\n                    <gatewayId>igw-0EXAMPLE</gatewayId>\n                    <state>active</state>\n                    <origin>CreateRoute</origin>\n                </item>\n            </routeSet>\n            <associationSet>\n                <item>\n                    <routeTableAssociationId>rtbassoc-04ca27a6914a0b4fc</routeTableAssociationId>\n                    <routeTableId>rtb-1122334455667788a</routeTableId>\n                    <main>true</main>\n                </item>\n            </associationSet>\n            <propagatingVgwSet/>\n            <tagSet/>\n        </item>\n    </routeTableSet>\n</DescribeRouteTablesResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeInternetGateways",
+      "params": {
+        "Filter.1.Name": "attachment.vpc-id",
+        "Filter.1.Value.1": "vpc-0ee975135dEXAMPLE"
+      },
+      "status": 200,
+      "body": "<DescribeInternetGatewaysResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n    <requestId>e0fbdd4f-8e6d-437c-92eb-bc72864831d8</requestId>\n    <internetGatewaySet><item>\n            <internetGatewayId>igw-0EXAMPLE</internetGatewayId>\n            <ownerId>053534965804</ownerId>\n            <attachmentSet>\n                <item>\n                    <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n                    <state>available</state>\n                </item>\n            </attachmentSet>\n            <tagSet/>\n        </item></internetGatewaySet>\n</DescribeInternetGatewaysResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeNetworkInterfaces",
+      "params": {
+        "Filter.1.Name": "vpc-id",
+        "Filter.1.Value.1": "vpc-0ee975135dEXAMPLE"
+      },
+      "status": 200,
+      "body": "<DescribeNetworkInterfacesResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n    <requestId>fc45294c-006b-457b-bab9-012f5b3b0e40</requestId>\n     <networkInterfaceSet><item>\n         <networkInterfaceId>eni-0f62d866</networkInterfaceId>\n         <subnetId>subnet-0bb1c79de301436ee</subnetId>\n         <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n         <availabilityZone>us-west-2c</availabilityZone>\n         <description/>\n         <ownerId>111122223333</ownerId>\n         <requesterManaged>false</requesterManaged>\n         <status>available</status>\n         <macAddress>02:81:60:cb:27:37</macAddress>\n         <privateIpAddress>10.0.2.146</privateIpAddress>\n         <privateDnsName>ip-10-0-2-146.us-west-2.compute.internal</privateDnsName>\n         <sourceDestCheck>true</sourceDestCheck>\n         <groupSet>\n           <item>\n             <groupId>sg-1234567890abcdef0</groupId>\n             <groupName>SSHAccess</groupName>\n           </item>\n         </groupSet>\n         <association>\n           <publicIp>203.0.113.41</publicIp>\n           <ipOwnerId>111122223333</ipOwnerId>\n           <allocationId>eipalloc-08229861</allocationId>\n           <associationId>eipassoc-f0229899</associationId>\n         </association>\n         <tagSet/>\n         <privateIpAddressesSet>\n           <item>\n             <privateIpAddress>10.0.2.146</privateIpAddress>\n             <privateDnsName>ip-10-0-2-146.us-west-2.compute.internal</privateDnsName>\n             <primary>true</primary>\n           </item>\n           <item>\n             <privateIpAddress>10.0.2.148</privateIpAddress>\n             <primary>false</primary>\n           </item>\n           <item>\n             <privateIpAddress>10.0.2.150</privateIpAddress>\n             <primary>false</primary>\n           </item>\n         </privateIpAddressesSet>\n         <ipv6AddressesSet/>\n         <interfaceType>interface</interfaceType>\n       </item><item>\n         <networkInterfaceId>eni-a66ed5cf</networkInterfaceId>\n         <subnetId>subnet-02bf4c428bf44ebce</subnetId>\n         <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n         <availabilityZone>us-west-2b</availabilityZone>\n         <description>Primary network interface</description>\n         <ownerId>111122223333</ownerId>\n         <requesterManaged>false</requesterManaged>\n         <status>available</status>\n         <macAddress>02:78:d7:00:8a:1e</macAddress>\n         <privateIpAddress>10.0.0.233</privateIpAddress>\n         <sourceDestCheck>true</sourceDestCheck>\n         <groupSet>\n           <item>\n             <groupId>sg-1234567890abcdef0</groupId>\n             <groupName>SSHAccess</groupName>\n           </item>\n         </groupSet>\n         <tagSet>\n           <item>\n             <key>Name</key>\n             <value>standalone</value>\n           </item>\n         </tagSet>\n         <privateIpAddressesSet>\n           <item>\n             <privateIpAddress>10.0.0.233</privateIpAddress>\n             <primary>true</primary>\n           </item>\n           <item>\n             <privateIpAddress>10.0.0.20</privateIpAddress>\n             <primary>false</primary>\n           </item>\n         </privateIpAddressesSet>\n         <ipv6AddressesSet/>\n         <interfaceType>interface</interfaceType>\n       </item><item>\n         <networkInterfaceId>eni-551ba033</networkInterfaceId>\n         <subnetId>subnet-0bb1c79de301436ee</subnetId>\n         <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n         <availabilityZone>us-west-2c</availabilityZone>\n         <description>Primary network interface</description>\n         <ownerId>111122223333</ownerId>\n         <requesterManaged>false</requesterManaged>\n         <status>in-use</status>\n         <macAddress>02:dd:2c:5e:01:69</macAddress>\n         <privateIpAddress>10.0.2.88</privateIpAddress>\n         <privateDnsName>ip-10-0-2-88.us-west-2.compute.internal</privateDnsName>\n         <sourceDestCheck>true</sourceDestCheck>\n         <groupSet>\n           <item>\n             <groupId>sg-1234567890abcdef0</groupId>\n             <groupName>SSHAccess</groupName>\n           </item>\n         </groupSet>\n         <attachment>\n           <attachmentId>eni-attach-39697adc</attachmentId>\n           <instanceId>i-1234567890abcdef0</instanceId>\n           <instanceOwnerId>111122223333</instanceOwnerId>\n           <deviceIndex>0</deviceIndex>\n           <networkCardIndex>0</networkCardIndex>\n           <status>attached</status>\n           <attachTime>2018-05-08T16:46:19.000Z</attachTime>\n           <deleteOnTermination>true</deleteOnTermination>\n         </attachment>\n         <tagSet/>\n         <privateIpAddressesSet>\n           <item>\n             <privateIpAddress>10.0.2.88</privateIpAddress>\n             <privateDnsName>ip-10-0-2-88.us-west-2.compute.internal</privateDnsName>\n             <primary>true</primary>\n           </item>\n         </privateIpAddressesSet>\n         <ipv6AddressesSet/>\n         <interfaceType>interface</interfaceType>\n       </item></networkInterfaceSet>\n</DescribeNetworkInterfacesResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeAddresses",
+      "params": {
+        "Filter.1.Name": "network-interface-id",
+        "Filter.1.Value.1": "eni-0f62d866",
+        "Filter.1.Value.2": "eni-a66ed5cf",
+        "Filter.1.Value.3": "eni-551ba033"
+      },
+      "status": 200,
+      "body": "<DescribeAddressesResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n   <requestId>f7de5e98-491a-4c19-a92d-908d6EXAMPLE</requestId>\n   <addressesSet>\n     <item>\n       <publicIp>203.0.113.41</publicIp>\n       <allocationId>eipalloc-08229861</allocationId>\n       <domain>vpc</domain>\n       <associationId>eipassoc-f0229899</associationId>\n       <networkInterfaceId>eni-0f62d866</networkInterfaceId>\n       <networkInterfaceOwnerId>111122223333</networkInterfaceOwnerId>\n       <privateIpAddress>10.0.2.146</privateIpAddress>\n       <publicIpv4Pool>amazon</publicIpv4Pool>\n       <networkBorderGroup>us-west-2</networkBorderGroup>\n     </item>\n   </addressesSet>\n</DescribeAddressesResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeInstances",
+      "params": {
+        "Filter.1.Name": "vpc-id",
+        "Filter.1.Value.1": "vpc-0ee975135dEXAMPLE"
+      },
+      "status": 200,
+      "body": "<DescribeInstancesResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n    <requestId>8f7724cf-496f-496e-8fe3-example</requestId>\n    <reservationSet>\n        <item>\n            <reservationId>r-1234567890abcdef0</reservationId>\n            <ownerId>111122223333</ownerId>\n            <groupSet/>\n            <instancesSet>\n                <item>\n                    <instanceId>i-1234567890abcdef0</instanceId>\n                    <imageId>ami-bff32ccc</imageId>\n                    <instanceState>\n                        <code>16</code>\n                        <name>running</name>\n                    </instanceState>\n                    <privateDnsName>ip-10-0-2-88.us-west-2.compute.internal</privateDnsName>\n                    <dnsName/>\n                    <reason/>\n                    <keyName>my-key-pair</keyName>\n                    <amiLaunchIndex>0</amiLaunchIndex>\n                    <productCodes/>\n                    <instanceType>t2.micro</instanceType>\n                    <launchTime>2018-05-08T16:46:19.000Z</launchTime>\n                    <placement>\n                        <availabilityZone>us-west-2c</availabilityZone>\n                        <groupName/>\n                        <tenancy>default</tenancy>\n                    </placement>\n                    <monitoring>\n                        <state>disabled</state>\n                    </monitoring>\n                    <subnetId>subnet-0bb1c79de301436ee</subnetId>\n                    <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n                    <privateIpAddress>10.0.2.88</privateIpAddress>\n                    <sourceDestCheck>true</sourceDestCheck>\n                    <groupSet>\n                        <item>\n                            <groupId>sg-1234567890abcdef0</groupId>\n                            <groupName>SSHAccess</groupName>\n                        </item>\n                    </groupSet>\n                    <architecture>x86_64</architecture>\n                    <rootDeviceType>ebs</rootDeviceType>\n                    <rootDeviceName>/dev/xvda</rootDeviceName>\n                    <blockDeviceMapping><item><deviceName>/dev/xvda</deviceName><ebs><volumeId>vol-1234567890abcdef0</volumeId><status>attached</status><attachTime>2018-05-08T16:46:19.000Z</attachTime><deleteOnTermination>true</deleteOnTermination></ebs></item></blockDeviceMapping>\n                    <virtualizationType>hvm</virtualizationType>\n                    <clientToken>xMcwG14507example</clientToken>\n                    <tagSet>\n                        <item>\n                            <key>Name</key>\n                            <value>Server_1</value>\n                        </item>\n                    </tagSet>\n                    <hypervisor>xen</hypervisor>\n                    <networkInterfaceSet>\n                        <item>\n                            <networkInterfaceId>eni-551ba033</networkInterfaceId>\n                            <subnetId>subnet-0bb1c79de301436ee</subnetId>\n                            <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n                            <description>Primary network interface</description>\n                            <ownerId>111122223333</ownerId>\n                            <status>in-use</status>\n                            <macAddress>02:dd:2c:5e:01:69</macAddress>\n                            <privateIpAddress>10.0.2.88</privateIpAddress>\n                            <privateDnsName>ip-10-0-2-88.us-west-2.compute.internal</privateDnsName>\n                            <sourceDestCheck>true</sourceDestCheck>\n                            <groupSet>\n                                <item>\n                                    <groupId>sg-1234567890abcdef0</groupId>\n                                    <groupName>SSHAccess</groupName>\n                                </item>\n                            </groupSet>\n                            <attachment>\n                                <attachmentId>eni-attach-39697adc</attachmentId>\n                                <deviceIndex>0</deviceIndex>\n                                <networkCardIndex>0</networkCardIndex>\n                                <status>attached</status>\n                                <attachTime>2018-05-08T16:46:19.000Z</attachTime>\n                                <deleteOnTermination>true</deleteOnTermination>\n                            </attachment>\n                            <privateIpAddressesSet>\n                                <item>\n                                    <privateIpAddress>10.0.2.88</privateIpAddress>\n                                    <privateDnsName>ip-10-0-2-88.us-west-2.compute.internal</privateDnsName>\n                                    <primary>true</primary>\n                                </item>\n                            </privateIpAddressesSet>\n                            <ipv6AddressesSet/>\n                            <interfaceType>interface</interfaceType>\n                        </item>\n                    </networkInterfaceSet>\n                    <iamInstanceProfile>\n                        <arn>arn:aws:iam::123456789012:instance-profile/application_abc/component_xyz/Webserver</arn>\n                        <id>AIPACZLS2TD2HEXAMPLE</id>\n                    </iamInstanceProfile>\n                    <ebsOptimized>false</ebsOptimized>\n                    <enaSupport>true</enaSupport>\n                    <cpuOptions>\n                        <coreCount>1</coreCount>\n                        <threadsPerCore>1</threadsPerCore>\n                    </cpuOptions>\n                    <capacityReservationSpecification>\n                        <capacityReservationPreference>open</capacityReservationPreference>\n                    </capacityReservationSpecification>\n                    <hibernationOptions>\n                        <configured>false</configured>\n                    </hibernationOptions>\n                    <enclaveOptions>\n                        <enabled>false</enabled>\n                    </enclaveOptions>\n                    <metadataOptions>\n                        <state>applied</state>\n                        <httpTokens>required</httpTokens>\n                        <httpPutResponseHopLimit>2</httpPutResponseHopLimit>\n                        <httpEndpoint>enabled</httpEndpoint>\n                        <httpProtocolIpv6>disabled</httpProtocolIpv6>\n                        <instanceMetadataTags>disabled</instanceMetadataTags>\n                    </metadataOptions>\n                    <maintenanceOptions>\n                        <autoRecovery>default</autoRecovery>\n                    </maintenanceOptions>\n                    <privateDnsNameOptions>\n                        <hostnameType>ip-name</hostnameType>\n                        <enableResourceNameDnsARecord>false</enableResourceNameDnsARecord>\n                        <enableResourceNameDnsAAAARecord>false</enableResourceNameDnsAAAARecord>\n                    </privateDnsNameOptions>\n                    <bootMode>uefi-preferred</bootMode>\n                    <currentInstanceBootMode>legacy-bios</currentInstanceBootMode>\n                    <platformDetails>Linux/UNIX</platformDetails>\n                    <usageOperation>RunInstances</usageOperation>\n                    <usageOperationUpdateTime>2018-05-08T16:46:19.000Z</usageOperationUpdateTime>\n                </item>\n            </instancesSet>\n        </item>\n    </reservationSet>\n</DescribeInstancesResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeKeyPairs",
+      "params": {
+        "Filter.1.Name": "key-name",
+        "Filter.1.Value.1": "my-key-pair"
+      },
+      "status": 200,
+      "body": "<DescribeKeyPairsResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n    <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>\n    <keySet>\n      <item>\n         <keyPairId>key-0123456789abcdef0</keyPairId>\n         <keyName>my-key-pair</keyName>\n         <keyType>rsa</keyType>\n         <keyFingerprint>1f:51:ae:28:bf:89:e9:d8:1f:25:5d:37:2d:7d:b8:ca:9f:f5:f1:6f</keyFingerprint>\n         <createTime>2023-05-16T19:56:57.000Z</createTime>\n      </item>\n   </keySet>\n</DescribeKeyPairsResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeVolumes",
+      "params": {
+        "Filter.1.Name": "attachment.instance-id",
+        "Filter.1.Value.1": "i-1234567890abcdef0"
+      },
+      "status": 200,
+      "body": "<DescribeVolumesResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n   <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>\n   <volumeSet>\n      <item>\n         <volumeId>vol-1234567890abcdef0</volumeId>\n         <size>8</size>\n         <snapshotId>snap-0abc1234567890def</snapshotId>\n         <availabilityZone>us-west-2c</availabilityZone>\n         <status>in-use</status>\n         <createTime>2018-05-08T16:46:19.000Z</createTime>\n         <attachmentSet>\n            <item>\n               <volumeId>vol-1234567890abcdef0</volumeId>\n               <instanceId>i-1234567890abcdef0</instanceId>\n               <device>/dev/xvda</device>\n               <status>attached</status>\n               <attachTime>2018-05-08T16:46:19.000Z</attachTime>\n               <deleteOnTermination>true</deleteOnTermination>\n            </item>\n         </attachmentSet>\n         <volumeType>gp3</volumeType>\n         <iops>3000</iops>\n         <throughput>125</throughput>\n         <encrypted>true</encrypted>\n         <kmsKeyId>arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab</kmsKeyId>\n         <multiAttachEnabled>false</multiAttachEnabled>\n         <tagSet>\n            <item>\n               <key>Name</key>\n               <value>Server_1-root</value>\n            </item>\n         </tagSet>\n      </item>\n   </volumeSet>\n</DescribeVolumesResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeVpcAttribute",
+      "params": {
+        "VpcId": "vpc-0ee975135dEXAMPLE",
+        "Attribute": "enableDnsSupport"
+      },
+      "status": 200,
+      "body": "<DescribeVpcAttributeResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n  <requestId>7a62c49f-347e-4fc4-9331-6e8eEXAMPLE</requestId>\n  <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n  <enableDnsSupport>\n    <value>true</value>\n  </enableDnsSupport>\n</DescribeVpcAttributeResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeVpcAttribute",
+      "params": {
+        "VpcId": "vpc-0ee975135dEXAMPLE",
+        "Attribute": "enableDnsHostnames"
+      },
+      "status": 200,
+      "body": "<DescribeVpcAttributeResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n  <requestId>7a62c49f-347e-4fc4-9331-6e8eEXAMPLE</requestId>\n  <vpcId>vpc-0ee975135dEXAMPLE</vpcId>\n   <enableDnsHostnames>\n    <value>true</value>\n   </enableDnsHostnames>\n</DescribeVpcAttributeResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeInstanceAttribute",
+      "params": {
+        "InstanceId": "i-1234567890abcdef0",
+        "Attribute": "instanceInitiatedShutdownBehavior"
+      },
+      "status": 200,
+      "body": "<DescribeInstanceAttributeResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>\n  <instanceId>i-1234567890abcdef0</instanceId>\n  <instanceInitiatedShutdownBehavior>\n    <value>stop</value>\n  </instanceInitiatedShutdownBehavior>\n</DescribeInstanceAttributeResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeInstanceAttribute",
+      "params": {
+        "InstanceId": "i-1234567890abcdef0",
+        "Attribute": "disableApiStop"
+      },
+      "status": 200,
+      "body": "<DescribeInstanceAttributeResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>\n  <instanceId>i-1234567890abcdef0</instanceId>\n  <disableApiStop>\n    <value>false</value>\n  </disableApiStop>\n</DescribeInstanceAttributeResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeInstanceAttribute",
+      "params": {
+        "InstanceId": "i-1234567890abcdef0",
+        "Attribute": "disableApiTermination"
+      },
+      "status": 200,
+      "body": "<DescribeInstanceAttributeResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>\n  <instanceId>i-1234567890abcdef0</instanceId>\n  <disableApiTermination>\n    <value>false</value>\n  </disableApiTermination>\n</DescribeInstanceAttributeResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeInstanceAttribute",
+      "params": {
+        "InstanceId": "i-1234567890abcdef0",
+        "Attribute": "userData"
+      },
+      "status": 200,
+      "body": "<DescribeInstanceAttributeResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>\n  <instanceId>i-1234567890abcdef0</instanceId>\n  <userData>\n    <value>IyEvYmluL2Jhc2gNCnl1bSB1cGRhdGUgLXkK</value>\n  </userData>\n</DescribeInstanceAttributeResponse>\n"
+    },
+    {
+      "service": "ec2",
+      "protocol": "query",
+      "action": "DescribeImages",
+      "params": {
+        "ImageId.1": "ami-0abcdef1234567890"
+      },
+      "status": 200,
+      "body": "<DescribeImagesResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">\n  <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>\n  <imagesSet><item>\n      <virtualizationType>hvm</virtualizationType>\n      <description>Amazon Linux 2023 AMI 2023.6.20241010.0 x86_64 HVM kernel-6.1</description>\n      <platformDetails>Linux/UNIX</platformDetails>\n      <enaSupport>true</enaSupport>\n      <hypervisor>xen</hypervisor>\n      <imageState>available</imageState>\n      <sriovNetSupport>simple</sriovNetSupport>\n      <imageId>ami-0abcdef1234567890</imageId>\n      <usageOperation>RunInstances</usageOperation>\n      <blockDeviceMapping>\n        <item>\n          <deviceName>/dev/xvda</deviceName>\n          <ebs>\n            <snapshotId>snap-1234567890abcdef0</snapshotId>\n            <volumeSize>8</volumeSize>\n            <deleteOnTermination>true</deleteOnTermination>\n            <volumeType>gp3</volumeType>\n            <iops>3000</iops>\n            <throughput>125</throughput>\n            <encrypted>false</encrypted>\n          </ebs>\n        </item>\n      </blockDeviceMapping>\n      <architecture>x86_64</architecture>\n      <imageLocation>amazon/al2023-ami-2023.6.20241010.0-kernel-6.1-x86_64</imageLocation>\n      <rootDeviceType>ebs</rootDeviceType>\n      <imageOwnerId>137112412989</imageOwnerId>\n      <imageOwnerAlias>amazon</imageOwnerAlias>\n      <rootDeviceName>/dev/xvda</rootDeviceName>\n      <creationDate>2024-10-11T18:57:31.000Z</creationDate>\n      <isPublic>true</isPublic>\n      <imageType>machine</imageType>\n      <name>al2023-ami-2023.6.20241010.0-kernel-6.1-x86_64</name>\n      <bootMode>uefi-preferred</bootMode>\n      <imdsSupport>v2.0</imdsSupport>\n      <deprecationTime>2099-10-11T18:57:00.000Z</deprecationTime>\n      <tagSet/>\n    </item></imagesSet>\n</DescribeImagesResponse>\n"
+    }
+  ]
+}
