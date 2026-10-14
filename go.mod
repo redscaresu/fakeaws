@@ -3,8 +3,8 @@ module github.com/redscaresu/fakeaws
 go 1.26.0
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.47.2
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.3
+	github.com/aws/aws-sdk-go-v2 v1.47.3
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.4
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/stretchr/testify v1.12.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -12,11 +12,11 @@ require (
 )
 
 require (
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.5 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.5 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.20 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.5 // indirect
-	github.com/aws/smithy-go v1.28.4 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.6 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.6 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.21 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.6 // indirect
+	github.com/aws/smithy-go v1.28.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
