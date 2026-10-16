@@ -1,6 +1,7 @@
 package handlers_test
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -71,8 +72,12 @@ func TestRoute53_ChangeBatchTransactional(t *testing.T) {
 			<ResourceRecords><ResourceRecord><Value>target.example.net</Value></ResourceRecord></ResourceRecords>
 		</ResourceRecordSet></Change>
 	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
-	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", apex)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "apex CNAME")
+	resp, body := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", apex)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "apex CNAME")
+	// The SDK reads Route53 errors wrapped in <ErrorResponse><Error>;
+	// a bare <Error> reaches the provider as UnknownError.
+	assert.Contains(t, string(body), "<ErrorResponse>", "apex CNAME error envelope: %s", body)
+	assert.Contains(t, string(body), "<Code>InvalidChangeBatch</Code>", "apex CNAME error code: %s", body)
 
 	// CNAME on a child works.
 	good := `<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>
@@ -90,7 +95,95 @@ func TestRoute53_ChangeBatchTransactional(t *testing.T) {
 
 	// Non-empty zone delete refused.
 	resp, _ = r53Request(t, srv, http.MethodDelete, "/route53/2013-04-01/hostedzone/"+zoneID, "")
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "non-empty zone delete")
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "non-empty zone delete")
+}
+
+// TestRoute53_ErrorCodes pins Route53's own error codes, where the
+// generic domain mapping answered ResourceNotFoundException and
+// ConflictException.
+func TestRoute53_ErrorCodes(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	_, body := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest><Name>codes.example.</Name><CallerReference>c</CallerReference></CreateHostedZoneRequest>`)
+	zoneID := r53ZoneID(t, body)
+	r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", r53Batch("CREATE", "www.codes.example."))
+
+	cases := []struct {
+		name, method, path, body string
+		status                   int
+		code                     string
+	}{
+		{"GetHostedZone missing", http.MethodGet, "/route53/2013-04-01/hostedzone/ZNOPE", "", http.StatusNotFound, "NoSuchHostedZone"},
+		{"ListResourceRecordSets missing", http.MethodGet, "/route53/2013-04-01/hostedzone/ZNOPE/rrset", "", http.StatusNotFound, "NoSuchHostedZone"},
+		{"GetChange missing", http.MethodGet, "/route53/2013-04-01/change/CNOPE", "", http.StatusNotFound, "NoSuchChange"},
+		{"DeleteHostedZone non-empty", http.MethodDelete, "/route53/2013-04-01/hostedzone/" + zoneID, "", http.StatusBadRequest, "HostedZoneNotEmpty"},
+		{"CreateHostedZone without Name", http.MethodPost, "/route53/2013-04-01/hostedzone", `<CreateHostedZoneRequest></CreateHostedZoneRequest>`, http.StatusBadRequest, "InvalidInput"},
+		{"CreateHostedZone malformed", http.MethodPost, "/route53/2013-04-01/hostedzone", `<CreateHostedZoneRequest>`, http.StatusBadRequest, "InvalidInput"},
+		{"ChangeResourceRecordSets malformed", http.MethodPost, "/route53/2013-04-01/hostedzone/" + zoneID + "/rrset/", `<ChangeResourceRecordSetsRequest>`, http.StatusBadRequest, "InvalidInput"},
+		{"ChangeTagsForResource malformed", http.MethodPost, "/route53/2013-04-01/tags/hostedzone/" + zoneID, `<ChangeTagsForResourceRequest>`, http.StatusBadRequest, "InvalidInput"},
+	}
+	for _, tc := range cases {
+		resp, body := r53Request(t, srv, tc.method, tc.path, tc.body)
+		assert.Equal(t, tc.status, resp.StatusCode, "%s: %s", tc.name, body)
+		assert.Contains(t, string(body), "<Code>"+tc.code+"</Code>", tc.name)
+	}
+}
+
+// TestRoute53_ChangeBatchChecksExistence pins InvalidChangeBatch for a
+// CREATE of an existing record set and a DELETE of a missing one,
+// judged against the zone as the batch's earlier changes leave it.
+func TestRoute53_ChangeBatchChecksExistence(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	_, body := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest><Name>exist.example.</Name><CallerReference>e</CallerReference></CreateHostedZoneRequest>`)
+	rrset := "/route53/2013-04-01/hostedzone/" + r53ZoneID(t, body) + "/rrset/"
+
+	resp, body := r53Request(t, srv, http.MethodPost, rrset, r53Batch("CREATE", "www.exist.example"))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "first CREATE: %s", body)
+
+	cases := []struct {
+		name    string
+		batch   string
+		status  int
+		message string
+	}{
+		{"CREATE existing (other dot form)", r53Batch("CREATE", "www.exist.example."), http.StatusBadRequest, "but it already exists"},
+		{"DELETE missing", r53Batch("DELETE", "nope.exist.example."), http.StatusBadRequest, "but it was not found"},
+		{"CREATE twice in one batch", r53Batch("CREATE", "two.exist.example.", "CREATE", "two.exist.example."), http.StatusBadRequest, "but it already exists"},
+		{"DELETE then CREATE in one batch", r53Batch("DELETE", "www.exist.example.", "CREATE", "www.exist.example."), http.StatusOK, ""},
+		{"DELETE existing", r53Batch("DELETE", "www.exist.example."), http.StatusOK, ""},
+	}
+	for _, tc := range cases {
+		resp, body := r53Request(t, srv, http.MethodPost, rrset, tc.batch)
+		assert.Equal(t, tc.status, resp.StatusCode, "%s: %s", tc.name, body)
+		if tc.message != "" {
+			assert.Contains(t, string(body), "<Code>InvalidChangeBatch</Code>", tc.name)
+			assert.Contains(t, string(body), tc.message, tc.name)
+		}
+	}
+}
+
+// r53ZoneID reads the zone id out of a CreateHostedZone response.
+func r53ZoneID(t *testing.T, body []byte) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(string(body), "<Id>/hostedzone/")
+	require.True(t, ok, "CreateHostedZone body has no zone id: %s", body)
+	id, _, _ := strings.Cut(rest, "</Id>")
+	return id
+}
+
+// r53Batch is a ChangeResourceRecordSetsRequest of A records, from
+// action, name pairs.
+func r53Batch(actionNames ...string) string {
+	var b strings.Builder
+	b.WriteString("<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>")
+	for i := 0; i+1 < len(actionNames); i += 2 {
+		fmt.Fprintf(&b, `<Change><Action>%s</Action><ResourceRecordSet><Name>%s</Name><Type>A</Type><TTL>300</TTL>
+			<ResourceRecords><ResourceRecord><Value>192.0.2.1</Value></ResourceRecord></ResourceRecords></ResourceRecordSet></Change>`,
+			actionNames[i], actionNames[i+1])
+	}
+	b.WriteString("</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>")
+	return b.String()
 }
 
 // TestRoute53_AliasTargetRoundTrip pins Codex pass 2 BLOCKING #1:
@@ -145,7 +238,7 @@ func TestRoute53_BatchAtomicityOnInvalidChange(t *testing.T) {
 		</ResourceRecordSet></Change>
 	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
 	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", mixed)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "mixed batch")
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "mixed batch")
 	// Verify NEITHER change applied.
 	_, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset", "")
 	assert.NotContains(t, string(body), "www.example.com.", "transactional violation: www record applied despite batch failure: %s", body)

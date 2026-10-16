@@ -143,8 +143,8 @@ type WireShape int
 
 const (
 	ShapeUnknown  WireShape = iota
-	ShapeXML                // S3, Route53
-	ShapeQueryRPC           // RDS, IAM (ErrorResponse envelope)
+	ShapeXML                // S3
+	ShapeQueryRPC           // RDS, IAM, Route53 errors (ErrorResponse envelope)
 	ShapeJSON10             // SQS
 	ShapeJSON11             // DynamoDB, SecretsManager
 	ShapeJSONREST           // EKS
@@ -177,7 +177,7 @@ func (s WireShape) String() string {
 	}
 }
 
-// xmlErrorEnvelope is the wire shape S3 / Route53 emit: a top-level
+// xmlErrorEnvelope is the wire shape S3 emits: a top-level
 // <Error> with Code, Message, and a synthetic RequestId so the SDK
 // has something to log even when we don't track requests.
 type xmlErrorEnvelope struct {
@@ -200,7 +200,7 @@ func writeXMLError(w http.ResponseWriter, m errorMapping) {
 }
 
 // queryRPCErrorEnvelope wraps the XML-error inside a Query-API
-// <ErrorResponse> envelope, which is what EC2 / RDS / IAM emit. The
+// <ErrorResponse> envelope, which is what RDS / IAM / Route53 emit. The
 // SDK parses ErrorResponse.Error.{Code,Message,Type}.
 type queryRPCErrorEnvelope struct {
 	XMLName   xml.Name             `xml:"ErrorResponse"`

@@ -50,11 +50,15 @@ resource "aws_iam_role" "node" {
 resource "aws_vpc" "main" { cidr_block = "10.0.0.0/16" }
 
 resource "aws_subnet" "a" {
-  vpc_id = aws_vpc.main.id; cidr_block = "10.0.1.0/24"; availability_zone = "us-east-1a"
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "us-east-1a"
 }
 
 resource "aws_subnet" "outside" {
-  vpc_id = aws_vpc.main.id; cidr_block = "10.0.2.0/24"; availability_zone = "us-east-1b"
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "us-east-1b"
 }
 
 # Cluster only has subnet "a".
@@ -72,5 +76,9 @@ resource "aws_eks_node_group" "broken" {
   node_group_name = "broken"
   node_role_arn   = aws_iam_role.node.arn
   subnet_ids      = [aws_subnet.outside.id]
-  scaling_config { desired_size = 1; min_size = 1; max_size = 2 }
+  scaling_config {
+    desired_size = 1
+    min_size     = 1
+    max_size     = 2
+  }
 }

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (the last known-red examples pass, 2026-10-16)
+- **Route53 errors are wrapped in `<ErrorResponse><Error>`**, as Route53 sends them; the S3 shape's bare `<Error>` reached the provider as `UnknownError` for every Route53 error code. A change batch fakeaws refuses (apex CNAME, unknown action, missing name or type, a CREATE of an existing record set, a DELETE of a missing one, judged against the zone as the batch's earlier changes leave it) answers 400 `InvalidChangeBatch`, not 409 `ConflictException`; a DELETE of a missing record set was a silent 200. Every other Route53 error goes through `r53WriteError` in Route53's own codes: 404 `NoSuchHostedZone` and `NoSuchChange`, 400 `HostedZoneNotEmpty`, 409 `HostedZoneAlreadyExists`, and 400 `InvalidInput` for an unreadable body, malformed XML or a missing `Name`. `misconfigured/route53_apex_cname` passes.
+- **IAM `UpdateRoleDescription`** sets the role's description (an empty one clears it) and answers the role, refusing a missing `RoleName` or a description over 1000 characters with 400 `ValidationError`; it was a 404, so changing `aws_iam_role.description` failed. `updates/update_iam_role_description` passes.
+- **S3 answers each unset bucket config's own 404 code**: `NoSuchBucketPolicy`, `ServerSideEncryptionConfigurationNotFoundError`, `NoSuchPublicAccessBlockConfiguration`, `OwnershipControlsNotFoundError` and `NoSuchTagSet` (`s3NoSuchConfig` in `handlers/s3.go`), where it answered `ResourceNotFoundException`, which `aws_s3_bucket`'s read fails on. A bucket that does not exist answers 404 `NoSuchBucket` (`s3WriteBucketError`) on a config read or write, `?location`, `ListObjects` and `PutObject`, where it answered `ResourceNotFoundException`. `working/s3_bucket` and `updates/update_s3_bucket_versioning` pass.
+- `working/eks_cluster` and `misconfigured/eks_node_group_subnet_outside_cluster` put one argument per line (HCL rejects `;`) and pass. `knownRed` is empty.
+
 ### Changed (a created VPC answers AWS's DNS defaults, 2026-10-16)
 - **`CreateVpc` stores `enableDnsHostnames` false** (it stored true), and `enableDnsSupport` true as before, so `DescribeVpcAttribute` answers AWS's defaults for a non-default VPC. **The defaults are unverified**: they come from the VPC user guide, not a recording. `TestEC2_CreateVPC_DNSDefaults` pins it.
 
