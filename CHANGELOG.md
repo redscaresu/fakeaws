@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (ModifyVpcAttribute refuses what AWS refuses for the DNS attributes, 2026-10-16)
+- **`ModifyVpcAttribute` answers 400 `InvalidParameterValue`** to `EnableDnsHostnames` true on a VPC whose `enableDnsSupport` is false, and to both DNS attributes in one request, with AWS's messages; it accepted and stored both. The code and messages come from the ModifyVpcAttribute API reference, not a recording. `TestEC2_ModifyVpcAttribute_HostnamesNeedSupport` and `TestEC2_ModifyVpcAttribute_OneDNSAttributePerRequest` pin it.
+
 ### Changed (the last known-red examples pass, 2026-10-16)
 - **Route53 errors are wrapped in `<ErrorResponse><Error>`**, as Route53 sends them; the S3 shape's bare `<Error>` reached the provider as `UnknownError` for every Route53 error code. A change batch fakeaws refuses (apex CNAME, unknown action, missing name or type, a CREATE of an existing record set, a DELETE of a missing one, judged against the zone as the batch's earlier changes leave it) answers 400 `InvalidChangeBatch`, not 409 `ConflictException`; a DELETE of a missing record set was a silent 200. Every other Route53 error goes through `r53WriteError` in Route53's own codes: 404 `NoSuchHostedZone` and `NoSuchChange`, 400 `HostedZoneNotEmpty`, 409 `HostedZoneAlreadyExists`, and 400 `InvalidInput` for an unreadable body, malformed XML or a missing `Name`. `misconfigured/route53_apex_cname` passes.
 - **IAM `UpdateRoleDescription`** sets the role's description (an empty one clears it) and answers the role, refusing a missing `RoleName` or a description over 1000 characters with 400 `ValidationError`; it was a 404, so changing `aws_iam_role.description` failed. `updates/update_iam_role_description` passes.

@@ -440,10 +440,12 @@ func vpcDNS(v *repository.EC2VPC, attr string) *bool {
 // EnableDnsSupport.Value for enableDnsSupport.
 func vpcDNSParam(attr string) string { return strings.ToUpper(attr[:1]) + attr[1:] + ".Value" }
 
-// ec2ModifyVpcAttribute stores each of ec2VpcDNSAttributes its param
-// (vpcDNSParam) sets, true or false (400 InvalidParameterValue
-// otherwise), for DescribeVpcAttribute to answer. Any other attribute
-// is accepted and not stored.
+// ec2ModifyVpcAttribute stores the one of ec2VpcDNSAttributes its param
+// (vpcDNSParam) sets, true or false, for DescribeVpcAttribute to
+// answer. As in AWS, it answers 400 InvalidParameterValue to any other
+// value, to both attributes in one request, and to enableDnsHostnames
+// true on a VPC whose enableDnsSupport is false. Any other attribute is
+// accepted and not stored.
 func (app *Application) ec2ModifyVpcAttribute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
 	p := req.Params
 	values := map[string][]string{}
@@ -453,7 +455,23 @@ func (app *Application) ec2ModifyVpcAttribute(w http.ResponseWriter, account, re
 	if refuseInvalidValues(w, p, values) {
 		return
 	}
-	err := app.repo.UpdateVPC(account, region, p.Get("VpcId"), func(v *repository.EC2VPC) {
+	// UNVERIFIED(aws-code): InvalidParameterValue and both messages from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ModifyVpcAttribute.html; no recording
+	if p.Has(vpcDNSParam("enableDnsSupport")) && p.Has(vpcDNSParam("enableDnsHostnames")) {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue",
+			"You cannot modify the DNS resolution and DNS hostnames attributes in the same request. Use separate requests for each attribute.")
+		return
+	}
+	v, err := app.repo.GetVPC(account, region, p.Get("VpcId"))
+	if err != nil {
+		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
+		return
+	}
+	if p.Get(vpcDNSParam("enableDnsHostnames")) == "true" && !v.EnableDNSSupport {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue",
+			"You can only enable DNS hostnames if you've enabled DNS support.")
+		return
+	}
+	err = app.repo.UpdateVPC(account, region, v.ID, func(v *repository.EC2VPC) {
 		for _, attr := range ec2VpcDNSAttributes {
 			if p.Has(vpcDNSParam(attr)) {
 				*vpcDNS(v, attr) = p.Get(vpcDNSParam(attr)) == "true"
