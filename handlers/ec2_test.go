@@ -111,6 +111,18 @@ func TestEC2_CreateVPC_DNSDefaults(t *testing.T) {
 	assert.Equal(t, "false", vpcAttribute(t, srv, vpc, "enableDnsHostnames"))
 }
 
+// TestEC2_CreateVPC_DNSHostnamesRoundTrip: a created VPC reads
+// enableDnsHostnames false until ModifyVpcAttribute sets it true.
+func TestEC2_CreateVPC_DNSHostnamesRoundTrip(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	vpc := extractEC2Tag(mustOK(t)(ec2Call(t, srv, netRegion, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})), "vpcId")
+	require.Equal(t, "false", vpcAttribute(t, srv, vpc, "enableDnsHostnames"))
+
+	mustOK(t)(ec2Call(t, srv, netRegion, "ModifyVpcAttribute", url.Values{"VpcId": {vpc}, "EnableDnsHostnames.Value": {"true"}}))
+	assert.Equal(t, "true", vpcAttribute(t, srv, vpc, "enableDnsHostnames"))
+	assert.Equal(t, "true", vpcAttribute(t, srv, vpc, "enableDnsSupport"))
+}
+
 func TestEC2_CreateVPC_MissingCidr(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, _ := ec2Call(t, srv, "us-east-1", "CreateVpc", nil)
