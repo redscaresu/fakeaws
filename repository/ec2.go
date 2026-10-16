@@ -382,22 +382,35 @@ type execer interface {
 // it: no other group may take the name, and it cannot be deleted.
 const DefaultGroupName = "default"
 
-// CreateVPCWithDefaultGroup stores v and sg, its security group named
-// DefaultGroupName, in one transaction: EC2's CreateVpc makes both, so
-// no read sees the VPC without its default group.
-func (r *Repository) CreateVPCWithDefaultGroup(account string, v *EC2VPC, sg *EC2SecurityGroup) error {
-	tx, err := r.db.Begin()
-	if err != nil {
+// MainRouteTable is the route table a VPC is made with: Table and its
+// main association. Storing it adds the table's local route.
+type MainRouteTable struct {
+	Table       *EC2RouteTable
+	Association *EC2RouteTableAssociation
+}
+
+// CreateVPCWithDefaults stores v, sg, its security group named
+// DefaultGroupName, and main, its main route table, in one transaction:
+// EC2's CreateVpc makes all three, so no read sees the VPC without them.
+func (r *Repository) CreateVPCWithDefaults(account string, v *EC2VPC, sg *EC2SecurityGroup, main MainRouteTable) error {
+	return r.inTx(func(tx *sql.Tx) error {
+		if err := insertVPC(tx, account, v); err != nil {
+			return mapInsertError(err)
+		}
+		if err := insertSecurityGroup(tx, account, sg); err != nil {
+			return err
+		}
+		return insertMainRouteTable(tx, account, v.CidrBlock, main)
+	})
+}
+
+// insertMainRouteTable stores main, in the VPC whose CIDR is cidr, with
+// its local route.
+func insertMainRouteTable(ex execer, account, cidr string, main MainRouteTable) error {
+	if err := insertRouteTableWithLocal(ex, account, cidr, main.Table); err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	if err := insertVPC(tx, account, v); err != nil {
-		return mapInsertError(err)
-	}
-	if err := insertSecurityGroup(tx, account, sg); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return insertAssociation(ex, account, main.Table.VPCID, main.Association)
 }
 
 // insertVPC stores v under account.
@@ -422,51 +435,75 @@ func (r *Repository) UpdateVPC(account, region, id string, change func(*EC2VPC))
 	return err
 }
 
-// BackfillDefaultGroups gives each VPC that has no group named
-// DefaultGroupName the one newGroup makes, unless the database is
-// loaded, whose rows are answered as they are. A VPC stored before
-// CreateVpc made its default group (a file database, a snapshot) would
-// otherwise answer group-name=default with nothing. The loaded read,
-// the list and the inserts share one transaction, so a failure adds
-// no group.
-func (r *Repository) BackfillDefaultGroups(newGroup func(account, region, vpcID string) *EC2SecurityGroup) error {
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	loaded, err := readLoaded(tx)
-	if err != nil {
-		return fmt.Errorf("read loaded flag: %w", err)
-	}
-	if loaded {
+// VPCDefaults make what CreateVpc stores with a VPC, for
+// BackfillVPCDefaults to give a VPC stored without it.
+type VPCDefaults struct {
+	Group     func(account, region, vpcID string) *EC2SecurityGroup
+	MainTable func(account, region, vpcID string) MainRouteTable
+}
+
+// BackfillVPCDefaults gives each VPC that has no group named
+// DefaultGroupName the one d.Group makes, and each VPC that has no main
+// association the main route table d.MainTable makes, with its local
+// route, unless the database is loaded, whose rows are answered as they
+// are. A VPC stored before CreateVpc made them (a file database, a
+// snapshot) would otherwise answer group-name=default, or
+// association.main=true, with nothing. The loaded read, the lists and
+// the inserts share one transaction, so a failure adds nothing.
+func (r *Repository) BackfillVPCDefaults(d VPCDefaults) error {
+	return r.inTx(func(tx *sql.Tx) error {
+		loaded, err := readLoaded(tx)
+		if err != nil {
+			return fmt.Errorf("read loaded flag: %w", err)
+		}
+		if loaded {
+			return nil
+		}
+		ungrouped, err := vpcsWithout(tx, `SELECT 1 FROM ec2_security_groups g
+			WHERE g.account_id = v.account_id AND g.vpc_id = v.id AND g.group_name = ?`, DefaultGroupName)
+		if err != nil {
+			return err
+		}
+		for _, v := range ungrouped {
+			if err := insertSecurityGroup(tx, v.account, d.Group(v.account, v.region, v.id)); err != nil {
+				return err
+			}
+		}
+		unrouted, err := vpcsWithout(tx, `SELECT 1 FROM ec2_route_table_associations a
+			WHERE a.account_id = v.account_id AND a.vpc_id = v.id AND a.main = 1`)
+		if err != nil {
+			return err
+		}
+		for _, v := range unrouted {
+			if err := insertMainRouteTable(tx, v.account, v.cidr, d.MainTable(v.account, v.region, v.id)); err != nil {
+				return err
+			}
+		}
 		return nil
-	}
-	rows, err := tx.Query(`SELECT v.account_id, v.region, v.id FROM ec2_vpcs v
-		WHERE NOT EXISTS (SELECT 1 FROM ec2_security_groups g
-		                  WHERE g.account_id = v.account_id AND g.vpc_id = v.id AND g.group_name = ?)`, DefaultGroupName)
+	})
+}
+
+// storedVPC is a VPC row's keys and CIDR, as vpcsWithout lists them.
+type storedVPC struct{ account, region, id, cidr string }
+
+// vpcsWithout lists the VPCs v for which the query missing, with args,
+// finds no row.
+func vpcsWithout(tx *sql.Tx, missing string, args ...any) ([]storedVPC, error) {
+	rows, err := tx.Query(`SELECT v.account_id, v.region, v.id, v.cidr_block FROM ec2_vpcs v
+		WHERE NOT EXISTS (`+missing+`) ORDER BY v.account_id, v.id`, args...)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var bare [][3]string
+	defer rows.Close()
+	var out []storedVPC
 	for rows.Next() {
-		var v [3]string
-		if err := rows.Scan(&v[0], &v[1], &v[2]); err != nil {
-			rows.Close()
-			return err
+		var v storedVPC
+		if err := rows.Scan(&v.account, &v.region, &v.id, &v.cidr); err != nil {
+			return nil, err
 		}
-		bare = append(bare, v)
+		out = append(out, v)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, v := range bare {
-		if err := insertSecurityGroup(tx, v[0], newGroup(v[0], v[1], v[2])); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return out, rows.Err()
 }
 
 // GetVPC looks up a VPC by id, optionally scoped to a region. Pass
@@ -877,12 +914,31 @@ func (r *Repository) DeleteInternetGateway(account, region, id string) error {
 
 // ----- RouteTable + RouteTableAssociation + Route -----
 
+// CreateRouteTable stores rt with its local route, as EC2 makes every
+// route table.
 func (r *Repository) CreateRouteTable(account string, rt *EC2RouteTable) error {
 	// Codex pass 7 BLOCKING #1 — parent VPC must be in the same region.
-	if _, err := r.GetVPC(account, rt.Region, rt.VPCID); err != nil {
+	v, err := r.GetVPC(account, rt.Region, rt.VPCID)
+	if err != nil {
 		return err
 	}
-	return mapInsertError(insertRouteTable(r.db, account, rt))
+	return mapInsertError(r.inTx(func(tx *sql.Tx) error { return insertRouteTableWithLocal(tx, account, v.CidrBlock, rt) }))
+}
+
+// LocalGateway is the gatewayId of a route table's local route.
+const LocalGateway = "local"
+
+// insertRouteTableWithLocal stores rt and its local route for cidr, its
+// VPC's CIDR.
+// ponytail: the primary CIDR only; a local route per CIDR block
+// association when a created VPC can hold a second one.
+func insertRouteTableWithLocal(ex execer, account, cidr string, rt *EC2RouteTable) error {
+	if err := insertRouteTable(ex, account, rt); err != nil {
+		return err
+	}
+	return insertRoute(ex, account, &EC2Route{
+		RouteTableID: rt.ID, DestinationCidrBlock: cidr, GatewayID: LocalGateway, Origin: "CreateRouteTable", State: "active",
+	})
 }
 
 func insertRouteTable(ex execer, account string, rt *EC2RouteTable) error {
@@ -1013,27 +1069,34 @@ func insertRoute(ex execer, account string, rt *EC2Route) error {
 	return err
 }
 
-// DeleteRoute removes a single route from a route table. The route
-// table is required to live in the request's region when region is
-// non-empty (Codex pass 7 BLOCKING #1).
+// ErrLocalRoute refuses deleting a route table's local route, which
+// AWS keeps for the table's life.
+var ErrLocalRoute = errors.New("cannot remove a route table's local route")
+
+// DeleteRoute removes a single route from a route table, answering
+// models.ErrNotFound when there is none and ErrLocalRoute, deleting
+// nothing, when it is the local route. The route table is required to
+// live in the request's region when region is non-empty (Codex pass 7
+// BLOCKING #1).
 func (r *Repository) DeleteRoute(account, region, routeTableID, destination string) error {
 	if region != "" {
 		if _, err := r.GetRouteTable(account, region, routeTableID); err != nil {
 			return err
 		}
 	}
-	res, err := r.db.Exec(
-		`DELETE FROM ec2_routes WHERE account_id = ? AND route_table_id = ? AND destination_cidr_block = ?`,
-		account, routeTableID, destination,
-	)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	const where = ` FROM ec2_routes WHERE account_id = ? AND route_table_id = ? AND destination_cidr_block = ?`
+	var gw sql.NullString
+	err := r.db.QueryRow(`SELECT gateway_id`+where, account, routeTableID, destination).Scan(&gw)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
 		return models.ErrNotFound
+	case err != nil:
+		return err
+	case gw.String == LocalGateway:
+		return ErrLocalRoute
 	}
-	return nil
+	_, err = r.db.Exec(`DELETE`+where, account, routeTableID, destination)
+	return err
 }
 
 // ----- SecurityGroup -----

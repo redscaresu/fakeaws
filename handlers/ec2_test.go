@@ -2702,6 +2702,8 @@ func TestEC2_DescribeVpcsAndIGWsByID(t *testing.T) {
 // association by Filter association.route-table-association-id and a
 // VPC's main route table by vpc-id + association.main, and wants one
 // result, so ignoring the filters broke both once a second VPC existed.
+// Each case answers exactly its tables, the VPCs' main ones included:
+// rts are the created tables and mains the main ones, read unfiltered.
 func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	var vpcs, rts []string
@@ -2710,6 +2712,8 @@ func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 		vpcs = append(vpcs, vpc)
 		rts = append(rts, createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {vpc}}))
 	}
+	mains := mainTablesByVPC(t, srv)
+	require.Len(t, mains, 2, "each VPC's main table")
 	subnet := createOK(t, srv, "CreateSubnet", "subnetId", url.Values{"VpcId": {vpcs[0]}, "CidrBlock": {"10.0.1.0/24"}})
 	assoc := createOK(t, srv, "AssociateRouteTable", "associationId", url.Values{"RouteTableId": {rts[0]}, "SubnetId": {subnet}})
 
@@ -2717,21 +2721,184 @@ func TestEC2_DescribeRouteTablesFilters(t *testing.T) {
 		params url.Values
 		want   []string
 	}{
-		"no filter":      {nil, rts},
+		"no filter":      {nil, append(slices.Clone(rts), mains[vpcs[0]], mains[vpcs[1]])},
 		"by association": {ec2FilterParams("association.route-table-association-id", assoc), rts[:1]},
-		"by vpc":         {ec2FilterParams("vpc-id", vpcs[1]), rts[1:]},
-		"main of a vpc":  {ec2FilterParams("association.main", "true", "vpc-id", vpcs[0]), nil},
+		"by vpc":         {ec2FilterParams("vpc-id", vpcs[1]), []string{rts[1], mains[vpcs[1]]}},
+		"main":           {ec2FilterParams("association.main", "true"), []string{mains[vpcs[0]], mains[vpcs[1]]}},
+		"main of a vpc":  {ec2FilterParams("association.main", "true", "vpc-id", vpcs[0]), []string{mains[vpcs[0]]}},
 		"not main":       {ec2FilterParams("association.main", "false"), rts[:1]},
 	} {
-		resp, body := ec2Call(t, srv, tagRegion, "DescribeRouteTables", tc.params)
-		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", name, body)
-		for _, rt := range rts {
-			assert.Equal(t, slices.Contains(tc.want, rt), strings.Contains(string(body), "<routeTableId>"+rt+"</routeTableId>"), "%s: %s in %s", name, rt, body)
-		}
+		assert.ElementsMatch(t, tc.want, describeIDs(t, srv, "DescribeRouteTables", tc.params).RouteTables, name)
 	}
 
 	resp, _ := ec2Call(t, srv, tagRegion, "DescribeRouteTables", ec2FilterParams("route.gateway-id", "igw-1"))
 	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode, "an unmodelled filter is refused, not ignored")
+}
+
+// mainTablesByVPC reads every route table unfiltered and answers each
+// VPC's tables holding a main association, by VPC id.
+func mainTablesByVPC(t *testing.T, srv *httptest.Server) map[string]string {
+	t.Helper()
+	body := mustOK(t)(ec2Call(t, srv, tagRegion, "DescribeRouteTables", nil))
+	var out struct {
+		Tables []struct {
+			ID    string `xml:"routeTableId"`
+			VPC   string `xml:"vpcId"`
+			Mains []bool `xml:"associationSet>item>main"`
+		} `xml:"routeTableSet>item"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	mains := map[string]string{}
+	for _, rt := range out.Tables {
+		if slices.Contains(rt.Mains, true) {
+			require.NotContains(t, mains, rt.VPC, "one main table per VPC: %s", body)
+			mains[rt.VPC] = rt.ID
+		}
+	}
+	return mains
+}
+
+// ec2RouteSet is the route table's routeSet as DescribeRouteTables
+// answers it by id.
+type ec2RouteSet []struct {
+	Dest    string `xml:"destinationCidrBlock"`
+	Gateway string `xml:"gatewayId"`
+	Origin  string `xml:"origin"`
+	State   string `xml:"state"`
+}
+
+func routeSet(t *testing.T, srv *httptest.Server, rt string) ec2RouteSet {
+	t.Helper()
+	body := mustOK(t)(ec2Call(t, srv, tagRegion, "DescribeRouteTables", url.Values{"RouteTableId.1": {rt}}))
+	var out struct {
+		Routes ec2RouteSet `xml:"routeTableSet>item>routeSet>item"`
+	}
+	require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+	return out.Routes
+}
+
+// TestEC2_CreateRouteTable_LocalRoute: a created route table answers
+// its VPC's local route, as AWS gives every route table, the same route
+// the VPC's main table answers.
+func TestEC2_CreateRouteTable_LocalRoute(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	vpc := createOK(t, srv, "CreateVpc", "vpcId", url.Values{"CidrBlock": {"10.40.0.0/16"}})
+	rt := createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {vpc}})
+
+	routes := routeSet(t, srv, rt)
+	require.Len(t, routes, 1, "the local route alone")
+	assert.Equal(t, "10.40.0.0/16", routes[0].Dest)
+	assert.Equal(t, repository.LocalGateway, routes[0].Gateway)
+	assert.Equal(t, "CreateRouteTable", routes[0].Origin)
+	assert.Equal(t, "active", routes[0].State)
+	assert.Equal(t, routes, routeSet(t, srv, mainRouteTable(t, srv, vpc)), "the main table's local route")
+}
+
+// TestEC2_DeleteRoute_LocalRouteRefused: DeleteRoute of a route table's
+// local route is 400 InvalidParameterValue, as AWS answers, and the
+// route stays; any other route deletes, and a missing one is not found.
+func TestEC2_DeleteRoute_LocalRouteRefused(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	vpc := createOK(t, srv, "CreateVpc", "vpcId", url.Values{"CidrBlock": {"10.41.0.0/16"}})
+	for name, rt := range map[string]string{
+		"main":    mainRouteTable(t, srv, vpc),
+		"created": createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {vpc}}),
+	} {
+		resp, body := ec2Call(t, srv, tagRegion, "DeleteRoute", url.Values{"RouteTableId": {rt}, "DestinationCidrBlock": {"10.41.0.0/16"}})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s: %s", name, body)
+		assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"), name)
+		assert.Equal(t, "cannot remove local route 10.41.0.0/16 in route table "+rt, extractEC2Tag(body, "Message"), name)
+		assert.Len(t, routeSet(t, srv, rt), 1, "%s: the local route stays", name)
+
+		createOK(t, srv, "CreateRoute", "return", url.Values{"RouteTableId": {rt}, "DestinationCidrBlock": {"0.0.0.0/0"}, "GatewayId": {"igw-1"}})
+		mustOK(t)(ec2Call(t, srv, tagRegion, "DeleteRoute", url.Values{"RouteTableId": {rt}, "DestinationCidrBlock": {"0.0.0.0/0"}}))
+		assert.Len(t, routeSet(t, srv, rt), 1, "%s: the other route deleted", name)
+		resp, body = ec2Call(t, srv, tagRegion, "DeleteRoute", url.Values{"RouteTableId": {rt}, "DestinationCidrBlock": {"0.0.0.0/0"}})
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, "%s: %s", name, body)
+	}
+}
+
+// mainRouteTable is vpc's main route table, as the provider's aws_vpc
+// read finds it: by vpc-id and association.main=true, one result.
+func mainRouteTable(t *testing.T, srv *httptest.Server, vpc string) string {
+	t.Helper()
+	ids := describeIDs(t, srv, "DescribeRouteTables", ec2FilterParams("association.main", "true", "vpc-id", vpc)).RouteTables
+	require.Len(t, ids, 1, "%s's main route table", vpc)
+	return ids[0]
+}
+
+// TestEC2_CreateVpc_MainRouteTable: CreateVpc makes the VPC's main
+// route table, with a main association and the local route for the
+// VPC's CIDR, as AWS does; DeleteRouteTable refuses it with
+// DependencyViolation and DeleteVpc removes it.
+func TestEC2_CreateVpc_MainRouteTable(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	newVPC := func(cidr string) string {
+		return createOK(t, srv, "CreateVpc", "vpcId", url.Values{"CidrBlock": {cidr}})
+	}
+
+	t.Run("described by vpc-id", func(t *testing.T) {
+		vpc := newVPC("10.20.0.0/16")
+		body := mustOK(t)(ec2Call(t, srv, tagRegion, "DescribeRouteTables", ec2FilterParams("vpc-id", vpc)))
+		var out struct {
+			Tables []struct {
+				ID     string `xml:"routeTableId"`
+				Assocs []struct {
+					ID     string `xml:"routeTableAssociationId"`
+					Table  string `xml:"routeTableId"`
+					Subnet string `xml:"subnetId"`
+					Main   bool   `xml:"main"`
+					State  string `xml:"associationState>state"`
+				} `xml:"associationSet>item"`
+				Routes []struct {
+					Dest    string `xml:"destinationCidrBlock"`
+					Gateway string `xml:"gatewayId"`
+					Origin  string `xml:"origin"`
+					State   string `xml:"state"`
+				} `xml:"routeSet>item"`
+			} `xml:"routeTableSet>item"`
+		}
+		require.NoError(t, xml.Unmarshal(body, &out), "%s", body)
+		require.Len(t, out.Tables, 1, "one table in a new VPC: %s", body)
+		rt := out.Tables[0]
+		require.Len(t, rt.Assocs, 1, "%s", body)
+		a := rt.Assocs[0]
+		assert.True(t, a.Main, "%s", body)
+		assert.Equal(t, rt.ID, a.Table)
+		assert.Empty(t, a.Subnet, "a main association has no subnet")
+		assert.Equal(t, "associated", a.State)
+		assert.True(t, strings.HasPrefix(a.ID, "rtbassoc-"), a.ID)
+		require.Len(t, rt.Routes, 1, "%s", body)
+		r := rt.Routes[0]
+		assert.Equal(t, "10.20.0.0/16", r.Dest)
+		assert.Equal(t, "local", r.Gateway)
+		assert.Equal(t, "CreateRouteTable", r.Origin)
+		assert.Equal(t, "active", r.State)
+	})
+
+	t.Run("found by association.main", func(t *testing.T) {
+		vpcs := []string{newVPC("10.21.0.0/16"), newVPC("10.22.0.0/16")}
+		mains := []string{mainRouteTable(t, srv, vpcs[0]), mainRouteTable(t, srv, vpcs[1])}
+		assert.NotEqual(t, mains[0], mains[1], "each VPC its own")
+		assert.Equal(t, describeIDs(t, srv, "DescribeRouteTables", ec2FilterParams("vpc-id", vpcs[0])).RouteTables, mains[:1])
+	})
+
+	t.Run("DeleteRouteTable refused", func(t *testing.T) {
+		rt := mainRouteTable(t, srv, newVPC("10.23.0.0/16"))
+		resp, body := ec2Call(t, srv, tagRegion, "DeleteRouteTable", url.Values{"RouteTableId": {rt}})
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+		assert.Equal(t, "DependencyViolation", extractEC2Tag(body, "Code"))
+		mustOK(t)(ec2Call(t, srv, tagRegion, "DescribeRouteTables", url.Values{"RouteTableId.1": {rt}}))
+	})
+
+	t.Run("DeleteVpc removes it", func(t *testing.T) {
+		vpc := newVPC("10.24.0.0/16")
+		rt := mainRouteTable(t, srv, vpc)
+		mustOK(t)(ec2Call(t, srv, tagRegion, "DeleteVpc", url.Values{"VpcId": {vpc}}))
+		resp, body := ec2Call(t, srv, tagRegion, "DescribeRouteTables", url.Values{"RouteTableId.1": {rt}})
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, "%s", body)
+		assert.Equal(t, "InvalidRouteTableID.NotFound", extractEC2Tag(body, "Code"))
+	})
 }
 
 // TestEC2_CreatedRouteAnswersOriginAndState: a route CreateRoute adds
@@ -2814,8 +2981,7 @@ func TestContract_ec2_describe_filter_never_ignored(t *testing.T) {
 func TestContract_ec2_filter_and_across_or_within(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	a, b := tagVPC(t, srv), tagVPC(t, srv)
-	rtA := createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {a}})
-	rtB := createOK(t, srv, "CreateRouteTable", "routeTableId", url.Values{"VpcId": {b}})
+	rtA, rtB := mainRouteTable(t, srv, a), mainRouteTable(t, srv, b)
 	subnet := createOK(t, srv, "CreateSubnet", "subnetId", url.Values{"VpcId": {b}, "CidrBlock": {"10.0.1.0/24"}})
 
 	routeTables := func(params url.Values) []string {
@@ -3579,15 +3745,25 @@ func TestContract_ec2_vpc_default_security_group(t *testing.T) {
 	assert.NotContains(t, string(mustOK(t)(ec2Call(t, srv, tagRegion, "DescribeVpcs", nil))), "10.9.0.0/16", "no VPC without its default group")
 }
 
-// bareVPC stores a VPC without its default group, as fakeaws stored
-// every VPC before CreateVpc made the group.
+// bareVPC stores a VPC without its default group or main route table,
+// as fakeaws stored every VPC before CreateVpc made them.
 func bareVPC(t *testing.T, repo *repository.Repository, id string) {
 	t.Helper()
-	require.NoError(t, repo.CreateVPCWithDefaultGroup(awsproto.FakeAccountID, &repository.EC2VPC{
+	require.NoError(t, repo.CreateVPCWithDefaults(awsproto.FakeAccountID, &repository.EC2VPC{
 		ID: id, CidrBlock: "10.0.0.0/16", Region: tagRegion, ARN: "arn", State: "available", CreatedAt: "t",
-	}, &repository.EC2SecurityGroup{ID: "sg-" + id, VPCID: id, GroupName: repository.DefaultGroupName, Region: tagRegion, ARN: "arn", CreatedAt: "t"}))
-	_, err := repo.DB().Exec(`DELETE FROM ec2_security_groups WHERE vpc_id = ?`, id)
-	require.NoError(t, err)
+	}, &repository.EC2SecurityGroup{ID: "sg-" + id, VPCID: id, GroupName: repository.DefaultGroupName, Region: tagRegion, ARN: "arn", CreatedAt: "t"},
+		handlers.NewMainRouteTable(awsproto.FakeAccountID, tagRegion, id)))
+	for _, table := range []string{"ec2_security_groups", "ec2_route_tables"} {
+		_, err := repo.DB().Exec(`DELETE FROM `+table+` WHERE vpc_id = ?`, id)
+		require.NoError(t, err)
+	}
+}
+
+// mainTables lists vpc's main route tables: by vpc-id and
+// association.main=true, as the provider's aws_vpc read finds it.
+func mainTables(t *testing.T, srv *httptest.Server, vpc string) []string {
+	t.Helper()
+	return describeIDs(t, srv, "DescribeRouteTables", ec2FilterParams("association.main", "true", "vpc-id", vpc)).RouteTables
 }
 
 // defaultGroups lists vpc's groups named default.
@@ -3596,11 +3772,12 @@ func defaultGroups(t *testing.T, srv *httptest.Server, vpc string) []string {
 	return describeIDs(t, srv, "DescribeSecurityGroups", ec2FilterParams("group-name", "default", "vpc-id", vpc)).SecurityGroups
 }
 
-// TestEC2_DefaultGroupBackfilled: a VPC stored without its default
-// group gets it at boot and when /mock/restore brings it back, so
-// group-name=default never answers it with nothing. A loaded database
-// answers its rows.
-func TestEC2_DefaultGroupBackfilled(t *testing.T) {
+// TestEC2_VPCDefaultsBackfilled: a VPC stored without its default
+// group and main route table gets both at boot and when /mock/restore
+// brings it back, so neither group-name=default nor association.main
+// answers it with nothing; the main table has its local route. A loaded
+// database answers its rows.
+func TestEC2_VPCDefaultsBackfilled(t *testing.T) {
 	openBare := func(dbPath, id string) {
 		t.Helper()
 		repo, err := repository.New(dbPath)
@@ -3613,19 +3790,25 @@ func TestEC2_DefaultGroupBackfilled(t *testing.T) {
 	openBare(dbPath, "vpc-old")
 	app, srv := newTestApp(t, dbPath)
 	assert.Len(t, defaultGroups(t, srv, "vpc-old"), 1, "boot")
+	require.Len(t, mainTables(t, srv, "vpc-old"), 1, "boot")
+	assert.Equal(t, "10.0.0.0/16", routeSet(t, srv, mainTables(t, srv, "vpc-old")[0])[0].Dest, "with its local route")
 
 	bareVPC(t, app.Repository(), "vpc-snap")
 	require.Empty(t, defaultGroups(t, srv, "vpc-snap"), "stored bare after boot")
+	require.Empty(t, mainTables(t, srv, "vpc-snap"), "stored bare after boot")
 	mustOK(t)(doPost(t, srv, "/mock/snapshot"))
 	mustOK(t)(doPost(t, srv, "/mock/restore"))
 	assert.Len(t, defaultGroups(t, srv, "vpc-snap"), 1, "restore")
+	assert.Len(t, mainTables(t, srv, "vpc-snap"), 1, "restore")
 	assert.Len(t, defaultGroups(t, srv, "vpc-old"), 1, "never a second")
+	assert.Len(t, mainTables(t, srv, "vpc-old"), 1, "never a second")
 
 	loadedPath := filepath.Join(t.TempDir(), "loaded.db")
 	openBare(loadedPath, "vpc-loaded")
 	markLoaded(t, loadedPath, true)
 	_, srv = newTestApp(t, loadedPath)
 	assert.Empty(t, defaultGroups(t, srv, "vpc-loaded"), "a loaded database answers its rows")
+	assert.Empty(t, mainTables(t, srv, "vpc-loaded"), "a loaded database answers its rows")
 }
 
 // TestEC2_RestoreBackfillFailureKeepsLiveState: /mock/restore backfills
@@ -3650,6 +3833,7 @@ func TestEC2_RestoreBackfillFailureKeepsLiveState(t *testing.T) {
 	assert.Contains(t, describeIDs(t, srv, "DescribeVpcs", nil).Vpcs, live, "the live state stays")
 	assert.Len(t, defaultGroups(t, srv, live), 1)
 	assert.Empty(t, defaultGroups(t, srv, "vpc-bare"), "nothing backfilled into the live state")
+	assert.Empty(t, mainTables(t, srv, "vpc-bare"), "nothing backfilled into the live state")
 	assert.NoFileExists(t, dbPath+".restore", "the staged copy is removed")
 	_, err = db.Exec(`INSERT INTO ec2_security_groups (account_id, region, id, vpc_id, group_name, description, arn, data, created_at)
 		VALUES (?, ?, 'sg-probe', ?, 'probe', 'd', 'arn', '{}', 't')`, awsproto.FakeAccountID, tagRegion, live)

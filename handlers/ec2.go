@@ -286,10 +286,13 @@ type ec2CreateVpcResult struct {
 // name with 400 InvalidGroup.Reserved and DeleteSecurityGroup refuses
 // the group with 400 CannotDelete, so the VPC keeps it until DeleteVpc.
 // A database that is not loaded gets one for each VPC stored without
-// it (repository.BackfillDefaultGroups) at boot and in /mock/restore's
+// it (repository.BackfillVPCDefaults) at boot and in /mock/restore's
 // copy of the snapshot before it goes live; a loaded database answers
 // its rows. The group has no rules: AWS's allows all traffic from itself and all
 // egress, but fakeaws gives a created group no default egress either.
+// The same transaction stores the VPC's main route table
+// (newMainRouteTable), which DeleteRouteTable refuses and DeleteVpc
+// removes; the backfill gives a VPC stored without one its own.
 //
 // UNVERIFIED(aws-code): InvalidGroup.Reserved and CannotDelete from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -304,7 +307,7 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 	}
 	id := "vpc-" + ec2RandID()
 	v := newEC2VPC(account, region, id, cidr)
-	err := app.repo.CreateVPCWithDefaultGroup(account, v, newDefaultGroup(account, region, id))
+	err := app.repo.CreateVPCWithDefaults(account, v, newDefaultGroup(account, region, id), newMainRouteTable(account, region, id))
 	if err == nil {
 		err = app.tagNew(account, region, onResource(specs["vpc"], id, "vpc"),
 			func() error { return app.repo.DeleteVPC(account, region, id) })
@@ -834,6 +837,34 @@ func newDefaultGroup(account, region, vpcID string) *repository.EC2SecurityGroup
 	return newEC2SecurityGroup(account, region, vpcID, repository.DefaultGroupName, "default VPC security group")
 }
 
+// newEC2RouteTable is a new route table in vpcID, for CreateRouteTable
+// and as a VPC's main one. The repository stores each with its local
+// route.
+func newEC2RouteTable(account, region, vpcID string) *repository.EC2RouteTable {
+	id := "rtb-" + ec2RandID()
+	return &repository.EC2RouteTable{
+		ID: id, VPCID: vpcID, Region: region, OwnerID: account,
+		ARN:       awsproto.BuildEC2RouteTableARN(region, account, id),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+// newMainRouteTable is vpcID's main route table (newEC2RouteTable) and
+// its main association, which has no subnet, as AWS answers them.
+func newMainRouteTable(account, region, vpcID string) repository.MainRouteTable {
+	rt := newEC2RouteTable(account, region, vpcID)
+	return repository.MainRouteTable{
+		Table: rt,
+		Association: &repository.EC2RouteTableAssociation{
+			ID: "rtbassoc-" + ec2RandID(), RouteTableID: rt.ID, Main: true, State: "associated",
+		},
+	}
+}
+
+// vpcDefaults make what CreateVpc stores with a VPC, for
+// repository.BackfillVPCDefaults.
+var vpcDefaults = repository.VPCDefaults{Group: newDefaultGroup, MainTable: newMainRouteTable}
+
 func ec2VpcToXML(v *repository.EC2VPC) ec2VpcXML {
 	x := ec2VpcXML{
 		VpcId:           v.ID,
@@ -1161,12 +1192,8 @@ func (app *Application) ec2CreateRouteTable(w http.ResponseWriter, account, regi
 	if refused {
 		return
 	}
-	id := "rtb-" + ec2RandID()
-	rt := &repository.EC2RouteTable{
-		ID: id, VPCID: vpcID, Region: region, OwnerID: account,
-		ARN:       awsproto.BuildEC2RouteTableARN(region, account, id),
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-	}
+	rt := newEC2RouteTable(account, region, vpcID)
+	id := rt.ID
 	err := app.repo.CreateRouteTable(account, rt)
 	if err == nil {
 		err = app.tagNew(account, region, onResource(specs["route-table"], id, "route-table"),
@@ -1200,8 +1227,8 @@ type ec2DescribeRouteTablesResult struct {
 
 // rtFilterValues are the DescribeRouteTables filters fakeaws models:
 // the ones the provider's lookups by VPC, by association id and
-// data.aws_route_table send. CreateVpc makes no main route table, so
-// only a loaded one answers association.main=true.
+// data.aws_route_table send. association.main=true with vpc-id answers
+// the VPC's main route table, which CreateVpc makes.
 var rtFilterValues = map[string]func(rt ec2RouteTableXML) []string{
 	"route-table-id": func(rt ec2RouteTableXML) []string { return []string{rt.RouteTableId} },
 	"vpc-id":         func(rt ec2RouteTableXML) []string { return []string{rt.VpcId} },
@@ -1380,9 +1407,19 @@ func (app *Application) ec2CreateRoute(w http.ResponseWriter, account, region st
 	awsproto.WriteEC2QueryRPCResponse(w, "CreateRoute", &ec2CreateRouteResult{Return: true})
 }
 
+// ec2DeleteRoute refuses a route table's local route with 400
+// InvalidParameterValue, and the route stays.
+//
+// UNVERIFIED(aws-code): InvalidParameterValue and its message from https://docs.aws.amazon.com/vpc/latest/userguide/RouteTables.html (a local route cannot be deleted); no recording
 func (app *Application) ec2DeleteRoute(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
-	if err := app.repo.DeleteRoute(account, region,
-		req.Params.Get("RouteTableId"), req.Params.Get("DestinationCidrBlock")); err != nil {
+	rtID, dest := req.Params.Get("RouteTableId"), req.Params.Get("DestinationCidrBlock")
+	err := app.repo.DeleteRoute(account, region, rtID, dest)
+	if errors.Is(err, repository.ErrLocalRoute) {
+		awsproto.WriteServiceError(w, awsproto.ShapeEC2Query, http.StatusBadRequest, "InvalidParameterValue",
+			fmt.Sprintf("cannot remove local route %s in route table %s", dest, rtID))
+		return
+	}
+	if err != nil {
 		awsproto.WriteAWSError(w, awsproto.ShapeEC2Query, err)
 		return
 	}

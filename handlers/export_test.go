@@ -21,6 +21,10 @@ func EC2DeriveEIP(allocID string) string { return ec2DerivePublicIP(ec2EIPNet, a
 
 func EC2DeriveAutoIP(eniID string) string { return ec2DerivePublicIP(ec2AutoIPNet, eniID) }
 
+// For bareVPC, which stores a VPC as CreateVpc does and then drops its
+// default group.
+var NewMainRouteTable = newMainRouteTable
+
 // For load_ec2_compute_test.go, which records each attribute a loaded
 // instance references.
 var InstanceReadAttributes = ec2InstanceReadAttributes
