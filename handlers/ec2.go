@@ -290,6 +290,9 @@ type ec2CreateVpcResult struct {
 // copy of the snapshot before it goes live; a loaded database answers
 // its rows. The group has no rules: AWS's allows all traffic from itself and all
 // egress, but fakeaws gives a created group no default egress either.
+// The same transaction stores the VPC's main route table
+// (newMainRouteTable), which DeleteRouteTable refuses and DeleteVpc
+// removes.
 //
 // UNVERIFIED(aws-code): InvalidGroup.Reserved and CannotDelete from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html; no recording
 func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region string, req awsproto.QueryRPCRequest) {
@@ -304,7 +307,7 @@ func (app *Application) ec2CreateVpc(w http.ResponseWriter, account, region stri
 	}
 	id := "vpc-" + ec2RandID()
 	v := newEC2VPC(account, region, id, cidr)
-	err := app.repo.CreateVPCWithDefaultGroup(account, v, newDefaultGroup(account, region, id))
+	err := app.repo.CreateVPCWithDefaults(account, v, newDefaultGroup(account, region, id), newMainRouteTable(account, region, id, cidr))
 	if err == nil {
 		err = app.tagNew(account, region, onResource(specs["vpc"], id, "vpc"),
 			func() error { return app.repo.DeleteVPC(account, region, id) })
@@ -834,6 +837,26 @@ func newDefaultGroup(account, region, vpcID string) *repository.EC2SecurityGroup
 	return newEC2SecurityGroup(account, region, vpcID, repository.DefaultGroupName, "default VPC security group")
 }
 
+// newMainRouteTable is vpcID's main route table: its main association,
+// which has no subnet, and its local route for the VPC's cidr, as
+// AWS answers them.
+func newMainRouteTable(account, region, vpcID, cidr string) repository.MainRouteTable {
+	id := "rtb-" + ec2RandID()
+	return repository.MainRouteTable{
+		Table: &repository.EC2RouteTable{
+			ID: id, VPCID: vpcID, Region: region, OwnerID: account,
+			ARN:       awsproto.BuildEC2RouteTableARN(region, account, id),
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		},
+		Association: &repository.EC2RouteTableAssociation{
+			ID: "rtbassoc-" + ec2RandID(), RouteTableID: id, Main: true, State: "associated",
+		},
+		LocalRoute: &repository.EC2Route{
+			RouteTableID: id, DestinationCidrBlock: cidr, GatewayID: "local", Origin: "CreateRouteTable", State: "active",
+		},
+	}
+}
+
 func ec2VpcToXML(v *repository.EC2VPC) ec2VpcXML {
 	x := ec2VpcXML{
 		VpcId:           v.ID,
@@ -1200,8 +1223,8 @@ type ec2DescribeRouteTablesResult struct {
 
 // rtFilterValues are the DescribeRouteTables filters fakeaws models:
 // the ones the provider's lookups by VPC, by association id and
-// data.aws_route_table send. CreateVpc makes no main route table, so
-// only a loaded one answers association.main=true.
+// data.aws_route_table send. association.main=true with vpc-id answers
+// the VPC's main route table, which CreateVpc makes.
 var rtFilterValues = map[string]func(rt ec2RouteTableXML) []string{
 	"route-table-id": func(rt ec2RouteTableXML) []string { return []string{rt.RouteTableId} },
 	"vpc-id":         func(rt ec2RouteTableXML) []string { return []string{rt.VpcId} },

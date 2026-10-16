@@ -382,10 +382,18 @@ type execer interface {
 // it: no other group may take the name, and it cannot be deleted.
 const DefaultGroupName = "default"
 
-// CreateVPCWithDefaultGroup stores v and sg, its security group named
-// DefaultGroupName, in one transaction: EC2's CreateVpc makes both, so
-// no read sees the VPC without its default group.
-func (r *Repository) CreateVPCWithDefaultGroup(account string, v *EC2VPC, sg *EC2SecurityGroup) error {
+// MainRouteTable is the route table a VPC is made with: Table, its
+// main association and its local route.
+type MainRouteTable struct {
+	Table       *EC2RouteTable
+	Association *EC2RouteTableAssociation
+	LocalRoute  *EC2Route
+}
+
+// CreateVPCWithDefaults stores v, sg, its security group named
+// DefaultGroupName, and main, its main route table, in one transaction:
+// EC2's CreateVpc makes all three, so no read sees the VPC without them.
+func (r *Repository) CreateVPCWithDefaults(account string, v *EC2VPC, sg *EC2SecurityGroup, main MainRouteTable) error {
 	tx, err := r.db.Begin()
 	if err != nil {
 		return err
@@ -395,6 +403,15 @@ func (r *Repository) CreateVPCWithDefaultGroup(account string, v *EC2VPC, sg *EC
 		return mapInsertError(err)
 	}
 	if err := insertSecurityGroup(tx, account, sg); err != nil {
+		return err
+	}
+	if err := insertRouteTable(tx, account, main.Table); err != nil {
+		return err
+	}
+	if err := insertAssociation(tx, account, v.ID, main.Association); err != nil {
+		return err
+	}
+	if err := insertRoute(tx, account, main.LocalRoute); err != nil {
 		return err
 	}
 	return tx.Commit()

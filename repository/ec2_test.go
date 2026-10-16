@@ -14,11 +14,17 @@ import (
 
 const testRegion = "us-east-1"
 
-// createVPC stores v with its default security group, as CreateVpc does.
+// createVPC stores v with its default security group and main route
+// table, as CreateVpc does.
 func createVPC(r *Repository, v *EC2VPC) error {
-	return r.CreateVPCWithDefaultGroup(testAccount, v, &EC2SecurityGroup{
+	rt := "rtb-main-" + v.ID
+	return r.CreateVPCWithDefaults(testAccount, v, &EC2SecurityGroup{
 		ID: "sg-default-" + v.ID, VPCID: v.ID, GroupName: DefaultGroupName, Description: "default VPC security group",
 		Region: v.Region, ARN: "arn", CreatedAt: "t",
+	}, MainRouteTable{
+		Table:       &EC2RouteTable{ID: rt, VPCID: v.ID, Region: v.Region, ARN: "arn", CreatedAt: "t"},
+		Association: &EC2RouteTableAssociation{ID: "rtbassoc-main-" + v.ID, RouteTableID: rt, Main: true, State: "associated"},
+		LocalRoute:  &EC2Route{RouteTableID: rt, DestinationCidrBlock: v.CidrBlock, GatewayID: "local", Origin: "CreateRouteTable", State: "active"},
 	})
 }
 
@@ -132,20 +138,17 @@ func TestMainRouteTableAssociation(t *testing.T) {
 	r := setupRepo(t)
 	require.NoError(t, createVPC(r, &EC2VPC{ID: "vpc-1", CidrBlock: "10.0.0.0/16", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
 	require.NoError(t, r.CreateSubnet(testAccount, &EC2Subnet{ID: "subnet-1", VPCID: "vpc-1", CidrBlock: "10.0.1.0/24", AvailabilityZone: "us-east-1a", Region: testRegion, ARN: "arn", State: "available", CreatedAt: "t"}))
-	for _, id := range []string{"rtb-1", "rtb-2"} {
-		require.NoError(t, r.CreateRouteTable(testAccount, &EC2RouteTable{ID: id, VPCID: "vpc-1", Region: testRegion, ARN: "arn", CreatedAt: "t"}))
-	}
-	require.NoError(t, insertAssociation(r.db, testAccount, "vpc-1", &EC2RouteTableAssociation{ID: "rtbassoc-main", RouteTableID: "rtb-1", Main: true}))
+	require.NoError(t, r.CreateRouteTable(testAccount, &EC2RouteTable{ID: "rtb-2", VPCID: "vpc-1", Region: testRegion, ARN: "arn", CreatedAt: "t"}))
 	require.NoError(t, r.AssociateRouteTable(testAccount, testRegion, &EC2RouteTableAssociation{ID: "rtbassoc-1", RouteTableID: "rtb-2", SubnetID: "subnet-1", State: "associated"}))
 
 	err := mapInsertError(insertAssociation(r.db, testAccount, "vpc-1", &EC2RouteTableAssociation{ID: "rtbassoc-main2", RouteTableID: "rtb-2", Main: true}))
 	assert.ErrorIs(t, err, models.ErrConflict, "a second main association of one VPC")
-	assert.ErrorIs(t, r.DisassociateRouteTable(testAccount, "rtbassoc-main"), ErrMainAssociation)
+	assert.ErrorIs(t, r.DisassociateRouteTable(testAccount, "rtbassoc-main-vpc-1"), ErrMainAssociation)
 	require.NoError(t, r.DeleteSubnet(testAccount, testRegion, "subnet-1"))
 
 	assocs, err := r.ListRouteTableAssociations(testAccount)
 	require.NoError(t, err)
-	assert.Equal(t, []*EC2RouteTableAssociation{{ID: "rtbassoc-main", RouteTableID: "rtb-1", Main: true}}, assocs)
+	assert.Equal(t, []*EC2RouteTableAssociation{{ID: "rtbassoc-main-vpc-1", RouteTableID: "rtb-main-vpc-1", Main: true, State: "associated"}}, assocs)
 	assert.ErrorIs(t, r.DisassociateRouteTable(testAccount, "rtbassoc-1"), models.ErrNotFound, "DeleteSubnet dropped it")
 }
 

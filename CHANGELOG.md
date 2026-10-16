@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (CreateVpc makes the VPC's main route table, 2026-10-16)
+- **`CreateVpc` makes the VPC's main route table**, with a main association (no `subnetId`, `associationState` `associated`) and the local route for the VPC's CIDR (`gatewayId` `local`, `origin` `CreateRouteTable`, `state` `active`), stored with the VPC and its default security group in one transaction (`repository.CreateVPCWithDefaults`, which replaces `repository.CreateVPCWithDefaultGroup`). So `DescribeRouteTables` `vpc-id` with `association.main=true` answers it, `aws_vpc` reads `default_route_table_id` and `main_route_table_id`, and `aws_default_route_table` adopts it (`examples/working/default_route_table`). `DeleteRouteTable` on it is 400 `DependencyViolation` and `DeleteVpc` removes it. An unfiltered `DescribeRouteTables` now lists each created VPC's main table too. A VPC stored before this change (a file database, a snapshot) has no main table: there is no backfill. `TestEC2_CreateVpc_MainRouteTable` pins it; `TestEC2_DescribeRouteTablesFilters`, `TestContract_ec2_filter_and_across_or_within` and `TestMainRouteTableAssociation` now use the created main table.
+
 ### Fixed (ModifyVpcAttribute refuses what AWS refuses for the DNS attributes, 2026-10-16)
 - **`ModifyVpcAttribute` answers 400 `InvalidParameterValue`** to `EnableDnsHostnames` true on a VPC whose `enableDnsSupport` is false, and to both DNS attributes in one request, with AWS's messages; it accepted and stored both. The code and messages come from the ModifyVpcAttribute API reference, not a recording. `TestEC2_ModifyVpcAttribute_HostnamesNeedSupport` and `TestEC2_ModifyVpcAttribute_OneDNSAttributePerRequest` pin it.
 
