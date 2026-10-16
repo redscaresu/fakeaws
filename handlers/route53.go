@@ -155,17 +155,16 @@ func (app *Application) r53CreateHostedZone(w http.ResponseWriter, r *http.Reque
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		r53InvalidInput(w, "could not read the request body")
 		return
 	}
 	var in r53CreateHostedZoneRequest
 	if err := xml.Unmarshal(body, &in); err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		r53InvalidInput(w, "could not parse the request XML")
 		return
 	}
 	if in.Name == "" {
-		awsproto.WriteAWSError(w, r53ErrorShape,
-			fmt.Errorf("Name required: %w", models.ErrConflict))
+		r53InvalidInput(w, "Name is required")
 		return
 	}
 	zoneID := "Z" + r53RandID()
@@ -179,7 +178,7 @@ func (app *Application) r53CreateHostedZone(w http.ResponseWriter, r *http.Reque
 		z.Private = in.HostedZoneConfig.PrivateZone
 	}
 	if err := app.repo.CreateHostedZone(account, z); err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, err)
+		r53WriteError(w, err, r53NoSuchHostedZone, r53HostedZoneAlreadyExists)
 		return
 	}
 	change := &repository.Route53Change{
@@ -202,7 +201,7 @@ func (app *Application) r53GetHostedZone(w http.ResponseWriter, r *http.Request)
 	zoneID := strings.TrimPrefix(chi.URLParam(r, "id"), "/hostedzone/")
 	z, err := app.repo.GetHostedZone(account, zoneID)
 	if err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, err)
+		r53WriteError(w, err, r53NoSuchHostedZone, r53Code{})
 		return
 	}
 	awsproto.WriteXMLResponse(w, http.StatusOK, &r53GetHostedZoneResponse{
@@ -218,7 +217,7 @@ func (app *Application) r53ListHostedZones(w http.ResponseWriter, r *http.Reques
 	}
 	zones, err := app.repo.ListHostedZones(account)
 	if err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, err)
+		r53WriteError(w, err, r53NoSuchHostedZone, r53Code{})
 		return
 	}
 	out := r53ListHostedZonesResponse{}
@@ -235,7 +234,7 @@ func (app *Application) r53DeleteHostedZone(w http.ResponseWriter, r *http.Reque
 	}
 	zoneID := strings.TrimPrefix(chi.URLParam(r, "id"), "/hostedzone/")
 	if err := app.repo.DeleteHostedZone(account, zoneID); err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, err)
+		r53WriteError(w, err, r53NoSuchHostedZone, r53HostedZoneNotEmpty)
 		return
 	}
 	change := &repository.Route53Change{
@@ -295,24 +294,25 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 
 	z, err := app.repo.GetHostedZone(account, zoneID)
 	if err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, err)
+		r53WriteError(w, err, r53NoSuchHostedZone, r53Code{})
 		return
 	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		r53InvalidInput(w, "could not read the request body")
 		return
 	}
 	var in r53ChangeBatchRequest
 	if err := xml.Unmarshal(body, &in); err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		r53InvalidInput(w, "could not parse the request XML")
 		return
 	}
 
 	// TRANSACTIONAL: validate ALL changes before applying any
 	// (concepts.md "Standing patterns" item 7). Apex-CNAME rejection
 	// fires here per S47-T0 pitfall.
+	batch := map[r53RecordKey]bool{}
 	for i, ch := range in.ChangeBatch.Changes {
 		switch ch.Action {
 		case "CREATE", "UPSERT", "DELETE":
@@ -328,6 +328,15 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 			r53InvalidChangeBatch(w, fmt.Sprintf("Name and Type required at index %d", i))
 			return
 		}
+		msg, err := app.r53ExistenceError(account, zoneID, ch, batch)
+		if err != nil {
+			r53WriteError(w, err, r53NoSuchHostedZone, r53Code{})
+			return
+		}
+		if msg != "" {
+			r53InvalidChangeBatch(w, msg)
+			return
+		}
 	}
 
 	// Apply.
@@ -337,17 +346,7 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 		for _, rr := range rs.ResourceRecords {
 			records = append(records, rr.Value)
 		}
-		// Real Route53 normalises every record name to a trailing-dot
-		// FQDN on storage. terraform-provider-aws sometimes sends
-		// "foo.example.com" and sometimes "foo.example.com." depending
-		// on whether the user wrote the dot in HCL. Without normalising
-		// at write time, a later DELETE that uses the opposite shape
-		// silently misses the record → records linger → DeleteHostedZone
-		// rejects with 409 because the zone "still has records."
-		normalisedName := rs.Name
-		if normalisedName != "" && !strings.HasSuffix(normalisedName, ".") {
-			normalisedName += "."
-		}
+		normalisedName := r53FQDN(rs.Name)
 		switch ch.Action {
 		case "CREATE", "UPSERT":
 			alias := ""
@@ -362,12 +361,15 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 				ZoneID: zoneID, Name: normalisedName, Type: rs.Type, TTL: rs.TTL,
 				Records: records, AliasTarget: alias, SetIdentifier: rs.SetIdentifier,
 			}); err != nil {
-				awsproto.WriteAWSError(w, r53ErrorShape, err)
+				r53WriteError(w, err, r53NoSuchHostedZone, r53Code{})
 				return
 			}
 		case "DELETE":
-			// DELETE is idempotent at AWS; ignore not-found.
-			_ = app.repo.DeleteRecordSet(account, zoneID, normalisedName, rs.Type, rs.SetIdentifier)
+			// The validation above refused a DELETE of a missing record set.
+			if err := app.repo.DeleteRecordSet(account, zoneID, normalisedName, rs.Type, rs.SetIdentifier); err != nil {
+				r53WriteError(w, err, r53NoSuchHostedZone, r53Code{})
+				return
+			}
 		}
 	}
 
@@ -400,7 +402,7 @@ func (app *Application) r53ListResourceRecordSets(w http.ResponseWriter, r *http
 	zoneID := strings.TrimPrefix(chi.URLParam(r, "id"), "/hostedzone/")
 	rsets, err := app.repo.ListRecordSets(account, zoneID)
 	if err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, err)
+		r53WriteError(w, err, r53NoSuchHostedZone, r53Code{})
 		return
 	}
 
@@ -516,7 +518,7 @@ func (app *Application) r53GetChange(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(chi.URLParam(r, "id"), "/change/")
 	c, err := app.repo.GetChange(account, id)
 	if err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, err)
+		r53WriteError(w, err, r53NoSuchChange, r53Code{})
 		return
 	}
 	awsproto.WriteXMLResponse(w, http.StatusOK, &struct {
@@ -579,21 +581,84 @@ func r53TagTarget(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return awsproto.BuildRoute53HostedZoneARN(chi.URLParam(r, "resourceID")), true
 }
 
+// r53Code is a Route53 error code and the status Route53 answers it with.
+type r53Code struct {
+	status int
+	code   string
+}
+
+var (
+	r53NoSuchHostedZone        = r53Code{http.StatusNotFound, "NoSuchHostedZone"}
+	r53NoSuchChange            = r53Code{http.StatusNotFound, "NoSuchChange"}
+	r53HostedZoneNotEmpty      = r53Code{http.StatusBadRequest, "HostedZoneNotEmpty"}
+	r53HostedZoneAlreadyExists = r53Code{http.StatusConflict, "HostedZoneAlreadyExists"}
+)
+
+// r53WriteError is the one place Route53 writes a repository error:
+// ErrNotFound as notFound, ErrConflict as conflict when the call has
+// one (a zero r53Code otherwise), anything else through WriteAWSError.
+func r53WriteError(w http.ResponseWriter, err error, notFound, conflict r53Code) {
+	switch {
+	case errors.Is(err, models.ErrNotFound):
+		awsproto.WriteServiceError(w, r53ErrorShape, notFound.status, notFound.code, err.Error())
+	case conflict.code != "" && errors.Is(err, models.ErrConflict):
+		awsproto.WriteServiceError(w, r53ErrorShape, conflict.status, conflict.code, err.Error())
+	default:
+		awsproto.WriteAWSError(w, r53ErrorShape, err)
+	}
+}
+
+// r53InvalidInput refuses a request Route53 cannot read (a body read
+// error, malformed XML) or one missing a required field: 400
+// InvalidInput, the code Route53's API reference lists for these calls.
+func r53InvalidInput(w http.ResponseWriter, msg string) {
+	awsproto.WriteServiceError(w, r53ErrorShape, http.StatusBadRequest, "InvalidInput", msg)
+}
+
+// r53RecordKey identifies a record set within a zone.
+type r53RecordKey struct{ name, typ, setID string }
+
+// r53FQDN is a record name with the trailing dot Route53 stores it
+// under. terraform-provider-aws sends the name with or without it, as
+// the HCL has it; without normalising, a later DELETE in the other
+// shape misses the record and DeleteHostedZone refuses the zone.
+func r53FQDN(name string) string {
+	if name != "" && !strings.HasSuffix(name, ".") {
+		return name + "."
+	}
+	return name
+}
+
+// r53ExistenceError checks one change against the zone as the batch's
+// earlier changes leave it (batch maps a key to whether it exists after
+// them) and returns Route53's message refusing a CREATE of an existing
+// record set or a DELETE of a missing one, else "". The provider takes
+// a DELETE's "not found" as the record already gone.
+func (app *Application) r53ExistenceError(account, zoneID string, ch r53Change, batch map[r53RecordKey]bool) (string, error) {
+	rs := ch.ResourceRecordSet
+	key := r53RecordKey{r53FQDN(rs.Name), rs.Type, rs.SetIdentifier}
+	exists, seen := batch[key]
+	if !seen {
+		_, err := app.repo.GetRecordSet(account, zoneID, key.name, key.typ, key.setID)
+		if err != nil && !errors.Is(err, models.ErrNotFound) {
+			return "", err
+		}
+		exists = err == nil
+	}
+	batch[key] = ch.Action != "DELETE"
+	switch {
+	case ch.Action == "CREATE" && exists:
+		return fmt.Sprintf("Tried to create resource record set [name='%s', type='%s'] but it already exists", key.name, key.typ), nil
+	case ch.Action == "DELETE" && !exists:
+		return fmt.Sprintf("Tried to delete resource record set [name='%s', type='%s'] but it was not found", key.name, key.typ), nil
+	}
+	return "", nil
+}
+
 // r53InvalidChangeBatch rejects a change batch with the 400
 // InvalidChangeBatch Route53 answers.
 func r53InvalidChangeBatch(w http.ResponseWriter, msg string) {
 	awsproto.WriteServiceError(w, r53ErrorShape, http.StatusBadRequest, "InvalidChangeBatch", msg)
-}
-
-// r53WriteTagError writes a tag call's failure, NoSuchHostedZone for a
-// missing zone as Route53 does.
-func r53WriteTagError(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, models.ErrNotFound) {
-		awsproto.WriteServiceError(w, r53ErrorShape, http.StatusNotFound,
-			"NoSuchHostedZone", fmt.Sprintf("No hosted zone found with ID: %s", chi.URLParam(r, "resourceID")))
-		return
-	}
-	awsproto.WriteAWSError(w, r53ErrorShape, err)
 }
 
 // r53ListTagsForResource is aws_route53_zone's tag read.
@@ -608,7 +673,7 @@ func (app *Application) r53ListTagsForResource(w http.ResponseWriter, r *http.Re
 	}
 	tags, err := app.repo.ResourceTags(account, repository.TagsRoute53Zone, arn)
 	if err != nil {
-		r53WriteTagError(w, r, err)
+		r53WriteError(w, err, r53NoSuchHostedZone, r53Code{})
 		return
 	}
 	var out r53ListTagsForResourceResponse
@@ -647,7 +712,7 @@ func (app *Application) r53ChangeTagsForResource(w http.ResponseWriter, r *http.
 	}
 	var in r53ChangeTagsForResourceRequest
 	if err := xml.NewDecoder(r.Body).Decode(&in); err != nil {
-		awsproto.WriteAWSError(w, r53ErrorShape, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		r53InvalidInput(w, "could not parse the request XML")
 		return
 	}
 	add := make(map[string]string, len(in.AddTags))
@@ -655,7 +720,7 @@ func (app *Application) r53ChangeTagsForResource(w http.ResponseWriter, r *http.
 		add[t.Key] = t.Value
 	}
 	if err := app.repo.ChangeResourceTags(account, repository.TagsRoute53Zone, arn, add, in.RemoveTagKeys); err != nil {
-		r53WriteTagError(w, r, err)
+		r53WriteError(w, err, r53NoSuchHostedZone, r53Code{})
 		return
 	}
 	awsproto.WriteXMLResponse(w, http.StatusOK, &struct {

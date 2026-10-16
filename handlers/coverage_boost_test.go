@@ -481,7 +481,7 @@ func TestCoverage_Route53ErrorPaths(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone",
 		`<CreateHostedZoneRequest></CreateHostedZoneRequest>`)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "CreateHostedZone empty")
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "CreateHostedZone empty")
 	resp, _ = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone/Zmissing", "")
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "GetHostedZone missing")
 	resp, _ = r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/Zmissing/rrset/",

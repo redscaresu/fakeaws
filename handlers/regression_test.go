@@ -387,8 +387,9 @@ func TestRegressionHostedZoneDeleteRefusedIfNonEmpty(t *testing.T) {
 		</ResourceRecordSet></Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`)
 
 	// Delete must reject.
-	resp, _ = r53Post(http.MethodDelete, "/route53/2013-04-01/hostedzone/"+zoneID, "")
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "non-empty zone delete")
+	resp, body = r53Post(http.MethodDelete, "/route53/2013-04-01/hostedzone/"+zoneID, "")
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "non-empty zone delete")
+	assert.Contains(t, string(body), "<Code>HostedZoneNotEmpty</Code>", "non-empty zone delete")
 }
 
 // 12. Tombstone semantics on parent delete.

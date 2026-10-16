@@ -110,6 +110,16 @@ func TestIAM_UpdateRoleDescription(t *testing.T) {
 
 	resp, body = iamCall(t, srv, "UpdateRoleDescription", url.Values{"RoleName": {"missing"}, "Description": {"x"}})
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "UpdateRoleDescription missing role: body=%s", body)
+
+	resp, body = iamCall(t, srv, "UpdateRoleDescription", url.Values{"Description": {"x"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "UpdateRoleDescription without RoleName: body=%s", body)
+	assert.Contains(t, string(body), "<Code>ValidationError</Code>", "UpdateRoleDescription without RoleName")
+
+	resp, body = iamCall(t, srv, "UpdateRoleDescription", url.Values{"RoleName": {"described"}, "Description": {strings.Repeat("é", 1000)}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "UpdateRoleDescription at 1000 characters: body=%s", body)
+	resp, body = iamCall(t, srv, "UpdateRoleDescription", url.Values{"RoleName": {"described"}, "Description": {strings.Repeat("d", 1001)}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "UpdateRoleDescription over 1000 characters: body=%s", body)
+	assert.Contains(t, string(body), "<Code>ValidationError</Code>", "UpdateRoleDescription over 1000 characters")
 }
 
 func TestIAM_CreateRoleMissingNameIsValidationError(t *testing.T) {

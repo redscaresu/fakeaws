@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -469,17 +470,30 @@ func (app *Application) iamUpdateRole(w http.ResponseWriter, account string, req
 	awsproto.WriteQueryRPCResponse(w, "UpdateRole", nil)
 }
 
+// iamMaxRoleDescription is the longest role description IAM accepts.
+const iamMaxRoleDescription = 1000
+
 // iamUpdateRoleDescription sets the role's description to the
 // Description sent, an empty one included, and answers the updated
 // role as IAM does; aws_iam_role sends it on a description change.
 func (app *Application) iamUpdateRoleDescription(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
 	name := req.Params.Get("RoleName")
+	if name == "" {
+		iamWriteError(w, iamValidationError("RoleName is required."), iamEntity{})
+		return
+	}
+	description := req.Params.Get("Description")
+	if utf8.RuneCountInString(description) > iamMaxRoleDescription {
+		iamWriteError(w, iamValidationError(fmt.Sprintf(
+			"Value at 'description' failed to satisfy constraint: Member must have length less than or equal to %d", iamMaxRoleDescription)), iamEntity{})
+		return
+	}
 	role, err := app.repo.GetRole(account, name)
 	if err != nil {
 		iamWriteError(w, err, iamNamed("role", name))
 		return
 	}
-	role.Description = req.Params.Get("Description")
+	role.Description = description
 	if err := app.repo.UpdateRole(account, role); err != nil {
 		iamWriteError(w, err, iamNamed("role", name))
 		return

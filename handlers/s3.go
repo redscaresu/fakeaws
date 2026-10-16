@@ -164,7 +164,7 @@ func (app *Application) s3GetBucketOrListObjects(w http.ResponseWriter, r *http.
 	}
 	bucket := chi.URLParam(r, "bucket")
 	if _, err := app.repo.GetBucket(account, bucket); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		s3WriteBucketError(w, err)
 		return
 	}
 	q := r.URL.Query()
@@ -292,7 +292,7 @@ func (app *Application) s3PutVersioning(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if err := app.repo.PutBucketConfig(account, bucket, repository.S3ConfigVersioning, v); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		s3WriteBucketError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -321,11 +321,24 @@ var s3NoSuchConfig = map[string]string{
 }
 
 // s3WriteConfigError writes a config read's failure, the kind's
-// s3NoSuchConfig code when the bucket has none of it.
+// s3NoSuchConfig code when the bucket has none of it. Every config read
+// passes s3GetBucketOrListObjects' bucket check first, which answers
+// NoSuchBucket, so not-found here is the config.
 func s3WriteConfigError(w http.ResponseWriter, kind string, err error) {
 	if code, ok := s3NoSuchConfig[kind]; ok && errors.Is(err, models.ErrNotFound) {
 		awsproto.WriteServiceError(w, awsproto.ShapeXML, http.StatusNotFound,
 			code, fmt.Sprintf("The bucket has no %s configuration", kind))
+		return
+	}
+	awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+}
+
+// s3WriteBucketError writes a failure where not-found can only mean
+// the bucket: 404 NoSuchBucket, as S3 answers.
+func s3WriteBucketError(w http.ResponseWriter, err error) {
+	if errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeXML, http.StatusNotFound,
+			"NoSuchBucket", "The specified bucket does not exist")
 		return
 	}
 	awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
@@ -350,7 +363,7 @@ func (app *Application) s3PutPolicy(w http.ResponseWriter, r *http.Request, acco
 		return
 	}
 	if err := app.repo.PutBucketConfig(account, bucket, repository.S3ConfigPolicy, json.RawMessage(body)); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		s3WriteBucketError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -412,7 +425,7 @@ func (app *Application) s3PutGenericConfig(w http.ResponseWriter, r *http.Reques
 	// canonical form; for fidelity at v1 we round-trip what the caller
 	// sent.
 	if err := app.repo.PutBucketConfig(account, bucket, kind, string(body)); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		s3WriteBucketError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -421,7 +434,7 @@ func (app *Application) s3PutGenericConfig(w http.ResponseWriter, r *http.Reques
 func (app *Application) s3GetLocation(w http.ResponseWriter, account, bucket string) {
 	b, err := app.repo.GetBucket(account, bucket)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		s3WriteBucketError(w, err)
 		return
 	}
 	type loc struct {
@@ -453,7 +466,7 @@ func (app *Application) s3PutObject(w http.ResponseWriter, r *http.Request) {
 	}
 	bucket := chi.URLParam(r, "bucket")
 	if _, err := app.repo.GetBucket(account, bucket); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		s3WriteBucketError(w, err)
 		return
 	}
 	body, _ := io.ReadAll(r.Body)
