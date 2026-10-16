@@ -57,6 +57,8 @@ func (app *Application) handleIAM(w http.ResponseWriter, r *http.Request) {
 		app.iamListRoles(w, account, req)
 	case "UpdateRole":
 		app.iamUpdateRole(w, account, req)
+	case "UpdateRoleDescription":
+		app.iamUpdateRoleDescription(w, account, req)
 	case "DeleteRole":
 		app.iamDeleteRole(w, account, req)
 
@@ -465,6 +467,24 @@ func (app *Application) iamUpdateRole(w http.ResponseWriter, account string, req
 		return
 	}
 	awsproto.WriteQueryRPCResponse(w, "UpdateRole", nil)
+}
+
+// iamUpdateRoleDescription sets the role's description to the
+// Description sent, an empty one included, and answers the updated
+// role as IAM does; aws_iam_role sends it on a description change.
+func (app *Application) iamUpdateRoleDescription(w http.ResponseWriter, account string, req awsproto.QueryRPCRequest) {
+	name := req.Params.Get("RoleName")
+	role, err := app.repo.GetRole(account, name)
+	if err != nil {
+		iamWriteError(w, err, iamNamed("role", name))
+		return
+	}
+	role.Description = req.Params.Get("Description")
+	if err := app.repo.UpdateRole(account, role); err != nil {
+		iamWriteError(w, err, iamNamed("role", name))
+		return
+	}
+	awsproto.WriteQueryRPCResponse(w, "UpdateRoleDescription", &iamRoleResult{Role: roleToXML(role)})
 }
 
 // iamDeleteRole answers DeleteConflict while a managed policy, an

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (the last known-red examples pass, 2026-10-16)
+- **Route53 errors are wrapped in `<ErrorResponse><Error>`**, as Route53 sends them; the S3 shape's bare `<Error>` reached the provider as `UnknownError` for every Route53 error code. A change batch fakeaws refuses (apex CNAME, unknown action, missing name or type) answers 400 `InvalidChangeBatch`, not 409 `ConflictException`. `misconfigured/route53_apex_cname` passes.
+- **IAM `UpdateRoleDescription`** sets the role's description (an empty one clears it) and answers the role; it was a 404, so changing `aws_iam_role.description` failed. `updates/update_iam_role_description` passes.
+- **S3 answers each unset bucket config's own 404 code**: `NoSuchBucketPolicy`, `ServerSideEncryptionConfigurationNotFoundError`, `NoSuchPublicAccessBlockConfiguration`, `OwnershipControlsNotFoundError` and `NoSuchTagSet` (`s3NoSuchConfig` in `handlers/s3.go`), where it answered `ResourceNotFoundException`, which `aws_s3_bucket`'s read fails on. `working/s3_bucket` and `updates/update_s3_bucket_versioning` pass.
+- `working/eks_cluster` and `misconfigured/eks_node_group_subnet_outside_cluster` put one argument per line (HCL rejects `;`) and pass. `knownRed` is empty.
+
 ### Added (the loader epic: POST /mock/load, 2026-10-13)
 `POST /mock/load` replaces every row with an ADR-0041 recorded read, and the models widened to the real response shape so it answers as prod did. Fourteen contracts pin it (`mock-load-*`, `restore-refuses-other-schema-version`, `ssm-public-parameter-one-predicate`, `iam-role-inline-policies-stored`, `ec2-sg-rule-ids-stable`, `ec2-volume-removed-on-terminate`; AGENTS.md lists them). One entry per merged PR; the `CRITICAL[...]` tags name the contract that now pins each entry's behaviour, and #94 added every tag and `TestContract_` rename:
 - **#74** A parameter under `/aws/service/` is public everywhere, through `repository.IsPublicSSMParameter`, and in the repository's ARN match (`ssmRefArgs`, `ssmRefMatch`) through `IsPublicSSMParameter` in Go, while `DeleteSSMParameter` and `PatchSSMParameterTags` use the SQL clause `ssmAccountOwned`; both read the one prefix constant (`CRITICAL[ssm-public-parameter-one-predicate]`).

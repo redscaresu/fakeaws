@@ -37,6 +37,12 @@ import (
 // must validate before any apply. Apex-CNAME rejection (S47-T0
 // pitfall) fires here.
 
+// r53ErrorShape is Route53's error envelope: the wrapped
+// <ErrorResponse><Error><Code> the Query-RPC services use, not S3's
+// bare <Error>. The SDK reads Route53 errors as wrapped, so the bare
+// shape reached the provider as "UnknownError".
+const r53ErrorShape = awsproto.ShapeQueryRPC
+
 func (app *Application) registerRoute53Routes(r chi.Router) {
 	r.Route("/route53/2013-04-01", func(r chi.Router) {
 		r.Get("/hostedzone", app.r53ListHostedZones)
@@ -143,22 +149,22 @@ func r53ZoneToXML(z *repository.Route53HostedZone) r53HostedZoneXML {
 }
 
 func (app *Application) r53CreateHostedZone(w http.ResponseWriter, r *http.Request) {
-	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	account, ok := app.readAccount(w, r53ErrorShape)
 	if !ok {
 		return
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		awsproto.WriteAWSError(w, r53ErrorShape, fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
 	var in r53CreateHostedZoneRequest
 	if err := xml.Unmarshal(body, &in); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		awsproto.WriteAWSError(w, r53ErrorShape, fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
 	if in.Name == "" {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML,
+		awsproto.WriteAWSError(w, r53ErrorShape,
 			fmt.Errorf("Name required: %w", models.ErrConflict))
 		return
 	}
@@ -173,7 +179,7 @@ func (app *Application) r53CreateHostedZone(w http.ResponseWriter, r *http.Reque
 		z.Private = in.HostedZoneConfig.PrivateZone
 	}
 	if err := app.repo.CreateHostedZone(account, z); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		awsproto.WriteAWSError(w, r53ErrorShape, err)
 		return
 	}
 	change := &repository.Route53Change{
@@ -189,14 +195,14 @@ func (app *Application) r53CreateHostedZone(w http.ResponseWriter, r *http.Reque
 }
 
 func (app *Application) r53GetHostedZone(w http.ResponseWriter, r *http.Request) {
-	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	account, ok := app.readAccount(w, r53ErrorShape)
 	if !ok {
 		return
 	}
 	zoneID := strings.TrimPrefix(chi.URLParam(r, "id"), "/hostedzone/")
 	z, err := app.repo.GetHostedZone(account, zoneID)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		awsproto.WriteAWSError(w, r53ErrorShape, err)
 		return
 	}
 	awsproto.WriteXMLResponse(w, http.StatusOK, &r53GetHostedZoneResponse{
@@ -206,13 +212,13 @@ func (app *Application) r53GetHostedZone(w http.ResponseWriter, r *http.Request)
 }
 
 func (app *Application) r53ListHostedZones(w http.ResponseWriter, r *http.Request) {
-	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	account, ok := app.readAccount(w, r53ErrorShape)
 	if !ok {
 		return
 	}
 	zones, err := app.repo.ListHostedZones(account)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		awsproto.WriteAWSError(w, r53ErrorShape, err)
 		return
 	}
 	out := r53ListHostedZonesResponse{}
@@ -223,13 +229,13 @@ func (app *Application) r53ListHostedZones(w http.ResponseWriter, r *http.Reques
 }
 
 func (app *Application) r53DeleteHostedZone(w http.ResponseWriter, r *http.Request) {
-	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	account, ok := app.readAccount(w, r53ErrorShape)
 	if !ok {
 		return
 	}
 	zoneID := strings.TrimPrefix(chi.URLParam(r, "id"), "/hostedzone/")
 	if err := app.repo.DeleteHostedZone(account, zoneID); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		awsproto.WriteAWSError(w, r53ErrorShape, err)
 		return
 	}
 	change := &repository.Route53Change{
@@ -281,7 +287,7 @@ type r53AliasTarget struct {
 }
 
 func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *http.Request) {
-	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	account, ok := app.readAccount(w, r53ErrorShape)
 	if !ok {
 		return
 	}
@@ -289,18 +295,18 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 
 	z, err := app.repo.GetHostedZone(account, zoneID)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		awsproto.WriteAWSError(w, r53ErrorShape, err)
 		return
 	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		awsproto.WriteAWSError(w, r53ErrorShape, fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
 	var in r53ChangeBatchRequest
 	if err := xml.Unmarshal(body, &in); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		awsproto.WriteAWSError(w, r53ErrorShape, fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
 
@@ -311,19 +317,15 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 		switch ch.Action {
 		case "CREATE", "UPSERT", "DELETE":
 		default:
-			awsproto.WriteAWSError(w, awsproto.ShapeXML,
-				fmt.Errorf("InvalidChangeBatch: unknown Action %q at index %d: %w", ch.Action, i, models.ErrConflict))
+			r53InvalidChangeBatch(w, fmt.Sprintf("unknown Action %q at index %d", ch.Action, i))
 			return
 		}
 		if ch.ResourceRecordSet.Type == "CNAME" && r53IsApex(ch.ResourceRecordSet.Name, z.Name) {
-			awsproto.WriteAWSError(w, awsproto.ShapeXML,
-				fmt.Errorf("InvalidChangeBatch: apex CNAME forbidden on %q (use ALIAS): %w",
-					z.Name, models.ErrConflict))
+			r53InvalidChangeBatch(w, fmt.Sprintf("apex CNAME forbidden on %q (use ALIAS)", z.Name))
 			return
 		}
 		if ch.ResourceRecordSet.Name == "" || ch.ResourceRecordSet.Type == "" {
-			awsproto.WriteAWSError(w, awsproto.ShapeXML,
-				fmt.Errorf("InvalidChangeBatch: Name and Type required at index %d: %w", i, models.ErrConflict))
+			r53InvalidChangeBatch(w, fmt.Sprintf("Name and Type required at index %d", i))
 			return
 		}
 	}
@@ -360,7 +362,7 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 				ZoneID: zoneID, Name: normalisedName, Type: rs.Type, TTL: rs.TTL,
 				Records: records, AliasTarget: alias, SetIdentifier: rs.SetIdentifier,
 			}); err != nil {
-				awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+				awsproto.WriteAWSError(w, r53ErrorShape, err)
 				return
 			}
 		case "DELETE":
@@ -391,14 +393,14 @@ func (app *Application) r53ChangeResourceRecordSets(w http.ResponseWriter, r *ht
 // never converges. Locked in by
 // TestContract_route53_records_sorted_lexicographically (S96 fix).
 func (app *Application) r53ListResourceRecordSets(w http.ResponseWriter, r *http.Request) {
-	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	account, ok := app.readAccount(w, r53ErrorShape)
 	if !ok {
 		return
 	}
 	zoneID := strings.TrimPrefix(chi.URLParam(r, "id"), "/hostedzone/")
 	rsets, err := app.repo.ListRecordSets(account, zoneID)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		awsproto.WriteAWSError(w, r53ErrorShape, err)
 		return
 	}
 
@@ -507,14 +509,14 @@ func r53NormaliseName(name string) string {
 }
 
 func (app *Application) r53GetChange(w http.ResponseWriter, r *http.Request) {
-	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	account, ok := app.readAccount(w, r53ErrorShape)
 	if !ok {
 		return
 	}
 	id := strings.TrimPrefix(chi.URLParam(r, "id"), "/change/")
 	c, err := app.repo.GetChange(account, id)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		awsproto.WriteAWSError(w, r53ErrorShape, err)
 		return
 	}
 	awsproto.WriteXMLResponse(w, http.StatusOK, &struct {
@@ -570,27 +572,33 @@ type r53ChangeTagsForResourceRequest struct {
 func r53TagTarget(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if rt := chi.URLParam(r, "resourceType"); rt != "hostedzone" {
 		markClass(w, classFilterRefused)
-		awsproto.WriteServiceError(w, awsproto.ShapeXML, http.StatusBadRequest,
+		awsproto.WriteServiceError(w, r53ErrorShape, http.StatusBadRequest,
 			"InvalidInput", fmt.Sprintf("fakeaws does not tag Route53 resource type %q", rt))
 		return "", false
 	}
 	return awsproto.BuildRoute53HostedZoneARN(chi.URLParam(r, "resourceID")), true
 }
 
+// r53InvalidChangeBatch rejects a change batch with the 400
+// InvalidChangeBatch Route53 answers.
+func r53InvalidChangeBatch(w http.ResponseWriter, msg string) {
+	awsproto.WriteServiceError(w, r53ErrorShape, http.StatusBadRequest, "InvalidChangeBatch", msg)
+}
+
 // r53WriteTagError writes a tag call's failure, NoSuchHostedZone for a
 // missing zone as Route53 does.
 func r53WriteTagError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, models.ErrNotFound) {
-		awsproto.WriteServiceError(w, awsproto.ShapeXML, http.StatusNotFound,
+		awsproto.WriteServiceError(w, r53ErrorShape, http.StatusNotFound,
 			"NoSuchHostedZone", fmt.Sprintf("No hosted zone found with ID: %s", chi.URLParam(r, "resourceID")))
 		return
 	}
-	awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+	awsproto.WriteAWSError(w, r53ErrorShape, err)
 }
 
 // r53ListTagsForResource is aws_route53_zone's tag read.
 func (app *Application) r53ListTagsForResource(w http.ResponseWriter, r *http.Request) {
-	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	account, ok := app.readAccount(w, r53ErrorShape)
 	if !ok {
 		return
 	}
@@ -629,7 +637,7 @@ func r53IsApex(recordName, zoneName string) bool {
 // r53ChangeTagsForResource adds and removes a zone's tags in one call;
 // aws_route53_zone tags this way at create as well as on update.
 func (app *Application) r53ChangeTagsForResource(w http.ResponseWriter, r *http.Request) {
-	account, ok := app.readAccount(w, awsproto.ShapeXML)
+	account, ok := app.readAccount(w, r53ErrorShape)
 	if !ok {
 		return
 	}
@@ -639,7 +647,7 @@ func (app *Application) r53ChangeTagsForResource(w http.ResponseWriter, r *http.
 	}
 	var in r53ChangeTagsForResourceRequest
 	if err := xml.NewDecoder(r.Body).Decode(&in); err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, fmt.Errorf("%w: %v", models.ErrConflict, err))
+		awsproto.WriteAWSError(w, r53ErrorShape, fmt.Errorf("%w: %v", models.ErrConflict, err))
 		return
 	}
 	add := make(map[string]string, len(in.AddTags))

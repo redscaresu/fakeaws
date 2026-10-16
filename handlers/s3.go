@@ -310,10 +310,31 @@ func (app *Application) s3PutEncryption(w http.ResponseWriter, r *http.Request, 
 	app.s3PutGenericConfig(w, r, account, bucket, repository.S3ConfigEncryption)
 }
 
+// s3NoSuchConfig is the 404 code S3 answers for a bucket with no
+// configuration of a kind; aws_s3_bucket's read takes each as "none set".
+var s3NoSuchConfig = map[string]string{
+	repository.S3ConfigPolicy:            "NoSuchBucketPolicy",
+	repository.S3ConfigEncryption:        "ServerSideEncryptionConfigurationNotFoundError",
+	repository.S3ConfigPublicAccessBlock: "NoSuchPublicAccessBlockConfiguration",
+	repository.S3ConfigOwnershipControls: "OwnershipControlsNotFoundError",
+	repository.S3ConfigTagging:           "NoSuchTagSet",
+}
+
+// s3WriteConfigError writes a config read's failure, the kind's
+// s3NoSuchConfig code when the bucket has none of it.
+func s3WriteConfigError(w http.ResponseWriter, kind string, err error) {
+	if code, ok := s3NoSuchConfig[kind]; ok && errors.Is(err, models.ErrNotFound) {
+		awsproto.WriteServiceError(w, awsproto.ShapeXML, http.StatusNotFound,
+			code, fmt.Sprintf("The bucket has no %s configuration", kind))
+		return
+	}
+	awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+}
+
 func (app *Application) s3GetPolicy(w http.ResponseWriter, account, bucket string) {
 	raw, err := app.repo.GetBucketConfig(account, bucket, repository.S3ConfigPolicy)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		s3WriteConfigError(w, repository.S3ConfigPolicy, err)
 		return
 	}
 	// Bucket policy is a JSON document, not XML; emit application/json.
@@ -364,7 +385,7 @@ func (app *Application) s3PutTagging(w http.ResponseWriter, r *http.Request, acc
 func (app *Application) s3GetGenericConfig(w http.ResponseWriter, account, bucket, kind, rootElement string) {
 	raw, err := app.repo.GetBucketConfig(account, bucket, kind)
 	if err != nil {
-		awsproto.WriteAWSError(w, awsproto.ShapeXML, err)
+		s3WriteConfigError(w, kind, err)
 		return
 	}
 	// We stored the body as a JSON-encoded string (the original XML).

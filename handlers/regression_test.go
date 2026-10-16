@@ -561,7 +561,7 @@ func TestRegressionTransactionalBatchedChanges(t *testing.T) {
 		</ResourceRecordSet></Change>
 	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
 	resp, _ := r53Post(http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", mixed)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "mixed batch")
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "mixed batch")
 
 	// Verify NEITHER change applied.
 	_, body = r53Post(http.MethodGet, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset", "")

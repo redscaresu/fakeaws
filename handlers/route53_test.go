@@ -71,8 +71,12 @@ func TestRoute53_ChangeBatchTransactional(t *testing.T) {
 			<ResourceRecords><ResourceRecord><Value>target.example.net</Value></ResourceRecord></ResourceRecords>
 		</ResourceRecordSet></Change>
 	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
-	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", apex)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "apex CNAME")
+	resp, body := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", apex)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "apex CNAME")
+	// The SDK reads Route53 errors wrapped in <ErrorResponse><Error>;
+	// a bare <Error> reaches the provider as UnknownError.
+	assert.Contains(t, string(body), "<ErrorResponse>", "apex CNAME error envelope: %s", body)
+	assert.Contains(t, string(body), "<Code>InvalidChangeBatch</Code>", "apex CNAME error code: %s", body)
 
 	// CNAME on a child works.
 	good := `<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>
@@ -145,7 +149,7 @@ func TestRoute53_BatchAtomicityOnInvalidChange(t *testing.T) {
 		</ResourceRecordSet></Change>
 	</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
 	resp, _ := r53Request(t, srv, http.MethodPost, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset/", mixed)
-	assert.Equal(t, http.StatusConflict, resp.StatusCode, "mixed batch")
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "mixed batch")
 	// Verify NEITHER change applied.
 	_, body = r53Request(t, srv, http.MethodGet, "/route53/2013-04-01/hostedzone/"+zoneID+"/rrset", "")
 	assert.NotContains(t, string(body), "www.example.com.", "transactional violation: www record applied despite batch failure: %s", body)

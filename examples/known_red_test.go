@@ -21,18 +21,7 @@ type knownRedEntry struct {
 // knownRed lists the examples the provider-smoke job shows red, keyed
 // "<tree>/<dir>". An entry that starts passing, or fails any other
 // way, fails the harness: fix the example or update the entry.
-var knownRed = map[string]knownRedEntry{
-	// main.tf separates arguments with ';', which HCL rejects.
-	"working/eks_cluster": {stage: "init", fragment: "Invalid character", owner: "none: follow-up"},
-	"working/s3_bucket":   {stage: "apply", fragment: "GetBucketPolicy", owner: "none: follow-up"},
-
-	"misconfigured/eks_node_group_subnet_outside_cluster": {stage: "init", fragment: "Invalid character", owner: "none: follow-up"},
-	// Route53 answers 409 UnknownError, not InvalidChangeBatch.
-	"misconfigured/route53_apex_cname": {stage: "apply", fragment: "api error UnknownError", owner: "none: follow-up"},
-
-	"updates/update_iam_role_description": {stage: "apply v2", fragment: "UpdateRoleDescription", owner: "none: follow-up"},
-	"updates/update_s3_bucket_versioning": {stage: "apply v1", fragment: "GetBucketPolicy", owner: "none: follow-up"},
-}
+var knownRed = map[string]knownRedEntry{}
 
 // checkKnownRed judges one example's outcome (failure == nil means it
 // passed) against known. nil means the outcome is acceptable.
