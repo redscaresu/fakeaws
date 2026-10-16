@@ -5,7 +5,7 @@ package handlers
 // its recorded sgr- id. A group's permissions are its rules': the
 // rendering diff refuses a group whose recorded ipPermissions are not
 // the aggregate of its recorded rules. A loaded VPC's default group is
-// the recorded one: repository.BackfillDefaultGroups mints none on a
+// the recorded one: repository.BackfillVPCDefaults mints none on a
 // loaded database.
 
 import (

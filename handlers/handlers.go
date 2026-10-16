@@ -156,8 +156,8 @@ func (app *Application) boot(opts Options) error {
 	if err != nil {
 		return err
 	}
-	if err := app.repo.BackfillDefaultGroups(newDefaultGroup); err != nil {
-		return fmt.Errorf("backfill default security groups: %w", err)
+	if err := app.repo.BackfillVPCDefaults(vpcDefaults); err != nil {
+		return fmt.Errorf("backfill VPC default security groups and main route tables: %w", err)
 	}
 	loaded, err := app.repo.Loaded()
 	if err != nil {
