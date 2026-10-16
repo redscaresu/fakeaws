@@ -85,6 +85,43 @@ func TestIAM_CreateGetListUpdateDeleteRole(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "after delete, GetRole body=%s", body)
 }
 
+// TestIAM_UpdateRoleDescription pins the call aws_iam_role sends on a
+// description change: it sets the description, an empty one clears it.
+func TestIAM_UpdateRoleDescription(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	resp, body := iamCall(t, srv, "CreateRole", url.Values{
+		"RoleName":                 {"described"},
+		"AssumeRolePolicyDocument": {`{"Version":"2012-10-17","Statement":[]}`},
+		"Description":              {"v1"},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateRole: body=%s", body)
+
+	resp, body = iamCall(t, srv, "UpdateRoleDescription", url.Values{"RoleName": {"described"}, "Description": {"v2"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "UpdateRoleDescription: body=%s", body)
+	assert.Contains(t, string(body), "<UpdateRoleDescriptionResult>", "UpdateRoleDescription body: %s", body)
+	assert.Contains(t, string(body), "<Description>v2</Description>", "UpdateRoleDescription body: %s", body)
+	_, body = iamCall(t, srv, "GetRole", url.Values{"RoleName": {"described"}})
+	assert.Contains(t, string(body), "<Description>v2</Description>", "GetRole after update: %s", body)
+
+	resp, body = iamCall(t, srv, "UpdateRoleDescription", url.Values{"RoleName": {"described"}, "Description": {""}})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "UpdateRoleDescription clear: body=%s", body)
+	_, body = iamCall(t, srv, "GetRole", url.Values{"RoleName": {"described"}})
+	assert.NotContains(t, string(body), "<Description>", "GetRole after clear: %s", body)
+
+	resp, body = iamCall(t, srv, "UpdateRoleDescription", url.Values{"RoleName": {"missing"}, "Description": {"x"}})
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "UpdateRoleDescription missing role: body=%s", body)
+
+	resp, body = iamCall(t, srv, "UpdateRoleDescription", url.Values{"Description": {"x"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "UpdateRoleDescription without RoleName: body=%s", body)
+	assert.Contains(t, string(body), "<Code>ValidationError</Code>", "UpdateRoleDescription without RoleName")
+
+	resp, body = iamCall(t, srv, "UpdateRoleDescription", url.Values{"RoleName": {"described"}, "Description": {strings.Repeat("é", 1000)}})
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "UpdateRoleDescription at 1000 characters: body=%s", body)
+	resp, body = iamCall(t, srv, "UpdateRoleDescription", url.Values{"RoleName": {"described"}, "Description": {strings.Repeat("d", 1001)}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "UpdateRoleDescription over 1000 characters: body=%s", body)
+	assert.Contains(t, string(body), "<Code>ValidationError</Code>", "UpdateRoleDescription over 1000 characters")
+}
+
 func TestIAM_CreateRoleMissingNameIsValidationError(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, body := iamCall(t, srv, "CreateRole", url.Values{})

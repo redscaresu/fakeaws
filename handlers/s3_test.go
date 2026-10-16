@@ -133,6 +133,47 @@ func TestS3_PolicyRoundTripJSON(t *testing.T) {
 	assert.Contains(t, string(body), `"Version":"2012-10-17"`, "GetPolicy body lost JSON: %s", body)
 }
 
+// TestS3_UnsetConfigAnswersItsNoSuchCode pins the 404 code S3 answers
+// for each config a bucket has none of; aws_s3_bucket's read takes
+// these as "none set" and fails on any other code.
+func TestS3_UnsetConfigAnswersItsNoSuchCode(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	_, _ = s3Do(t, srv, http.MethodPut, "/s3/unset/", "", "")
+	for query, code := range map[string]string{
+		"policy":            "NoSuchBucketPolicy",
+		"encryption":        "ServerSideEncryptionConfigurationNotFoundError",
+		"publicAccessBlock": "NoSuchPublicAccessBlockConfiguration",
+		"ownershipControls": "OwnershipControlsNotFoundError",
+		"tagging":           "NoSuchTagSet",
+	} {
+		resp, body := s3Do(t, srv, http.MethodGet, "/s3/unset/?"+query, "", "")
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, "GET ?%s body=%s", query, body)
+		assert.Contains(t, string(body), "<Code>"+code+"</Code>", "GET ?%s", query)
+	}
+}
+
+// TestS3_MissingBucketAnswersNoSuchBucket pins NoSuchBucket, not a
+// config kind's code or the generic ResourceNotFoundException, for a
+// bucket that does not exist.
+func TestS3_MissingBucketAnswersNoSuchBucket(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodGet, "/s3/nobucket/?policy", ""},
+		{http.MethodGet, "/s3/nobucket/?encryption", ""},
+		{http.MethodGet, "/s3/nobucket/?versioning", ""},
+		{http.MethodGet, "/s3/nobucket/?location", ""},
+		{http.MethodGet, "/s3/nobucket/", ""},
+		{http.MethodPut, "/s3/nobucket/?policy", `{"Version":"2012-10-17","Statement":[]}`},
+		{http.MethodPut, "/s3/nobucket/?versioning", `<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`},
+		{http.MethodPut, "/s3/nobucket/?tagging", `<Tagging/>`},
+		{http.MethodPut, "/s3/nobucket/key", "x"},
+	} {
+		resp, body := s3Do(t, srv, c.method, c.path, c.body, "")
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, "%s %s: %s", c.method, c.path, body)
+		assert.Contains(t, string(body), "<Code>NoSuchBucket</Code>", "%s %s", c.method, c.path)
+	}
+}
+
 func TestS3_PolicyRejectsInvalidJSON(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	_, _ = s3Do(t, srv, http.MethodPut, "/s3/p2/", "", "")
