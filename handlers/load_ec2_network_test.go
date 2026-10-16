@@ -306,8 +306,8 @@ func TestContract_mock_load_refuses_dangling_reference(t *testing.T) {
 }
 
 // TestLoadEC2Network_CreatedAfterLoadAnswerAsBefore: a VPC and subnet
-// created on a loaded database answer what they answered before loaders
-// existed, but for the loaded zone's id.
+// created on a loaded database answer what they answer on an unloaded
+// one, but for the loaded zone's id.
 func TestLoadEC2Network_CreatedAfterLoadAnswerAsBefore(t *testing.T) {
 	_, srv := newLoadApp(t, handlers.Options{DBPath: ":memory:"})
 	loadNet(t, srv, fixtureRecording(t)...)
@@ -335,7 +335,7 @@ func TestLoadEC2Network_CreatedAfterLoadAnswerAsBefore(t *testing.T) {
 		assert.Empty(t, ren, want.action)
 	}
 	assert.Equal(t, "true", vpcAttribute(t, srv, vpc, "enableDnsSupport"))
-	assert.Equal(t, "true", vpcAttribute(t, srv, vpc, "enableDnsHostnames"))
+	assert.Equal(t, "false", vpcAttribute(t, srv, vpc, "enableDnsHostnames"))
 }
 
 // TestLoadEC2Network_CurrentShapeLoads plants what a current answer

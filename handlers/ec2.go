@@ -754,8 +754,9 @@ func ec2RandID() string {
 }
 
 // newEC2VPC is a created VPC: not the default VPC, under placeholder
-// DHCP options, with its one CIDR block associated and both DNS
-// attributes true. AWS defaults enableDnsHostnames to false.
+// DHCP options, with its one CIDR block associated, enableDnsSupport
+// true and enableDnsHostnames false.
+// UNVERIFIED(aws-code): the DNS defaults from https://docs.aws.amazon.com/vpc/latest/userguide/AmazonDNS-concepts.html#vpc-dns-support; no recording
 func newEC2VPC(account, region, id, cidr string) *repository.EC2VPC {
 	return &repository.EC2VPC{
 		ID: id, CidrBlock: cidr, Region: region,
@@ -768,8 +769,7 @@ func newEC2VPC(account, region, id, cidr string) *repository.EC2VPC {
 		CidrBlockAssociations: []repository.EC2CidrBlockAssociation{
 			{AssociationID: "vpc-cidr-assoc-" + id, CidrBlock: cidr, State: "associated"},
 		},
-		EnableDNSSupport:   true,
-		EnableDNSHostnames: true,
+		EnableDNSSupport: true,
 	}
 }
 
