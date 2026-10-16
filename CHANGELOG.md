@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (ModifyVpcAttribute refuses what AWS refuses for the DNS attributes, 2026-10-16)
+- **`ModifyVpcAttribute` answers 400 `InvalidParameterValue`** to `EnableDnsHostnames` true on a VPC whose `enableDnsSupport` is false, and to both DNS attributes in one request, with AWS's messages; it accepted and stored both. The code and messages come from the ModifyVpcAttribute API reference, not a recording. `TestEC2_ModifyVpcAttribute_HostnamesNeedSupport` and `TestEC2_ModifyVpcAttribute_OneDNSAttributePerRequest` pin it.
+
 ### Changed (a created VPC answers AWS's DNS defaults, 2026-10-16)
 - **`CreateVpc` stores `enableDnsHostnames` false** (it stored true), and `enableDnsSupport` true as before, so `DescribeVpcAttribute` answers AWS's defaults for a non-default VPC. **The defaults are unverified**: they come from the VPC user guide, not a recording. `TestEC2_CreateVPC_DNSDefaults` pins it.
 

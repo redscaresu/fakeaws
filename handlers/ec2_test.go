@@ -123,6 +123,43 @@ func TestEC2_CreateVPC_DNSHostnamesRoundTrip(t *testing.T) {
 	assert.Equal(t, "true", vpcAttribute(t, srv, vpc, "enableDnsSupport"))
 }
 
+// TestEC2_ModifyVpcAttribute_HostnamesNeedSupport: as in AWS,
+// enableDnsHostnames true is refused on a VPC whose enableDnsSupport is
+// false, and stores nothing; with support true it is stored.
+// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ModifyVpcAttribute.html; no recording
+func TestEC2_ModifyVpcAttribute_HostnamesNeedSupport(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	vpc := extractEC2Tag(mustOK(t)(ec2Call(t, srv, netRegion, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})), "vpcId")
+	mustOK(t)(ec2Call(t, srv, netRegion, "ModifyVpcAttribute", url.Values{"VpcId": {vpc}, "EnableDnsSupport.Value": {"false"}}))
+
+	resp, body := ec2Call(t, srv, netRegion, "ModifyVpcAttribute", url.Values{"VpcId": {vpc}, "EnableDnsHostnames.Value": {"true"}})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"))
+	assert.Equal(t, "You can only enable DNS hostnames if you've enabled DNS support.", html.UnescapeString(extractEC2Tag(body, "Message")))
+	assert.Equal(t, "false", vpcAttribute(t, srv, vpc, "enableDnsHostnames"))
+
+	mustOK(t)(ec2Call(t, srv, netRegion, "ModifyVpcAttribute", url.Values{"VpcId": {vpc}, "EnableDnsSupport.Value": {"true"}}))
+	mustOK(t)(ec2Call(t, srv, netRegion, "ModifyVpcAttribute", url.Values{"VpcId": {vpc}, "EnableDnsHostnames.Value": {"true"}}))
+	assert.Equal(t, "true", vpcAttribute(t, srv, vpc, "enableDnsHostnames"))
+}
+
+// TestEC2_ModifyVpcAttribute_OneDNSAttributePerRequest: as in AWS,
+// both DNS attributes in one request are refused, and neither is
+// stored.
+// UNVERIFIED(aws-code): InvalidParameterValue from https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ModifyVpcAttribute.html; no recording
+func TestEC2_ModifyVpcAttribute_OneDNSAttributePerRequest(t *testing.T) {
+	srv := newTestServer(t, ":memory:")
+	vpc := extractEC2Tag(mustOK(t)(ec2Call(t, srv, netRegion, "CreateVpc", url.Values{"CidrBlock": {"10.0.0.0/16"}})), "vpcId")
+
+	resp, body := ec2Call(t, srv, netRegion, "ModifyVpcAttribute", url.Values{
+		"VpcId": {vpc}, "EnableDnsSupport.Value": {"true"}, "EnableDnsHostnames.Value": {"true"},
+	})
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+	assert.Equal(t, "InvalidParameterValue", extractEC2Tag(body, "Code"))
+	assert.Equal(t, "You cannot modify the DNS resolution and DNS hostnames attributes in the same request. Use separate requests for each attribute.", extractEC2Tag(body, "Message"))
+	assert.Equal(t, "false", vpcAttribute(t, srv, vpc, "enableDnsHostnames"))
+}
+
 func TestEC2_CreateVPC_MissingCidr(t *testing.T) {
 	srv := newTestServer(t, ":memory:")
 	resp, _ := ec2Call(t, srv, "us-east-1", "CreateVpc", nil)
