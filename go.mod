@@ -4,8 +4,8 @@ go 1.26.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.3
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.4
-	github.com/go-chi/chi/v5 v5.3.2
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.339.0
+	github.com/go-chi/chi/v5 v5.5.0
 	github.com/stretchr/testify v1.12.1
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.60.1
